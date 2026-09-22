@@ -266,7 +266,9 @@ def _env_i(name: str) -> Optional[int]:
 
 def load_config(config_file: str = "config.yaml", env_file: str = ".env", *,
                 symbol: str, hedge_venue: str) -> Config:
-    load_dotenv(env_file)
+    # The CLI-selected env file is authoritative. This matters when several
+    # market processes run from a shell that already exports another account.
+    load_dotenv(env_file, override=True)
     try:
         with open(config_file) as fh:
             raw = yaml.safe_load(fh) or {}

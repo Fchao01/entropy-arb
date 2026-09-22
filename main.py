@@ -4,8 +4,8 @@
     # collect minute data only — no strategy, no credentials needed
     python3 main.py --record-only --symbol SNDK --hedge entropy
 
-    # LIVE trading: real orders, real money (needs .env credentials)
-    python3 main.py --symbol SNDK --hedge lighter-rh
+    # LIVE trading: use a dedicated credential file for this process
+    python3 main.py --symbol SNDK --hedge entropy --env-file .env-sndk
 
 --symbol and --hedge are required on every start: the markets you trade are
 an explicit decision, not a config default. Add --cn for a Chinese-language
@@ -17,7 +17,7 @@ On a terminal the bot shows a live Rich dashboard (books, signal, positions,
 PnL, last executions) and writes log lines to logging.file; use
 --no-dashboard for plain console logs (nohup/systemd). Strategy lives in
 config.yaml, credentials in .env — see the README (English) /
-README.zh-CN.md (中文).
+README.zh-CN.md (中文). Use one credential file/account per live market process.
 """
 import argparse
 import asyncio
@@ -90,7 +90,7 @@ def main() -> None:
     p.add_argument("--config", default="config.yaml",
                    help="strategy config (default: config.yaml)")
     p.add_argument("--env-file", default=".env",
-                   help="credentials file (default: .env)")
+                   help="credentials file for this process (default: .env; use a separate file/account per live market)")
     p.add_argument("--record-only", action="store_true",
                    help="only collect minute data, run no strategy, send no "
                         "orders (needs no credentials)")
