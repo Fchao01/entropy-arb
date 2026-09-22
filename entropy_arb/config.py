@@ -33,7 +33,7 @@ HL_WS_URL = "wss://api.hyperliquid.xyz/ws"   # official ws — the only HL feed 
 
 # The primary leg is fixed to Lighter Robinhood. The other leg can be one of
 # these venues; ``entropy`` means Hyperliquid's io builder dex.
-HEDGE_VENUES = ("entropy", "lighter", "tradexyz")
+HEDGE_VENUES = ("entropy", "lighter", "tradexyz", "aster")
 
 
 @dataclass(frozen=True)
@@ -94,6 +94,8 @@ class VenueConf:
     # lighter
     lighter_profile: Optional[LighterProfile] = None
     lighter_creds: Optional[LighterCreds] = None
+    aster_api_key: Optional[str] = None
+    aster_api_secret: Optional[str] = None
 
 
 @dataclass
@@ -146,6 +148,8 @@ class Config:
                 return False
             if v.kind == "lighter" and not (v.lighter_creds
                                             and v.lighter_creds.complete):
+                return False
+            if v.kind == "aster" and not (v.aster_api_key and v.aster_api_secret):
                 return False
         return True
 
@@ -339,7 +343,7 @@ def load_config(config_file: str = "config.yaml", env_file: str = ".env", *,
                 (_env_s("HL_ACCOUNT_ADDRESS_XYZ") if hedge_venue == "tradexyz" else None)
                 or _env_s("HL_ACCOUNT_ADDRESS")),
         )
-    else:
+    elif hedge_venue == "lighter":
         hedge = VenueConf(
             key="hedge", kind="lighter",
             label="LIGHTER",
@@ -351,6 +355,15 @@ def load_config(config_file: str = "config.yaml", env_file: str = ".env", *,
             lighter_creds=LighterCreds(_env_i("LIGHTER_ACCOUNT_INDEX"),
                                        _env_i("LIGHTER_API_KEY_INDEX"),
                                        _env_s("LIGHTER_API_PRIVATE_KEY")),
+        )
+    else:
+        hedge = VenueConf(
+            key="hedge", kind="aster", label="ASTER", symbol=symbol,
+            fee_bps=float(_get(raw, "hedge", "taker_fee_bps", 0.0)),
+            cap_usd=float(_get(raw, "hedge", "max_position_usd", 1000.0)),
+            orders_per_min=int(_get(raw, "hedge", "max_orders_per_min", 120)),
+            aster_api_key=_env_s("ASTER_API_KEY"),
+            aster_api_secret=_env_s("ASTER_API_SECRET"),
         )
 
     return Config(
