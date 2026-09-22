@@ -13,6 +13,7 @@ hides that behind the same result shape the HL venue returns:
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import logging
 import math
@@ -210,12 +211,17 @@ class LighterVenue:
                 "live trading on Lighter needs the official SDK — "
                 "pip install -r requirements-live.txt "
                 "(git+https://github.com/elliottech/lighter-python.git)") from e
-        signer = SignerClient(
-            url=self.profile.api_url,
-            account_index=c.account_index,
-            api_private_keys={c.api_key_index: c.api_private_key},
-            chain_id=self.profile.chain_id,
-        )
+        signer_kwargs = {
+            "url": self.profile.api_url,
+            "account_index": c.account_index,
+            "api_private_keys": {c.api_key_index: c.api_private_key},
+        }
+        # lighter-python added explicit chain_id support after older SDK
+        # releases. Older clients infer it from the endpoint URL; passing the
+        # keyword to them raises before the account can be checked.
+        if "chain_id" in inspect.signature(SignerClient).parameters:
+            signer_kwargs["chain_id"] = self.profile.chain_id
+        signer = SignerClient(**signer_kwargs)
         err = signer.check_client()
         if err is not None:
             raise RuntimeError(f"[{self.name}] API key check failed: {err}")
