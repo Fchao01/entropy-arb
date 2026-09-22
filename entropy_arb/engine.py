@@ -1,9 +1,9 @@
-"""Two-venue arbitrage engine: Entropy vs one hedge venue.
+"""Two-venue arbitrage engine: fixed primary leg vs one hedge venue.
 
 The signal is a fixed band around a configured midline (config.yaml):
 
-    SELL entropy / BUY hedge  when executable premium >= midline + upper (+fees)
-    BUY entropy / SELL hedge  when executable premium <= midline - lower (+fees)
+    SELL primary / BUY hedge  when executable premium >= midline + upper (+fees)
+    BUY primary / SELL hedge  when executable premium <= midline - lower (+fees)
 
 Around the signal: per-direction persistence arming,
 per-venue inventory ladder + position caps, per-venue order budgets and
@@ -42,10 +42,16 @@ BALANCE_POLL_SEC = 30.0
 
 class Engine:
     def __init__(self, cfg: Config, record_only: bool = False) -> None:
+        # Python 3.9 requires a current loop when constructing Event objects;
+        # keep the engine usable from synchronous unit tests as well as run().
+        try:
+            asyncio.get_event_loop()
+        except RuntimeError:
+            asyncio.set_event_loop(asyncio.new_event_loop())
         self.cfg = cfg
         self.record_only = record_only
         self.session: Optional[aiohttp.ClientSession] = None
-        self.entropy = None
+        self.primary = None
         self.hedge = None
         self.venues: Dict[str, object] = {}
         self.recorder: Optional[MinuteRecorder] = None
@@ -68,8 +74,8 @@ class Engine:
         self._last_skiplog = 0.0
         self._poke_due: Optional[float] = None
         # per-direction persistence arming: direction key -> first-seen ts
-        self._armed: Dict[str, Optional[float]] = {"sell_entropy": None,
-                                                   "buy_entropy": None}
+        self._armed: Dict[str, Optional[float]] = {"sell_primary": None,
+                                                   "buy_primary": None}
         self._step = 1e-4
         self._min_base = 0.0
         self._min_notional = 10.0
@@ -138,10 +144,10 @@ class Engine:
 
     async def _run_inner(self) -> None:
         cfg = self.cfg
-        self.entropy = self._make_venue(cfg.entropy)
+        self.primary = self._make_venue(cfg.primary)
         self.hedge = self._make_venue(cfg.hedge)
-        self.venues = {"entropy": self.entropy, "hedge": self.hedge}
-        await asyncio.gather(self.entropy.load_market(), self.hedge.load_market())
+        self.venues = {"primary": self.primary, "hedge": self.hedge}
+        await asyncio.gather(self.primary.load_market(), self.hedge.load_market())
         self.markets_ready = True
 
         live = not self.record_only
@@ -152,26 +158,26 @@ class Engine:
                     "(see .env.example); use --record-only to run without "
                     "them / 实盘需要在 .env 中配置两个交易所的密钥，仅采集数据"
                     "请用 --record-only")
-            self.entropy.init_signer()
+            self.primary.init_signer()
             self.hedge.init_signer()
-            if self.hedge.kind == "hl":
-                self.entropy.share_nonces_with(self.hedge)
-        if (self.hedge.kind == "hl"
-                and self.entropy._query_address()
-                and self.entropy._query_address() == self.hedge._query_address()):
+            if self.primary.kind == "hl":
+                self.primary.share_nonces_with(self.hedge)
+        if (self.primary.kind == "hl" and self.hedge.kind == "hl"
+                and self.primary._query_address()
+                and self.primary._query_address() == self.hedge._query_address()):
             self.hedge.include_core_equity = False  # shared account: count once
 
-        self._step = 10 ** -min(self.entropy.size_decimals,
+        self._step = 10 ** -min(self.primary.size_decimals,
                                 self.hedge.size_decimals)
-        self._min_base = max(self.entropy.min_base, self.hedge.min_base,
+        self._min_base = max(self.primary.min_base, self.hedge.min_base,
                              self._step)
         self._min_notional = max(cfg.min_order_notional,
-                                 self.entropy.min_quote, self.hedge.min_quote)
-        log.info("pair ENTROPY(%s)-%s(%s): midline=%+.2fbps band=[-%.2f, +%.2f] "
+                                 self.primary.min_quote, self.hedge.min_quote)
+        log.info("pair %s(%s)-%s(%s): midline=%+.2fbps band=[-%.2f, +%.2f] "
                  "fees=%.2f+%.2f step=%g min_ntl=$%g",
-                 self.entropy.conf.symbol, self.hedge.name,
+                 self.primary.name, self.primary.conf.symbol, self.hedge.name,
                  self.hedge.conf.symbol, cfg.midline_bps, cfg.lower_bps,
-                 cfg.upper_bps, self.entropy.fee_bps, self.hedge.fee_bps,
+                 cfg.upper_bps, self.primary.fee_bps, self.hedge.fee_bps,
                  self._step, self._min_notional)
 
         if self.record_only:
@@ -190,7 +196,7 @@ class Engine:
         for v in self.venues.values():
             tasks += v.start_tasks(self.stop, self._update_evt.set, live)
         if cfg.recorder_enabled or self.record_only:
-            self.recorder = MinuteRecorder(cfg.recorder_csv, self.entropy.book,
+            self.recorder = MinuteRecorder(cfg.recorder_csv, self.primary.book,
                                            self.hedge.book, cfg.staleness_sec)
             tasks.append(asyncio.create_task(self.recorder.run(self.stop),
                                              name="recorder"))
@@ -249,9 +255,9 @@ class Engine:
     def _eff_threshold(self, buy, sell) -> float:
         """Net hurdle (bps, on top of fees) for the direction buy->sell.
 
-        selling entropy: executable premium must clear midline + upper;
-        buying entropy: the reverse premium must clear lower - midline."""
-        if sell.key == "entropy":
+        selling primary: executable premium must clear midline + upper;
+        buying primary: the reverse premium must clear lower - midline."""
+        if sell.key == "primary":
             base = self.cfg.midline_bps + self.cfg.upper_bps
         else:
             base = self.cfg.lower_bps - self.cfg.midline_bps
@@ -357,8 +363,8 @@ class Engine:
         (buy, sell, plan), or None."""
         cfg = self.cfg
         best = None
-        for buy, sell, dkey in ((self.hedge, self.entropy, "sell_entropy"),
-                                (self.entropy, self.hedge, "buy_entropy")):
+        for buy, sell, dkey in ((self.hedge, self.primary, "sell_primary"),
+                                (self.primary, self.hedge, "buy_primary")):
             if not (buy.book.is_fresh(cfg.staleness_sec)
                     and sell.book.is_fresh(cfg.staleness_sec)):
                 continue
@@ -416,7 +422,7 @@ class Engine:
             return False
         cfg = self.cfg
         inv_bps = self._inv_add_bps(buy, sell)
-        direction = "sell_entropy" if sell.key == "entropy" else "buy_entropy"
+        direction = "sell_primary" if sell.key == "primary" else "buy_primary"
         self.last_trade_ts = time.time()
         log.info("[ARB] %s: BUY %s %.6g @<=%.6g | SELL %s @>=%.6g | "
                  "take $%.0f of $%.0f | prem %.2fbps | exp $%.4f",
@@ -713,7 +719,7 @@ class Engine:
         return total - self._mtm_baseline
 
     def premium_bps(self) -> Optional[float]:
-        em, hm = self.entropy.book.mid(), self.hedge.book.mid()
+        em, hm = self.primary.book.mid(), self.hedge.book.mid()
         if not (em and hm):
             return None
         return (em / hm - 1.0) * 1e4

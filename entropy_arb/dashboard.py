@@ -77,8 +77,8 @@ _ZH = {
     "mid premium ": "中间价溢价 ",
     "   midline ": "   中枢 ",
     "   band ": "   区间 ",
-    "SELL entropy → buy {h}": "卖出 entropy → 买入 {h}",
-    "BUY entropy → sell {h}": "买入 entropy → 卖出 {h}",
+    "SELL primary → buy {h}": "卖出主腿 → 买入 {h}",
+    "BUY primary → sell {h}": "买入主腿 → 卖出 {h}",
     "direction": "方向",
     "exec prem bps": "可成交溢价 bps",
     "hurdle bps": "门槛 bps",
@@ -182,7 +182,7 @@ class Dashboard:
 
     def _render(self):
         eng = self.eng
-        if eng.entropy is None or eng.hedge is None or not eng.markets_ready:
+        if eng.primary is None or eng.hedge is None or not eng.markets_ready:
             return Group(Panel(Text(self._t("starting — resolving markets…"),
                                     style="yellow"), title="entropy-arb",
                                box=box.ROUNDED), self._events_panel())
@@ -223,7 +223,7 @@ class Dashboard:
         g.add_column(justify="left")
         g.add_column(justify="right")
         left = Text.assemble(("entropy-arb  ", "bold"),
-                             (f"{cfg.symbol} × ENTROPY · {eng.hedge.name}",
+                             (f"{cfg.symbol} × {eng.primary.name} · {eng.hedge.name}",
                               "bold cyan"))
         right = Text()
         right.append_text(mode)
@@ -345,12 +345,12 @@ class Dashboard:
         t.add_column(self._t("hurdle bps"), justify="right")
         t.add_column(self._t("gap bps"), justify="right")
         t.add_column("", justify="left")
-        self._dir_row(t, self._t("SELL entropy → buy {h}", h=eng.hedge.name),
-                      eng.hedge, eng.entropy,
-                      cfg.midline_bps + cfg.upper_bps, "sell_entropy")
-        self._dir_row(t, self._t("BUY entropy → sell {h}", h=eng.hedge.name),
-                      eng.entropy, eng.hedge,
-                      cfg.lower_bps - cfg.midline_bps, "buy_entropy")
+        self._dir_row(t, self._t("SELL primary → buy {h}", h=eng.hedge.name),
+                      eng.hedge, eng.primary,
+                      cfg.midline_bps + cfg.upper_bps, "sell_primary")
+        self._dir_row(t, self._t("BUY primary → sell {h}", h=eng.hedge.name),
+                      eng.primary, eng.hedge,
+                      cfg.lower_bps - cfg.midline_bps, "buy_primary")
         return Panel(Group(head, t),
                      title=self._t("signal — executable premium vs full "
                                    "hurdle incl. fees (● = armed)"),

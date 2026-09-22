@@ -2,13 +2,12 @@
 
 **[English documentation / 英文文档 → README.md](README.md)**
 
-开源双交易所永续合约套利机器人。其中一条腿永远是 **Entropy**（Hyperliquid 上的
-`io` builder dex）；另一条腿（对冲腿）三选一：
+开源双交易所永续合约套利机器人。其中一条腿永远是 **light-rh**（Lighter Robinhood 链）；另一条腿（对冲腿）三选一：
 
 | `--hedge` | 交易所 | 计价货币 | 吃单费 | 协议 |
 |---|---|---|---|---|
 | `lighter` | Lighter 主网 | USDC | 0 bps | zkLighter ws（增量订单簿，异步结算） |
-| `lighter-rh` | Lighter Robinhood 链 | **USDG** | 0 bps | zkLighter ws |
+| `entropy` | Hyperliquid Entropy/io dex | USDC | 配置值 | HL l2Book |
 | `tradexyz` | Hyperliquid trade.xyz dex | USDC | ~1 bps | HL l2Book，IOC 同步结算 |
 
 > **推荐链接** —— 通过以下链接注册即可支持本项目：
@@ -30,15 +29,15 @@ CSV 数据**，配套的分析工具可以直接把这些数据变成策略所�
 整个信号就是 `config.yaml` 里三个数字，由你根据采集的数据自己设定：
 
 ```
-premium_bps =（Entropy 价格 / 对冲腿价格 − 1）× 10 000
+premium_bps =（light-rh 价格 / 对冲腿价格 − 1）× 10 000
 
-                          ┌──────────────  卖出 Entropy + 买入对冲腿
+                          ┌──────────────  卖出 light-rh + 买入对冲腿
 midline + upper  ───────────────────────────────────────────────────
                                        ▲
 midline          ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ┼ ─ ─   溢价的长期中枢
                                        ▼
 midline − lower  ───────────────────────────────────────────────────
-                          └──────────────  买入 Entropy + 卖出对冲腿
+                          └──────────────  买入 light-rh + 卖出对冲腿
 ```
 
 - `midline_bps` —— 溢价的常态水平。跨所溢价几乎从不以零为中心（预言机不同、
@@ -46,7 +45,7 @@ midline − lower  ────────────────────�
   永远无法平仓。请实际测量溢价所在的位置，然后填入。
 - `upper_bps` / `lower_bps` —— 中枢上下两侧的入场带宽。
 
-两个方向的门槛都作用于**可实际成交的价格**（Entropy 买一 对 对冲腿卖一，
+两个方向的门槛都作用于**可实际成交的价格**（light-rh 买一 对 对冲腿卖一，
 反之亦然），并且是**扣除双边吃单手续费之后的净门槛**——引擎会在阈值之上
 另行叠加手续费。因此一次完整往返扣费后**净赚 ≥ upper + lower bps**，这是
 结构上保证的。
@@ -71,8 +70,7 @@ cp .env.example .env                     # 密钥——交易必填
 
 交易哪个市场**不在**配置文件中——每次启动时用命令行参数显式指定：
 `--symbol`（两个交易所共同交易的品种）和 `--hedge`（三选一：
-`lighter`、`lighter-rh`、`tradexyz`；Entropy 永远是
-另一条腿）。
+`entropy`、`lighter`、`tradexyz`；light-rh 永远是主腿）。
 
 本机器人**没有模拟盘**——要么采集数据（`--record-only`），要么实盘交易。
 请用采集的数据和最小的仓位上限来验证策略，而不是模拟成交。
@@ -80,7 +78,7 @@ cp .env.example .env                     # 密钥——交易必填
 **第一步：先采集数据**（不需要任何密钥）：
 
 ```bash
-python3 main.py --record-only --symbol SNDK --hedge lighter-rh
+python3 main.py --record-only --symbol SNDK --hedge entropy
 ```
 
 至少运行几个小时（最好一整天——溢价存在日内规律），数据写入
@@ -100,7 +98,7 @@ python3 tools/analyze.py
 
 ```bash
 pip install -r requirements-live.txt
-python3 main.py --symbol SNDK --hedge lighter-rh
+python3 main.py --symbol SNDK --hedge entropy
 ```
 
 不带 `--record-only` 运行时，只要两边行情就绪且溢价越过带宽，就会立即
@@ -122,10 +120,10 @@ python3 main.py --symbol SNDK --hedge lighter-rh
 | 列 | 含义 |
 |---|---|
 | `minute_ts`, `time_utc` | 分钟起点（epoch 秒 / ISO UTC） |
-| `entropy_bid/ask`, `hedge_bid/ask` | 该分钟最后一次有效盘口 |
-| `premium_open/high/low/close/mean/std_bps` | Entropy 相对对冲腿的中间价溢价 |
-| `sell_edge_mean/max_bps` | 卖出 Entropy 方向的可成交溢价（Entropy 买一 / 对冲腿卖一 − 1） |
-| `buy_edge_mean/max_bps` | 买入 Entropy 方向的可成交溢价（对冲腿买一 / Entropy 卖一 − 1） |
+| `primary_bid/ask`, `hedge_bid/ask` | 该分钟最后一次有效盘口 |
+| `premium_open/high/low/close/mean/std_bps` | light-rh 相对对冲腿的中间价溢价 |
+| `sell_edge_mean/max_bps` | 卖出 light-rh 方向的可成交溢价 |
+| `buy_edge_mean/max_bps` | 买入 light-rh 方向的可成交溢价 |
 | `samples` | 该分钟约 60 秒中两边盘口同时有效的秒数 |
 
 采集的 edge 为费前口径；分析工具在统计触发频率前会先扣除 `--fees-bps`
@@ -143,7 +141,8 @@ python3 main.py --symbol SNDK --hedge lighter-rh
 |---|---|---|
 | `thresholds.midline_bps` | 溢价中枢（必须实测！） | — |
 | `thresholds.upper_bps` / `lower_bps` | 入场带宽（> 0） | — |
-| `entropy.dex` | Entropy 在 Hyperliquid 上的 dex 名 | `io` |
+| `primary.*` | 固定 light-rh 主腿限制 | — |
+| `hedge.dex` | 选择 Entropy/tradexyz 时的 dex 名 | `io` |
 | `*.taker_fee_bps` | 各所吃单费 | 0.0（tradexyz 对冲腿：1.0） |
 | `*.max_position_usd` | 各所持仓上限 | 1000 |
 | `*.max_orders_per_min` | 各所每分钟下单预算（滑动 60 秒） | 120；Lighter 对冲腿 30 |
@@ -157,15 +156,16 @@ python3 main.py --symbol SNDK --hedge lighter-rh
 
 ## 密钥配置（`.env`，仅实盘需要）
 
-- **Entropy / tradexyz（Hyperliquid）** —— 在
+- **Entropy / tradexyz（Hyperliquid 对冲腿）** —— 在
   <https://app.hyperliquid.xyz/API> 创建 API（agent）钱包。`HL_PRIVATE_KEY`
   填 **agent 钱包私钥**，`HL_ACCOUNT_ADDRESS` 填主账户地址。当
   `--hedge tradexyz` 时两条腿默认共用该账户（内部自动共享 nonce 序列）；
   如需分开，设置 `HL_PRIVATE_KEY_XYZ` / `HL_ACCOUNT_ADDRESS_XYZ`。注意给
   所交易的各 dex 分别充入保证金。
-- **Lighter** —— `LIGHTER_ACCOUNT_INDEX`、`LIGHTER_API_KEY_INDEX`、
-  `LIGHTER_API_PRIVATE_KEY`，必须注册在与启动参数 `--hedge` **相同的部署**上
-  （主网与 Robinhood 链是两套独立的账户和密钥——参见
+- **light-rh 主腿** —— 优先使用 `LIGHTER_RH_ACCOUNT_INDEX`、
+  `LIGHTER_RH_API_KEY_INDEX`、`LIGHTER_RH_API_PRIVATE_KEY`（也兼容旧的
+  `LIGHTER_*` 变量）；Lighter 主网对冲腿使用 `LIGHTER_*`，两套部署账户和密钥
+  必须分开（参见
   [lighter-python](https://github.com/elliottech/lighter-python)）。
 
 ## 执行机制

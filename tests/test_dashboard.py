@@ -29,7 +29,7 @@ thresholds:
 """)
     f.close()
     return load_config(f.name, NO_ENV,
-                       symbol="SNDK", hedge_venue="lighter-rh")
+                       symbol="SNDK", hedge_venue="entropy")
 
 
 class StubVenue:
@@ -57,9 +57,9 @@ def render(eng, lang="en") -> str:
 
 def make_engine():
     eng = Engine(make_cfg())
-    eng.entropy = StubVenue("entropy", "ENTROPY")
+    eng.primary = StubVenue("primary", "LIGHT-RH")
     eng.hedge = StubVenue("hedge", "RH")
-    eng.venues = {"entropy": eng.entropy, "hedge": eng.hedge}
+    eng.venues = {"primary": eng.primary, "hedge": eng.hedge}
     eng.markets_ready = True
     return eng
 
@@ -72,23 +72,23 @@ def test_renders_before_markets_resolve():
 
 def test_renders_key_numbers():
     eng = make_engine()
-    eng.entropy.set_book(100.14, 100.16)   # ~+15 bps rich vs hedge
+    eng.primary.set_book(100.14, 100.16)   # ~+15 bps rich vs hedge
     eng.hedge.set_book(99.99, 100.01)
     # regression: a set last_trade_ts renders the "{s}s ago" cell — this
     # once collided with _t()'s own parameter name and crashed every frame
     eng.last_trade_ts = time.time() - 42
-    eng.entropy.position, eng.hedge.position = 0.5, -0.5
-    eng.entropy.equity, eng.entropy.start_equity = 1000.0, 990.0
+    eng.primary.position, eng.hedge.position = 0.5, -0.5
+    eng.primary.equity, eng.primary.start_equity = 1000.0, 990.0
     eng.hedge.equity, eng.hedge.start_equity = 500.0, 500.0
     eng.trades, eng.hedges = 7, 1
     eng.recent_trades.append({
-        "ts": time.time(), "direction": "sell_entropy", "qty": 0.5,
+        "ts": time.time(), "direction": "sell_primary", "qty": 0.5,
         "notional": 50.0, "prem_bps": 15.0, "exp": 0.07, "fill": 0.05,
         "status": "filled/filled", "ok": True})
     out = render(eng)
-    for needle in ("ENTROPY", "RH", "SELL entropy", "BUY entropy",
+    for needle in ("LIGHT-RH", "RH", "SELL primary", "BUY primary",
                    "100.14", "99.99", "mid premium", "midline",
-                   "7 / 1", "sell_entropy", "filled/filled",
+                   "7 / 1", "filled",
                    "$+10.00", "LIVE", "s ago"):
         assert needle in out, f"{needle!r} missing from render"
     assert "render error" not in out
@@ -100,14 +100,14 @@ def test_renders_key_numbers():
 
 def test_renders_in_chinese():
     eng = make_engine()
-    eng.entropy.set_book(100.14, 100.16)
+    eng.primary.set_book(100.14, 100.16)
     eng.hedge.set_book(99.99, 100.01)
     eng.trades, eng.hedges = 7, 1
     eng.last_trade_ts = time.time() - 42
     out = render(eng, lang="zh")
     for needle in ("实盘", "运行中", "交易所", "买一 / 卖一", "持仓", "会话",
                    "盈亏 (MTM)", "净敞口", "中间价溢价", "中枢", "区间",
-                   "卖出 entropy → 买入 RH", "买入 entropy → 卖出 RH",
+                   "卖出主腿 → 买入 RH", "买入主腿 → 卖出 RH",
                    "门槛 bps", "暂无执行", "日志事件", "秒前"):
         assert needle in out, f"{needle!r} missing from zh render"
     # numbers unchanged by translation: sell hurdle midline+upper = +6
@@ -128,9 +128,9 @@ def test_zh_stop_summary():
 
 def test_renders_record_only_and_empty_books():
     eng = Engine(make_cfg(), record_only=True)
-    eng.entropy = StubVenue("entropy", "ENTROPY")
+    eng.primary = StubVenue("primary", "LIGHT-RH")
     eng.hedge = StubVenue("hedge", "MAIN")
-    eng.venues = {"entropy": eng.entropy, "hedge": eng.hedge}
+    eng.venues = {"primary": eng.primary, "hedge": eng.hedge}
     eng.markets_ready = True
     out = render(eng)                      # books empty: everything is "—"
     assert "RECORD-ONLY" in out

@@ -30,20 +30,22 @@ thresholds:
 """
 
 
-def load(yaml_text: str, symbol="SNDK", hedge="lighter-rh"):
+def load(yaml_text: str, symbol="SNDK", hedge="entropy"):
     return load_config(write_tmp(yaml_text), NO_ENV,
                        symbol=symbol, hedge_venue=hedge)
 
 
 def test_example_config_loads():
     cfg = load_config(EXAMPLE, NO_ENV,
-                      symbol="SNDK", hedge_venue="lighter-rh")
+                      symbol="SNDK", hedge_venue="entropy")
     assert cfg.symbol == "SNDK"
-    assert cfg.entropy.kind == "hl" and cfg.entropy.hl_dex == "io"
-    assert cfg.hedge_venue == "lighter-rh"
-    assert cfg.hedge.kind == "lighter"
-    assert cfg.hedge.lighter_profile.chain_id == 466324
-    assert cfg.entropy.symbol == "SNDK" and cfg.hedge.symbol == "SNDK"
+    assert cfg.primary.kind == "lighter" and cfg.primary.lighter_profile.chain_id == 466324
+    assert cfg.hedge_venue == "entropy"
+    assert cfg.hedge.kind == "hl" and cfg.hedge.hl_dex == "io"
+    assert cfg.primary.symbol == "SNDK" and cfg.hedge.symbol == "SNDK"
+    assert cfg.recorder_csv == "logs/SNDK/entropy/minutes.csv"
+    assert cfg.trades_csv == "logs/SNDK/entropy/trades.csv"
+    assert cfg.log_file == "logs/SNDK/entropy/engine.log"
     assert cfg.recorder_enabled and cfg.recorder_csv
     assert cfg.dashboard and cfg.log_file
 
@@ -51,6 +53,7 @@ def test_example_config_loads():
 def test_minimal_defaults():
     cfg = load(MINIMAL, hedge="lighter")
     assert cfg.midline_bps == 5.0 and cfg.upper_bps == 4.0 and cfg.lower_bps == 3.0
+    assert cfg.primary.label == "LIGHT-RH"
     assert cfg.hedge.label == "LIGHTER"
     assert cfg.hedge.lighter_profile.chain_id == 304
     assert cfg.take_fraction == 0.5          # defaults kick in
@@ -90,6 +93,11 @@ def test_markets_no_longer_config_keys():
 def test_bad_cli_markets():
     expect_error(MINIMAL, "--hedge", hedge="binance")
     expect_error(MINIMAL, "--symbol", symbol="")
+
+
+def test_output_path_template_rejects_unknown_placeholder():
+    expect_error(MINIMAL + "\nrecorder:\n  csv: logs/{coin}.csv\n",
+                 "use only")
 
 
 def test_missing_thresholds():

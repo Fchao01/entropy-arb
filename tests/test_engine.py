@@ -28,7 +28,7 @@ execution:
 """)
     f.close()
     return load_config(f.name, NO_ENV,
-                       symbol="SNDK", hedge_venue="lighter-rh")
+                       symbol="SNDK", hedge_venue="entropy")
 
 
 class StubVenue:
@@ -52,9 +52,9 @@ class StubVenue:
 def make_engine(**thr):
     cfg = make_cfg(**thr)
     eng = Engine(cfg)
-    eng.entropy = StubVenue("entropy", "ENTROPY")
+    eng.primary = StubVenue("primary", "LIGHT-RH")
     eng.hedge = StubVenue("hedge", "RH")
-    eng.venues = {"entropy": eng.entropy, "hedge": eng.hedge}
+    eng.venues = {"primary": eng.primary, "hedge": eng.hedge}
     eng._step, eng._min_base, eng._min_notional = 1e-4, 1e-4, 10.0
     return eng
 
@@ -65,7 +65,7 @@ def approx(a, b, tol=1e-9):
 
 def test_eff_threshold_directions():
     eng = make_engine(midline=5.0, upper=4.0, lower=3.0)
-    e, h = eng.entropy, eng.hedge
+    e, h = eng.primary, eng.hedge
     # sell entropy: hurdle = midline + upper = 9
     approx(eng._eff_threshold(buy=h, sell=e), 9.0)
     # buy entropy: hurdle = lower - midline = -2 (unwind side of a positive
@@ -81,7 +81,7 @@ def test_eff_threshold_directions():
 def test_inventory_ladder():
     eng = make_engine()
     eng.cfg.inventory_scale_bps, eng.cfg.inventory_floor_frac = 10.0, 0.5
-    e, h = eng.entropy, eng.hedge
+    e, h = eng.primary, eng.hedge
     e.set_book(99.9, 100.1)   # mid 100
     h.set_book(99.9, 100.1)
     approx(eng._inv_add_bps(e, h), 0.0)          # flat: dead zone
@@ -106,19 +106,19 @@ def run_scan(eng):
 def test_scan_fires_sell_entropy_above_band():
     eng = make_engine(midline=5.0, upper=4.0, lower=3.0)
     # entropy 15 bps rich vs hedge: above midline+upper=9 -> sell entropy
-    eng.entropy.set_book(100.14, 100.16)
+    eng.primary.set_book(100.14, 100.16)
     eng.hedge.set_book(99.99, 100.01)
     best = run_scan(eng)
     assert best is not None
     buy, sell, plan = best
-    assert sell.key == "entropy" and buy.key == "hedge"
+    assert sell.key == "primary" and buy.key == "hedge"
     assert plan.exp_edge_usd > 0
 
 
 def test_scan_quiet_inside_band():
     eng = make_engine(midline=5.0, upper=4.0, lower=3.0)
     # entropy 5 bps rich = exactly on the midline: inside the band, no trade
-    eng.entropy.set_book(100.04, 100.06)
+    eng.primary.set_book(100.04, 100.06)
     eng.hedge.set_book(99.99, 100.01)
     assert run_scan(eng) is None
 
@@ -126,20 +126,20 @@ def test_scan_quiet_inside_band():
 def test_scan_fires_buy_entropy_below_band():
     eng = make_engine(midline=5.0, upper=4.0, lower=3.0)
     # entropy 5 bps CHEAP (premium -5): below midline-lower=+2 -> buy entropy
-    eng.entropy.set_book(99.94, 99.96)
+    eng.primary.set_book(99.94, 99.96)
     eng.hedge.set_book(99.99, 100.01)
     best = run_scan(eng)
     assert best is not None
     buy, sell, plan = best
-    assert buy.key == "entropy" and sell.key == "hedge"
+    assert buy.key == "primary" and sell.key == "hedge"
 
 
 def test_scan_respects_position_caps():
     eng = make_engine(midline=0.0, upper=1.0, lower=1.0)
-    eng.entropy.set_book(100.14, 100.16)
+    eng.primary.set_book(100.14, 100.16)
     eng.hedge.set_book(99.99, 100.01)
-    eng.entropy.position = -100.0   # entropy already short at its cap
-    eng.entropy.cap_usd = 10000.0
+    eng.primary.position = -100.0   # primary already short at its cap
+    eng.primary.cap_usd = 10000.0
     eng.hedge.position = 100.0
     eng.hedge.cap_usd = 10000.0
     assert run_scan(eng) is None

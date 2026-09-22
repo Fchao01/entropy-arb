@@ -96,8 +96,8 @@ def main() -> None:
     median = pctl(prem, 50)
 
     print(f"\n=== {args.csv}: {len(rows)} minutes over {span_h:.1f}h ===\n")
-    print("premium of Entropy over hedge, minute close (bps) / "
-          "Entropy 相对对冲腿的溢价:")
+    print("premium of light-rh primary over hedge, minute close (bps) / "
+          "light-rh 主腿相对对冲腿的溢价:")
     print(f"  mean {mean:+.2f}   std {math.sqrt(var):.2f}   "
           f"median {median:+.2f}")
     print(f"  p5 {pctl(prem, 5):+.2f}   p25 {pctl(prem, 25):+.2f}   "
@@ -116,7 +116,7 @@ def main() -> None:
     print(f"\nwith midline_bps = {midline:+.1f} (median) and {fees:.1f} bps "
           f"round-trip taker fees, minutes each band would have fired / "
           f"各档净阈值触发的分钟数:")
-    print(f"  {'band bps':>9} | {'SELL entropy':>17} | {'BUY entropy':>17}")
+    print(f"  {'band bps':>9} | {'SELL primary':>17} | {'BUY primary':>17}")
     print(f"  {'':>9} | {'minutes':>8} {'per day':>8} | "
           f"{'minutes':>8} {'per day':>8}")
     per_day = 24.0 / span_h if span_h > 0 else 0.0

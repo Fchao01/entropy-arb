@@ -51,7 +51,7 @@ def test_minute_aggregation_and_rollover():
     assert abs(float(m2["buy_edge_max_bps"])
                - ((99.99 / 100.11 - 1) * 1e4)) < 0.05
     # closes carry the last books
-    assert float(m2["entropy_bid"]) == 100.09
+    assert float(m2["primary_bid"]) == 100.09
     assert float(m2["hedge_ask"]) == 100.01
 
 

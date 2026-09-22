@@ -7,15 +7,15 @@ thresholds.midline_bps / upper_bps / lower_bps for config.yaml.
 
 Definitions (all in bps, fees NOT included — the engine adds fees on top):
 
-    premium    = (entropy_mid / hedge_mid - 1) * 1e4
-                 the mid-to-mid premium of Entropy over the hedge venue;
+    premium    = (primary_mid / hedge_mid - 1) * 1e4
+                 the mid-to-mid premium of the primary leg over the hedge;
                  its long-run center is what midline_bps hardcodes.
-    sell_edge  = (entropy_bid / hedge_ask - 1) * 1e4
-                 the EXECUTABLE premium for SELL-entropy/BUY-hedge; the
+    sell_edge  = (primary_bid / hedge_ask - 1) * 1e4
+                 the EXECUTABLE premium for SELL-primary/BUY-hedge; the
                  engine fires this direction when sell_edge clears
                  midline_bps + upper_bps (plus fees).
-    buy_edge   = (hedge_bid / entropy_ask - 1) * 1e4
-                 the executable premium for BUY-entropy/SELL-hedge; fires
+    buy_edge   = (hedge_bid / primary_ask - 1) * 1e4
+                 the executable premium for BUY-primary/SELL-hedge; fires
                  when buy_edge clears lower_bps - midline_bps (plus fees).
 
 Bid/ask columns are the minute's last fresh sample (close). A row is only
@@ -38,7 +38,7 @@ from .book import OrderBook
 log = logging.getLogger("recorder")
 
 HEADER = ["minute_ts", "time_utc",
-          "entropy_bid", "entropy_ask", "hedge_bid", "hedge_ask",
+          "primary_bid", "primary_ask", "hedge_bid", "hedge_ask",
           "premium_open_bps", "premium_high_bps", "premium_low_bps",
           "premium_close_bps", "premium_mean_bps", "premium_std_bps",
           "sell_edge_mean_bps", "sell_edge_max_bps",
@@ -99,10 +99,10 @@ class _MinuteAgg:
 
 
 class MinuteRecorder:
-    def __init__(self, path: str, entropy_book: OrderBook, hedge_book: OrderBook,
+    def __init__(self, path: str, primary_book: OrderBook, hedge_book: OrderBook,
                  staleness_sec: float, interval_sec: float = 1.0) -> None:
         self.path = path
-        self.entropy_book = entropy_book
+        self.primary_book = primary_book
         self.hedge_book = hedge_book
         self.staleness_sec = staleness_sec
         self.interval_sec = interval_sec
@@ -147,10 +147,10 @@ class MinuteRecorder:
         minute = int(now // 60)
         if self._agg is not None and self._agg.minute != minute:
             self._flush_agg()
-        if not (self.entropy_book.is_fresh(self.staleness_sec)
+        if not (self.primary_book.is_fresh(self.staleness_sec)
                 and self.hedge_book.is_fresh(self.staleness_sec)):
             return
-        e_bid, e_ask = self.entropy_book.best_bid(), self.entropy_book.best_ask()
+        e_bid, e_ask = self.primary_book.best_bid(), self.primary_book.best_ask()
         h_bid, h_ask = self.hedge_book.best_bid(), self.hedge_book.best_ask()
         if None in (e_bid, e_ask, h_bid, h_ask):
             return

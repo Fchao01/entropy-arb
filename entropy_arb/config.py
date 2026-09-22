@@ -9,12 +9,12 @@ is an error rather than a setting that silently does nothing.
 
 Threshold model (fixed numbers the user derives from recorded minute data):
 
-    premium_bps = (entropy_price / hedge_price - 1) * 10_000
+    premium_bps = (primary_price / hedge_price - 1) * 10_000
 
-    SELL entropy / BUY hedge  fires when the executable premium
-        (entropy bid over hedge ask) >= midline_bps + upper_bps
-    BUY entropy / SELL hedge  fires when the executable premium
-        (entropy ask under hedge bid) <= midline_bps - lower_bps
+    SELL primary / BUY hedge  fires when the executable premium
+        (primary bid over hedge ask) >= midline_bps + upper_bps
+    BUY primary / SELL hedge  fires when the executable premium
+        (primary ask under hedge bid) <= midline_bps - lower_bps
 
     Both hurdles are net of both venues' taker fees, so a full round trip
     nets >= (upper_bps + lower_bps) after fees by construction.
@@ -31,7 +31,9 @@ from dotenv import load_dotenv
 HL_API_URL = "https://api.hyperliquid.xyz"
 HL_WS_URL = "wss://api.hyperliquid.xyz/ws"   # official ws — the only HL feed used
 
-HEDGE_VENUES = ("lighter", "lighter-rh", "tradexyz")
+# The primary leg is fixed to Lighter Robinhood. The other leg can be one of
+# these venues; ``entropy`` means Hyperliquid's io builder dex.
+HEDGE_VENUES = ("entropy", "lighter", "tradexyz")
 
 
 @dataclass(frozen=True)
@@ -79,7 +81,7 @@ class HLCreds:
 
 @dataclass
 class VenueConf:
-    key: str                  # "entropy" | "hedge"
+    key: str                  # "primary" | "hedge"
     kind: str                 # "hl" | "lighter"
     label: str                # human name for logs, e.g. "ENTROPY", "RH"
     symbol: str
@@ -98,7 +100,7 @@ class VenueConf:
 class Config:
     symbol: str
     hedge_venue: str
-    entropy: VenueConf
+    primary: VenueConf
     hedge: VenueConf
     # thresholds (the whole signal)
     midline_bps: float
@@ -139,7 +141,7 @@ class Config:
 
     @property
     def creds_complete(self) -> bool:
-        for v in (self.entropy, self.hedge):
+        for v in (self.primary, self.hedge):
             if v.kind == "hl" and not (v.hl_creds and v.hl_creds.complete):
                 return False
             if v.kind == "lighter" and not (v.lighter_creds
@@ -157,13 +159,13 @@ _SCHEMA: Dict[str, Any] = {
         "upper_bps": float,
         "lower_bps": float,
     },
-    "entropy": {
-        "dex": str,
+    "primary": {
         "taker_fee_bps": float,
         "max_position_usd": float,
         "max_orders_per_min": int,
     },
     "hedge": {
+        "dex": str,
         "taker_fee_bps": float,
         "max_position_usd": float,
         "max_orders_per_min": int,
@@ -238,6 +240,16 @@ def _get(d: dict, section: str, key: str, default):
     return (d.get(section) or {}).get(key, default)
 
 
+def _path_for_market(template: str, symbol: str, hedge_venue: str) -> str:
+    """Expand market placeholders in per-run output paths."""
+    try:
+        return template.format(symbol=symbol, hedge=hedge_venue)
+    except (KeyError, ValueError) as e:
+        raise ConfigError(
+            f"invalid output path template {template!r}: {e}; use only "
+            "{symbol} and {hedge} / 路径模板只能使用 {symbol} 和 {hedge}")
+
+
 # ------------------------------------------------------------------ env layer
 
 def _env_s(name: str) -> Optional[str]:
@@ -291,39 +303,44 @@ def load_config(config_file: str = "config.yaml", env_file: str = ".env", *,
                           "more than the profitable depth loses money on the "
                           "tail / 必须在 (0, 1] 之间")
 
-    entropy_dex = _get(raw, "entropy", "dex", "io")
-    if hedge_venue == "tradexyz" and entropy_dex == "xyz":
-        raise ConfigError("entropy.dex 'xyz' with hedge_venue 'tradexyz' is "
-                          "the same market on both legs / 两条腿是同一个市场")
+    if hedge_venue == "lighter-rh":
+        raise ConfigError("lighter-rh is the fixed primary leg; choose a different "
+                          "--hedge venue / lighter-rh 已经是主腿，请选择其他对冲腿")
 
-    entropy_hl_creds = HLCreds(_env_s("HL_PRIVATE_KEY"),
-                               _env_s("HL_ACCOUNT_ADDRESS"))
-    entropy = VenueConf(
-        key="entropy", kind="hl", label="ENTROPY",
+    primary = VenueConf(
+        key="primary", kind="lighter", label="LIGHT-RH",
         symbol=symbol,
-        fee_bps=float(_get(raw, "entropy", "taker_fee_bps", 0.0)),
-        cap_usd=float(_get(raw, "entropy", "max_position_usd", 1000.0)),
-        orders_per_min=int(_get(raw, "entropy", "max_orders_per_min", 120)),
-        hl_dex=entropy_dex,
-        hl_creds=entropy_hl_creds,
+        fee_bps=float(_get(raw, "primary", "taker_fee_bps", 0.0)),
+        cap_usd=float(_get(raw, "primary", "max_position_usd", 1000.0)),
+        orders_per_min=int(_get(raw, "primary", "max_orders_per_min", 30)),
+        lighter_profile=LIGHTER_PROFILES["lighter-rh"],
+        lighter_creds=LighterCreds(
+            _env_i("LIGHTER_RH_ACCOUNT_INDEX") or _env_i("LIGHTER_ACCOUNT_INDEX"),
+            _env_i("LIGHTER_RH_API_KEY_INDEX") or _env_i("LIGHTER_API_KEY_INDEX"),
+            _env_s("LIGHTER_RH_API_PRIVATE_KEY") or _env_s("LIGHTER_API_PRIVATE_KEY")),
     )
 
-    if hedge_venue == "tradexyz":
+    hedge_dex = _get(raw, "hedge", "dex", "io")
+    if hedge_venue in ("entropy", "tradexyz"):
+        hedge_dex = "io" if hedge_venue == "entropy" else "xyz"
         hedge = VenueConf(
-            key="hedge", kind="hl", label="XYZ",
+            key="hedge", kind="hl",
+            label="ENTROPY" if hedge_venue == "entropy" else "XYZ",
             symbol=symbol,
             fee_bps=float(_get(raw, "hedge", "taker_fee_bps", 1.0)),
             cap_usd=float(_get(raw, "hedge", "max_position_usd", 1000.0)),
             orders_per_min=int(_get(raw, "hedge", "max_orders_per_min", 120)),
-            hl_dex="xyz",
+            hl_dex=hedge_dex,
             hl_creds=HLCreds(
-                _env_s("HL_PRIVATE_KEY_XYZ") or _env_s("HL_PRIVATE_KEY"),
-                _env_s("HL_ACCOUNT_ADDRESS_XYZ") or _env_s("HL_ACCOUNT_ADDRESS")),
+                (_env_s("HL_PRIVATE_KEY_XYZ") if hedge_venue == "tradexyz" else None)
+                or _env_s("HL_PRIVATE_KEY"),
+                (_env_s("HL_ACCOUNT_ADDRESS_XYZ") if hedge_venue == "tradexyz" else None)
+                or _env_s("HL_ACCOUNT_ADDRESS")),
         )
     else:
         hedge = VenueConf(
             key="hedge", kind="lighter",
-            label="LIGHTER" if hedge_venue == "lighter" else "RH",
+            label="LIGHTER",
             symbol=symbol,
             fee_bps=float(_get(raw, "hedge", "taker_fee_bps", 0.0)),
             cap_usd=float(_get(raw, "hedge", "max_position_usd", 1000.0)),
@@ -337,7 +354,7 @@ def load_config(config_file: str = "config.yaml", env_file: str = ".env", *,
     return Config(
         symbol=symbol,
         hedge_venue=hedge_venue,
-        entropy=entropy,
+        primary=primary,
         hedge=hedge,
         midline_bps=float(thr["midline_bps"]),
         upper_bps=upper,
@@ -360,10 +377,16 @@ def load_config(config_file: str = "config.yaml", env_file: str = ".env", *,
         venue_probe_sec=float(_get(raw, "execution", "venue_probe_sec", 30.0)),
         http_keepalive_sec=float(_get(raw, "execution", "http_keepalive_sec", 10.0)),
         recorder_enabled=bool(_get(raw, "recorder", "enabled", True)),
-        recorder_csv=_get(raw, "recorder", "csv", "logs/minutes.csv"),
+        recorder_csv=_path_for_market(
+            _get(raw, "recorder", "csv", "logs/{symbol}/{hedge}/minutes.csv"),
+            symbol, hedge_venue),
         log_level=str(_get(raw, "logging", "level", "INFO")).upper(),
         status_interval_sec=float(_get(raw, "logging", "status_interval_sec", 30.0)),
-        trades_csv=_get(raw, "logging", "trades_csv", "logs/trades.csv"),
+        trades_csv=_path_for_market(
+            _get(raw, "logging", "trades_csv", "logs/{symbol}/{hedge}/trades.csv"),
+            symbol, hedge_venue),
         dashboard=bool(_get(raw, "logging", "dashboard", True)),
-        log_file=_get(raw, "logging", "file", "logs/engine.log"),
+        log_file=_path_for_market(
+            _get(raw, "logging", "file", "logs/{symbol}/{hedge}/engine.log"),
+            symbol, hedge_venue),
     )

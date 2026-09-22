@@ -2,13 +2,13 @@
 
 **[中文文档 / Chinese documentation → README.zh-CN.md](README.zh-CN.md)**
 
-Open-source two-venue perp arbitrage bot. One leg is always **Entropy**
-(the `io` builder dex on Hyperliquid); the other leg — the hedge — is one of:
+Open-source two-venue perp arbitrage bot. One leg is always **light-rh**
+(the Lighter Robinhood chain); the other leg — the hedge — is one of:
 
 | `--hedge` | venue | quote | taker fee | protocol |
 |---|---|---|---|---|
 | `lighter` | Lighter mainnet | USDC | 0 bps | zkLighter ws (diff books, async settle) |
-| `lighter-rh` | Lighter Robinhood chain | **USDG** | 0 bps | zkLighter ws |
+| `entropy` | Entropy `io` dex on Hyperliquid | USDC | configured | HL l2Book |
 | `tradexyz` | Hyperliquid trade.xyz dex | USDC | ~1 bps | HL l2Book, sync IOC settle |
 
 > **Referral links** — signing up through these supports this project:
@@ -34,15 +34,15 @@ The band is three numbers in `config.yaml`, derived by you from recorded
 data:
 
 ```
-premium_bps = (Entropy price / hedge price − 1) × 10 000
+premium_bps = (light-rh price / hedge price − 1) × 10 000
 
-                          ┌──────────────  SELL entropy + BUY hedge
+                          ┌──────────────  SELL light-rh + BUY hedge
 midline + upper  ───────────────────────────────────────────────────
                                        ▲
 midline          ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ┼ ─ ─   the premium's usual level
                                        ▼
 midline − lower  ───────────────────────────────────────────────────
-                          └──────────────  BUY entropy + SELL hedge
+                          └──────────────  BUY light-rh + SELL hedge
 ```
 
 - `midline_bps` — where the premium normally sits. Cross-venue premiums are
@@ -51,7 +51,7 @@ midline − lower  ────────────────────�
   never unwind. Measure where the premium actually sits and type it in.
 - `upper_bps` / `lower_bps` — the entry bands on each side of the midline.
 
-Both hurdles are applied to **executable** prices (entropy bid vs hedge ask,
+Both hurdles are applied to **executable** prices (light-rh bid vs hedge ask,
 and vice versa) and are **net of both venues' taker fees** — the engine adds
 fees on top before a slice qualifies. A full round trip therefore nets
 **≥ upper + lower bps after fees by construction**.
@@ -78,8 +78,7 @@ cp .env.example .env                     # credentials — required to trade
 
 The markets are **not** in the config file — you state them explicitly on
 every start: `--symbol` (traded on both venues) and `--hedge` (one of
-`lighter`, `lighter-rh`, `tradexyz`; Entropy is always the
-other leg).
+`entropy`, `lighter`, `tradexyz`; light-rh is always the primary leg).
 
 There is **no paper mode** — the bot either collects data (`--record-only`)
 or trades live. Validate with recorded data and tiny position caps, not with
@@ -88,7 +87,7 @@ simulated fills.
 **1. Collect data first** (no credentials needed):
 
 ```bash
-python3 main.py --record-only --symbol SNDK --hedge lighter-rh
+python3 main.py --record-only --symbol SNDK --hedge entropy
 ```
 
 Let it run for at least a few hours (a day is better — premiums have
@@ -108,7 +107,7 @@ the smallest position caps that clear the venue minimums:
 
 ```bash
 pip install -r requirements-live.txt
-python3 main.py --symbol SNDK --hedge lighter-rh
+python3 main.py --symbol SNDK --hedge entropy
 ```
 
 Running without `--record-only` sends real orders immediately once both
@@ -132,10 +131,10 @@ Once per second it samples both live books; once per minute it writes a row:
 | column | meaning |
 |---|---|
 | `minute_ts`, `time_utc` | minute start (epoch seconds, ISO UTC) |
-| `entropy_bid/ask`, `hedge_bid/ask` | last fresh top-of-book of the minute |
-| `premium_open/high/low/close/mean/std_bps` | mid-to-mid premium of Entropy over the hedge |
-| `sell_edge_mean/max_bps` | executable premium for SELL entropy (entropy bid / hedge ask − 1) |
-| `buy_edge_mean/max_bps` | executable premium for BUY entropy (hedge bid / entropy ask − 1) |
+| `primary_bid/ask`, `hedge_bid/ask` | last fresh top-of-book of the minute |
+| `premium_open/high/low/close/mean/std_bps` | mid-to-mid premium of light-rh over the hedge |
+| `sell_edge_mean/max_bps` | executable premium for SELL light-rh (primary bid / hedge ask − 1) |
+| `buy_edge_mean/max_bps` | executable premium for BUY light-rh (hedge bid / primary ask − 1) |
 | `samples` | how many of the ~60 seconds both books were fresh |
 
 Recorded edges are pre-fee; the analyzer subtracts `--fees-bps` (pass the
@@ -156,7 +155,8 @@ errors), credentials in `.env`, and the markets on the command line
 |---|---|---|
 | `thresholds.midline_bps` | premium center (measure it!) | — |
 | `thresholds.upper_bps` / `lower_bps` | entry bands (> 0) | — |
-| `entropy.dex` | Entropy's dex name on Hyperliquid | `io` |
+| `primary.*` | fixed light-rh primary-leg limits | — |
+| `hedge.dex` | Entropy/tradexyz dex name when selected | `io` |
 | `*.taker_fee_bps` | per-venue taker fee | 0.0 (tradexyz hedge: 1.0) |
 | `*.max_position_usd` | per-venue position cap | 1000 |
 | `*.max_orders_per_min` | per-venue send budget (sliding 60 s) | 120; lighter hedges 30 |

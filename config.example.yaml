@@ -10,20 +10,20 @@
 #
 # WHICH MARKETS to trade is NOT in this file — you state it explicitly on
 # every start with command-line flags:
-#     python3 main.py --symbol SNDK --hedge lighter-rh
-# Entropy is always one leg; --hedge picks the other:
+#     python3 main.py --symbol SNDK --hedge entropy
+# light-rh is always the primary leg; --hedge picks the other:
+#   entropy      Hyperliquid Entropy/io dex (USDC, configured fee)
 #   lighter      Lighter mainnet            (USDC, 0 bps taker)
-#   lighter-rh   Lighter Robinhood chain    (USDG, 0 bps taker)
 #   tradexyz     Hyperliquid trade.xyz dex  (USDC, ~1 bps taker)
 # 交易哪个市场不在本文件中配置——每次启动时用命令行参数显式指定：
-#     python3 main.py --symbol SNDK --hedge lighter-rh
-# Entropy 永远是其中一条腿；--hedge 选择对冲腿（三选一，见上表）。
+#     python3 main.py --symbol SNDK --hedge entropy
+# light-rh 永远是主腿；--hedge 选择对冲腿（三选一，见上表）。
 
 # ============================ THE SIGNAL / 信号 ============================
-# premium_bps = (Entropy price / hedge price - 1) * 10000
+# premium_bps = (light-rh price / hedge price - 1) * 10000
 #
-#   SELL entropy + BUY hedge   when executable premium >= midline + upper
-#   BUY entropy + SELL hedge   when executable premium <= midline - lower
+#   SELL light-rh + BUY hedge   when executable premium >= midline + upper
+#   BUY light-rh + SELL hedge   when executable premium <= midline - lower
 #
 # Both hurdles are net of taker fees (the engine adds fees on top), so one
 # full round trip nets >= upper + lower bps after fees by construction.
@@ -37,20 +37,20 @@
 # 扣费后净赚 >= upper + lower bps。
 thresholds:
   midline_bps: 0.0     # persistent premium center / 溢价长期中枢
-  upper_bps: 4.0       # entry above midline: sell entropy / 中枢上方入场带宽
-  lower_bps: 4.0       # entry below midline: buy entropy / 中枢下方入场带宽
+  upper_bps: 4.0       # entry above midline: sell light-rh / 中枢上方入场带宽
+  lower_bps: 4.0       # entry below midline: buy light-rh / 中枢下方入场带宽
 
 # ======================== VENUES / 交易所参数 ==============================
-entropy:
-  dex: io                    # Entropy's dex name on Hyperliquid / Entropy 的 dex 名
-  taker_fee_bps: 0.0         # taker fee / 吃单手续费
+primary:
+  taker_fee_bps: 0.0         # light-rh taker fee / light-rh 吃单手续费
   max_position_usd: 1000     # position cap / 持仓上限（美元）
-  max_orders_per_min: 120    # order-send budget, sliding 60s / 每分钟下单预算
+  max_orders_per_min: 30     # order-send budget / 每分钟下单预算
 
 hedge:
-  taker_fee_bps: 0.0         # Lighter venues: 0; tradexyz: ~1.0
-  max_position_usd: 1000
-  max_orders_per_min: 30     # Lighter's ceiling is ~40/min / Lighter 上限约 40/分钟
+  dex: io                    # used when --hedge entropy / --hedge entropy 时使用
+  taker_fee_bps: 0.0         # taker fee / 吃单手续费
+  max_position_usd: 1000     # position cap / 持仓上限（美元）
+  max_orders_per_min: 120
 
 # ========================= SIZING / 下单规模 ===============================
 sizing:
@@ -90,7 +90,9 @@ execution:
 # 供 tools/analyze.py 分析并设定上方 thresholds。
 recorder:
   enabled: true
-  csv: logs/minutes.csv
+  # {symbol} and {hedge} are expanded from the CLI for separate market logs.
+  # {symbol} 和 {hedge} 会按命令行参数展开，避免多币种日志混写。
+  csv: logs/{symbol}/{hedge}/minutes.csv
 
 # ==================== LOGGING & DASHBOARD / 日志与仪表盘 ====================
 # On a terminal the bot shows a live Rich dashboard (books, signal, positions,
@@ -103,6 +105,6 @@ recorder:
 logging:
   level: INFO
   status_interval_sec: 30.0
-  trades_csv: logs/trades.csv
+  trades_csv: logs/{symbol}/{hedge}/trades.csv
   dashboard: true
-  file: logs/engine.log
+  file: logs/{symbol}/{hedge}/engine.log
