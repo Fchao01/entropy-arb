@@ -219,8 +219,14 @@ class LighterVenue:
         # lighter-python added explicit chain_id support after older SDK
         # releases. Older clients infer it from the endpoint URL; passing the
         # keyword to them raises before the account can be checked.
-        if "chain_id" in inspect.signature(SignerClient).parameters:
+        supports_chain_id = "chain_id" in inspect.signature(SignerClient).parameters
+        if supports_chain_id:
             signer_kwargs["chain_id"] = self.profile.chain_id
+        elif self.profile.chain_id != 304:
+            raise RuntimeError(
+                f"[{self.name}] installed lighter SDK cannot sign chain_id={self.profile.chain_id}; "
+                "install the current lighter-python SDK (required for light-rh/Robinhood), "
+                "rather than an older PyPI lighter-sdk")
         signer = SignerClient(**signer_kwargs)
         err = signer.check_client()
         if err is not None:

@@ -266,6 +266,11 @@ def _env_i(name: str) -> Optional[int]:
     return int(v) if v not in (None, "") else None
 
 
+def _first_defined(*values):
+    """Return the first value that is not None (zero is valid)."""
+    return next((v for v in values if v is not None), None)
+
+
 # -------------------------------------------------------------------- loading
 
 def load_config(config_file: str = "config.yaml", env_file: str = ".env", *,
@@ -321,9 +326,12 @@ def load_config(config_file: str = "config.yaml", env_file: str = ".env", *,
         orders_per_min=int(_get(raw, "primary", "max_orders_per_min", 30)),
         lighter_profile=LIGHTER_PROFILES["lighter-rh"],
         lighter_creds=LighterCreds(
-            _env_i("LIGHTER_RH_ACCOUNT_INDEX") or _env_i("LIGHTER_ACCOUNT_INDEX"),
-            _env_i("LIGHTER_RH_API_KEY_INDEX") or _env_i("LIGHTER_API_KEY_INDEX"),
-            _env_s("LIGHTER_RH_API_PRIVATE_KEY") or _env_s("LIGHTER_API_PRIVATE_KEY")),
+            _first_defined(_env_i("LIGHTER_RH_ACCOUNT_INDEX"),
+                           _env_i("LIGHTER_ACCOUNT_INDEX")),
+            _first_defined(_env_i("LIGHTER_RH_API_KEY_INDEX"),
+                           _env_i("LIGHTER_API_KEY_INDEX")),
+            _first_defined(_env_s("LIGHTER_RH_API_PRIVATE_KEY"),
+                           _env_s("LIGHTER_API_PRIVATE_KEY"))),
     )
 
     hedge_dex = _get(raw, "hedge", "dex", "io")
