@@ -10,6 +10,8 @@ except ImportError:
 from .book import OrderBook
 
 log = logging.getLogger("aster")
+DEPTH_SNAPSHOT_LIMIT = 100
+MAX_BOOK_RETRY_SEC = 60.0
 
 class AsterVenue:
     kind = "aster"
@@ -180,36 +182,80 @@ class AsterVenue:
             tasks.append(asyncio.create_task(self._user_loop(stop), name=f"user-{self.key}"))
         return tasks
 
+    async def _depth_snapshot(self):
+        params = {"symbol": self.symbol, "limit": DEPTH_SNAPSHOT_LIMIT}
+        if self.market_api_version == "v3":
+            return await self._get("/fapi/v3/depth", params)
+        async with self.session.get(
+                self.market_api_url + "/fapi/v1/depth",
+                params=params,
+                headers={"User-Agent": "entropy-arb/1.0"},
+                timeout=aiohttp.ClientTimeout(total=10)) as r:
+            r.raise_for_status()
+            return await r.json()
+
+    @staticmethod
+    def _retry_after(error, fallback):
+        if isinstance(error, aiohttp.ClientResponseError) and error.headers:
+            try:
+                return max(float(error.headers.get("Retry-After", 0)), fallback)
+            except (TypeError, ValueError):
+                pass
+        return fallback
+
     async def _book_loop(self, stop, notify):
         """Maintain a Binance-compatible Aster diff book with REST snapshot."""
+        retry_sec = 1.0
         while not stop.is_set():
+            phase = "websocket"
             try:
-                if self.market_api_version == "v3":
-                    snap = await self._get(
-                        "/fapi/v3/depth",
-                        {"symbol": self.symbol, "limit": 1000})
-                else:
-                    async with self.session.get(
-                            self.market_api_url + "/fapi/v1/depth",
-                            params={"symbol": self.symbol, "limit": 1000},
-                            headers={"User-Agent": "entropy-arb/1.0"},
-                            timeout=aiohttp.ClientTimeout(total=10)) as r:
-                        r.raise_for_status()
-                        snap = await r.json()
-                self.book.apply_hl([[{"px":p,"sz":q} for p,q in snap.get("bids",[])], [{"px":p,"sz":q} for p,q in snap.get("asks",[])]])
-                last = int(snap.get("lastUpdateId", 0)); notify()
                 async with ws_connect(f"{self.ws_url}/ws/{self.symbol.lower()}@depth@100ms", ping_interval=20, ping_timeout=20, max_size=2**23) as ws:
+                    phase = "snapshot"
+                    snap = await self._depth_snapshot()
+                    self.book.apply_hl([
+                        [{"px": p, "sz": q} for p, q in snap.get("bids", [])],
+                        [{"px": p, "sz": q} for p, q in snap.get("asks", [])],
+                    ])
+                    last = int(snap.get("lastUpdateId", 0))
+                    synced = False
+                    notify()
+                    phase = "websocket"
                     async for raw in ws:
                         e = __import__('json').loads(raw)
-                        if int(e.get("u", 0)) <= last: continue
-                        if int(e.get("U", 0)) > last + 1 or (e.get("pu") is not None and int(e["pu"]) != last):
-                            break
+                        final_id = int(e.get("u", 0))
+                        if final_id <= last:
+                            continue
+                        first_id = int(e.get("U", 0))
+                        previous_id = e.get("pu")
+                        if not synced:
+                            if first_id > last + 1:
+                                raise RuntimeError(
+                                    f"initial depth gap: snapshot={last} "
+                                    f"event={first_id}-{final_id}")
+                            synced = True
+                        elif previous_id is not None and int(previous_id) != last:
+                            raise RuntimeError(
+                                f"depth gap: previous={last} pu={previous_id}")
                         for p,q in e.get("b",[]): self._apply_level(self.book.bids, p, q)
                         for p,q in e.get("a",[]): self._apply_level(self.book.asks, p, q)
-                        self.book.ready = True; self.book.touch(); self.book.last_update_ts = time.time(); last = int(e["u"]); notify()
+                        self.book.ready = True; self.book.touch(); self.book.last_update_ts = time.time(); last = final_id; notify()
+                        retry_sec = 1.0
             except asyncio.CancelledError: raise
             except Exception as e:
-                self.book.ready = False; log.warning("[ASTER] depth poll failed: %s", e); await asyncio.sleep(1)
+                self.book.ready = False
+                wait = self._retry_after(e, retry_sec)
+                if isinstance(e, aiohttp.ClientResponseError) and e.status == 429:
+                    wait = max(wait, 5.0)
+                    log.warning("[ASTER] %s rate limited; retrying in %.0fs: %s",
+                                phase, wait, e)
+                else:
+                    log.warning("[ASTER] %s failed; retrying in %.0fs: %s",
+                                phase, wait, e)
+                retry_sec = min(max(retry_sec * 2, 5.0), MAX_BOOK_RETRY_SEC)
+                try:
+                    await asyncio.wait_for(stop.wait(), timeout=wait)
+                except asyncio.TimeoutError:
+                    pass
 
     @staticmethod
     def _apply_level(side, price, size):

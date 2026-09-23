@@ -5,7 +5,10 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from entropy_arb.config import VenueConf  # noqa: E402
-from entropy_arb.venue_aster import AsterVenue  # noqa: E402
+from entropy_arb.venue_aster import (  # noqa: E402
+    AsterVenue,
+    DEPTH_SNAPSHOT_LIMIT,
+)
 
 
 def make_venue():
@@ -31,6 +34,7 @@ def test_aster_v3_signing_fields_and_nonce_are_monotonic():
 def test_aster_uses_v3_paths():
     venue = make_venue()
     assert venue.api_url == "https://fapi3.asterdex.com"
+    assert DEPTH_SNAPSHOT_LIMIT == 100
 
 
 def test_aster_maps_base_asset_to_usd1_symbol():
