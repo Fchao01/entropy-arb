@@ -17,8 +17,11 @@ class AsterVenue:
         self.conf, self.session = conf, session
         self.key, self.name = conf.key, conf.label
         self.api_url = conf.aster_api_url.rstrip("/")
+        self.market_api_url = self.api_url
+        self.market_api_version = "v3"
         self.ws_url = "wss://fstream.asterdex.com"
         self.book = OrderBook(); self.position = 0.0; self.cash = 0.0
+        self.stream_position = None
         self.volume_usd = 0.0; self.equity = self.free = self.start_equity = None
         self.fee_bps = conf.fee_bps; self.cap_usd = conf.cap_usd
         self.orders_per_min = conf.orders_per_min; self.last_traded_ts = 0.0
@@ -66,11 +69,12 @@ class AsterVenue:
     async def _request(self, method, path, params=None, signed=False):
         p = self._sign_params(params or {}) if signed else dict(params or {})
         kwargs = {"timeout": aiohttp.ClientTimeout(total=10)}
+        kwargs["headers"] = {"User-Agent": "entropy-arb/1.0"}
         if method == "GET":
             kwargs["params"] = p
         else:
             kwargs["data"] = p
-            kwargs["headers"] = {"Content-Type": "application/x-www-form-urlencoded"}
+            kwargs["headers"]["Content-Type"] = "application/x-www-form-urlencoded"
         async with self.session.request(method, self.api_url + path, **kwargs) as r:
             body = await r.text()
             if r.status >= 400:
@@ -111,7 +115,32 @@ class AsterVenue:
         return None
 
     async def load_market(self):
-        info = await self._get("/fapi/v3/exchangeInfo")
+        try:
+            info = await self._get("/fapi/v3/exchangeInfo")
+        except Exception as primary_error:
+            fallback = self.api_url.replace("fapi3.", "fapi.")
+            if fallback == self.api_url:
+                raise
+            log.warning("[ASTER] V3 market endpoint unavailable (%s); "
+                        "trying public V1 market data at %s",
+                        primary_error, fallback)
+            try:
+                async with self.session.get(
+                        fallback + "/fapi/v1/exchangeInfo",
+                        headers={"User-Agent": "entropy-arb/1.0"},
+                        timeout=aiohttp.ClientTimeout(total=10)) as r:
+                    body = await r.text()
+                    if r.status >= 400:
+                        raise RuntimeError(
+                            f"Aster fallback HTTP {r.status}: {body[:300]}")
+                    info = __import__("json").loads(body) if body else {}
+                self.market_api_url = fallback
+                self.market_api_version = "v1"
+            except Exception as fallback_error:
+                raise RuntimeError(
+                    f"Aster market data unavailable on V3 ({primary_error}) "
+                    f"and V1 fallback ({fallback_error}); this is usually "
+                    "an IP/region/WAF restriction") from fallback_error
         requested = self.symbol
         item = self._select_market(info)
         if not item:
@@ -138,6 +167,13 @@ class AsterVenue:
         if derived != self.conf.aster_signer.lower():
             raise RuntimeError(f"Aster signer private key derives {derived}, not ASTER_SIGNER_ADDRESS")
 
+    async def validate_position_mode(self):
+        mode = await self._get("/fapi/v3/positionSide/dual", signed=True)
+        if str(mode.get("dualSidePosition", "false")).lower() == "true":
+            raise RuntimeError(
+                "Aster account is in Hedge Mode; this bot requires One-way "
+                "Mode because it uses reduceOnly without positionSide")
+
     def start_tasks(self, stop, notify, live):
         tasks = [asyncio.create_task(self._book_loop(stop, notify), name=f"book-{self.key}")]
         if live:
@@ -148,7 +184,18 @@ class AsterVenue:
         """Maintain a Binance-compatible Aster diff book with REST snapshot."""
         while not stop.is_set():
             try:
-                snap = await self._get("/fapi/v3/depth", {"symbol": self.symbol, "limit": 1000})
+                if self.market_api_version == "v3":
+                    snap = await self._get(
+                        "/fapi/v3/depth",
+                        {"symbol": self.symbol, "limit": 1000})
+                else:
+                    async with self.session.get(
+                            self.market_api_url + "/fapi/v1/depth",
+                            params={"symbol": self.symbol, "limit": 1000},
+                            headers={"User-Agent": "entropy-arb/1.0"},
+                            timeout=aiohttp.ClientTimeout(total=10)) as r:
+                        r.raise_for_status()
+                        snap = await r.json()
                 self.book.apply_hl([[{"px":p,"sz":q} for p,q in snap.get("bids",[])], [{"px":p,"sz":q} for p,q in snap.get("asks",[])]])
                 last = int(snap.get("lastUpdateId", 0)); notify()
                 async with ws_connect(f"{self.ws_url}/ws/{self.symbol.lower()}@depth@100ms", ping_interval=20, ping_timeout=20, max_size=2**23) as ws:
@@ -175,17 +222,39 @@ class AsterVenue:
         while not stop.is_set():
             try:
                 key = (await self._request("POST", "/fapi/v3/listenKey", signed=True)).get("listenKey")
-                async with ws_connect(f"{self.ws_url}/ws/{key}", ping_interval=20, ping_timeout=20) as ws:
-                    async for raw in ws:
-                        e = __import__('json').loads(raw); typ = e.get("e")
-                        if typ == "ACCOUNT_UPDATE":
-                            for p in (e.get("a", {}).get("P", []) or []):
-                                if p.get("s") == self.symbol: self.position = float(p.get("pa", 0))
-                        if stop.is_set(): break
-                await self._request("PUT", "/fapi/v3/listenKey", {"listenKey": key}, signed=True)
+                if not key:
+                    raise RuntimeError("Aster listenKey response was empty")
+                keepalive = asyncio.create_task(
+                    self._keepalive_loop(stop, key),
+                    name=f"keepalive-{self.key}")
+                try:
+                    async with ws_connect(f"{self.ws_url}/ws/{key}", ping_interval=20, ping_timeout=20) as ws:
+                        async for raw in ws:
+                            e = __import__('json').loads(raw); typ = e.get("e")
+                            if typ == "ACCOUNT_UPDATE":
+                                for p in (e.get("a", {}).get("P", []) or []):
+                                    if p.get("s") == self.symbol:
+                                        self.stream_position = float(p.get("pa", 0))
+                            if typ == "listenKeyExpired" or stop.is_set():
+                                break
+                finally:
+                    keepalive.cancel()
+                    await asyncio.gather(keepalive, return_exceptions=True)
             except asyncio.CancelledError: raise
             except Exception as e:
                 log.warning("[ASTER] user stream failed: %s", e); await asyncio.sleep(2)
+
+    async def _keepalive_loop(self, stop, key):
+        while not stop.is_set():
+            try:
+                await asyncio.wait_for(stop.wait(), timeout=30 * 60)
+                return
+            except asyncio.TimeoutError:
+                try:
+                    await self._request("PUT", "/fapi/v3/listenKey",
+                                        {"listenKey": key}, signed=True)
+                except Exception as e:
+                    log.warning("[ASTER] listenKey keepalive failed: %s", e)
 
     def ready_to_trade(self): return bool(self.conf.aster_user and self.conf.aster_signer and self.conf.aster_private_key)
     def px_round(self, px, round_up):
@@ -209,12 +278,14 @@ class AsterVenue:
             quote = float(o.get("cumQuote", 0) or 0)
             return {"status": status, "filled_base": filled, "avg_px": quote/filled if filled else None, "err": None, "unresolved": False}
         except Exception as e:
-            unknown = "HTTP 503" in str(e)
+            unknown = ("Aster HTTP 5" in str(e)
+                       or isinstance(e, (aiohttp.ClientError,
+                                          asyncio.TimeoutError, OSError)))
             return {"status":"send-failed", "filled_base":0.0, "avg_px":None, "err":repr(e), "unresolved":unknown}
 
     async def fetch_position(self):
         rows = await self._get("/fapi/v3/positionRisk", {"symbol": self.symbol}, signed=True)
-        return float(rows[0].get("positionAmt", 0)) if rows else 0.0
+        return sum(float(row.get("positionAmt", 0) or 0) for row in rows)
     async def fetch_equity(self):
         rows = await self._get("/fapi/v3/balance", signed=True)
         a = next((x for x in rows if x.get("asset") == "USD1"), None)

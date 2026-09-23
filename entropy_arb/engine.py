@@ -163,6 +163,9 @@ class Engine:
                     "请用 --record-only")
             self.primary.init_signer()
             self.hedge.init_signer()
+            for venue in self.venues.values():
+                if venue.kind == "aster":
+                    await venue.validate_position_mode()
             if self.primary.kind == "hl":
                 self.primary.share_nonces_with(self.hedge)
         if (self.primary.kind == "hl" and self.hedge.kind == "hl"
