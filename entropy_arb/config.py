@@ -94,8 +94,10 @@ class VenueConf:
     # lighter
     lighter_profile: Optional[LighterProfile] = None
     lighter_creds: Optional[LighterCreds] = None
-    aster_api_key: Optional[str] = None
-    aster_api_secret: Optional[str] = None
+    aster_user: Optional[str] = None
+    aster_signer: Optional[str] = None
+    aster_private_key: Optional[str] = None
+    aster_api_url: str = "https://fapi3.asterdex.com"
 
 
 @dataclass
@@ -149,7 +151,8 @@ class Config:
             if v.kind == "lighter" and not (v.lighter_creds
                                             and v.lighter_creds.complete):
                 return False
-            if v.kind == "aster" and not (v.aster_api_key and v.aster_api_secret):
+            if v.kind == "aster" and not (v.aster_user and v.aster_signer
+                                               and v.aster_private_key):
                 return False
         return True
 
@@ -370,8 +373,10 @@ def load_config(config_file: str = "config.yaml", env_file: str = ".env", *,
             fee_bps=float(_get(raw, "hedge", "taker_fee_bps", 0.0)),
             cap_usd=float(_get(raw, "hedge", "max_position_usd", 1000.0)),
             orders_per_min=int(_get(raw, "hedge", "max_orders_per_min", 120)),
-            aster_api_key=_env_s("ASTER_API_KEY"),
-            aster_api_secret=_env_s("ASTER_API_SECRET"),
+            aster_user=_env_s("ASTER_USER_ADDRESS"),
+            aster_signer=_env_s("ASTER_SIGNER_ADDRESS"),
+            aster_private_key=_env_s("ASTER_SIGNER_PRIVATE_KEY"),
+            aster_api_url=_env_s("ASTER_API_URL") or "https://fapi3.asterdex.com",
         )
 
     return Config(

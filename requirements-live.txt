@@ -4,7 +4,7 @@
 
 # Hyperliquid signing (Entropy leg, and the tradexyz hedge)
 hyperliquid-python-sdk>=0.9
-eth-account>=0.10
+eth-account>=0.12
 
 # Lighter signing (only needed with --hedge lighter / lighter-rh).
 # Installs from the SDK's current main; for reproducible deploys, append a

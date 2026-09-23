@@ -162,10 +162,12 @@ python3 main.py --symbol SNDK --hedge entropy
   `--hedge tradexyz` 时两条腿默认共用该账户（内部自动共享 nonce 序列）；
   如需分开，设置 `HL_PRIVATE_KEY_XYZ` / `HL_ACCOUNT_ADDRESS_XYZ`。注意给
   所交易的各 dex 分别充入保证金。
-- **Aster 对冲腿** —— 在 Aster Futures 创建 API Key，将
-  `ASTER_API_KEY` 和 `ASTER_API_SECRET` 写入 `.env`。Aster 合约必须是
-  USD1 保证金；程序会在启动时检查 `marginAsset/quoteAsset`。Aster 默认使用
-  IOC 限价吃单，和另一条腿同时发出。
+- **Aster 对冲腿** —— 使用 Aster Pro API V3：填写主钱包
+  `ASTER_USER_ADDRESS`、Agent 钱包地址 `ASTER_SIGNER_ADDRESS` 和 Agent 私钥
+  `ASTER_SIGNER_PRIVATE_KEY`。V3 使用 EIP-712 签名，不再使用旧的
+  `ASTER_API_KEY/ASTER_API_SECRET`。Aster 合约必须是 USD1 保证金；程序会在启动时
+  检查 `marginAsset/quoteAsset`。按 Aster V3 规则，关联主钱包还必须完成过一次
+  deposit，否则账户和交易接口会返回 `-5050`。Aster 默认使用 V3 IOC 限价吃单，和另一条腿同时发出。
 - **light-rh 主腿** —— 优先使用 `LIGHTER_RH_ACCOUNT_INDEX`、
   `LIGHTER_RH_API_KEY_INDEX`、`LIGHTER_RH_API_PRIVATE_KEY`（也兼容旧的
   `LIGHTER_*` 变量）；Lighter 主网对冲腿使用 `LIGHTER_*`，两套部署账户和密钥
