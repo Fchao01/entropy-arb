@@ -85,12 +85,41 @@ class AsterVenue:
     async def _get(self, path, params=None, signed=False):
         return await self._request("GET", path, params, signed)
 
+    def _select_market(self, info):
+        symbols = info.get("symbols") or []
+        requested = self.symbol.upper()
+        exact = next((s for s in symbols
+                      if str(s.get("symbol", "")).upper() == requested), None)
+        if exact is not None:
+            return exact
+
+        # The CLI uses the base asset (for example SNDK), while Aster's
+        # USD1 contract is usually named SNDKUSD1. Keep the mapping local to
+        # this venue so the light-rh primary still receives the CLI symbol.
+        base = requested.removesuffix("USD1")
+        matches = [s for s in symbols
+                   if str(s.get("baseAsset", "")).upper() == base
+                   and str(s.get("quoteAsset", "")).upper() == "USD1"
+                   and str(s.get("marginAsset", "")).upper() == "USD1"
+                   and str(s.get("status", "TRADING")).upper() == "TRADING"]
+        if len(matches) == 1:
+            self.symbol = str(matches[0]["symbol"])
+            return matches[0]
+        if len(matches) > 1:
+            names = ", ".join(str(s.get("symbol")) for s in matches)
+            raise RuntimeError(f"[ASTER] ambiguous USD1 markets for {requested}: {names}")
+        return None
+
     async def load_market(self):
         info = await self._get("/fapi/v3/exchangeInfo")
-        item = next((s for s in info.get("symbols", []) if s.get("symbol") == self.symbol), None)
-        if not item: raise RuntimeError(f"[ASTER] {self.symbol} not found")
-        quote = item.get("quoteAsset") or item.get("marginAsset")
-        if quote != "USD1": raise RuntimeError(f"[ASTER] {self.symbol} is {quote}-margined, expected USD1")
+        requested = self.symbol
+        item = self._select_market(info)
+        if not item:
+            raise RuntimeError(f"[ASTER] {requested} not found as a USD1 market")
+        quote = item.get("quoteAsset")
+        margin = item.get("marginAsset")
+        if quote != "USD1" or margin != "USD1":
+            raise RuntimeError(f"[ASTER] {self.symbol} is {quote}/{margin}-margined, expected USD1/USD1")
         for f in item.get("filters", []):
             if f.get("filterType") == "LOT_SIZE":
                 self.min_base = float(f.get("minQty", self.min_base)); self.size_decimals = max(0, int(round(-math.log10(float(f.get("stepSize", self.min_base))))))

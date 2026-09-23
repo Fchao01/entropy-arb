@@ -31,3 +31,23 @@ def test_aster_v3_signing_fields_and_nonce_are_monotonic():
 def test_aster_uses_v3_paths():
     venue = make_venue()
     assert venue.api_url == "https://fapi3.asterdex.com"
+
+
+def test_aster_maps_base_asset_to_usd1_symbol():
+    venue = make_venue()
+    venue.symbol = "SNDK"
+    item = venue._select_market({"symbols": [
+        {"symbol": "SNDKUSD1", "baseAsset": "SNDK",
+         "quoteAsset": "USD1", "marginAsset": "USD1", "status": "TRADING"},
+    ]})
+    assert item["symbol"] == "SNDKUSD1"
+    assert venue.symbol == "SNDKUSD1"
+
+
+def test_aster_does_not_map_non_usd1_market():
+    venue = make_venue()
+    venue.symbol = "SNDK"
+    assert venue._select_market({"symbols": [
+        {"symbol": "SNDKUSDT", "baseAsset": "SNDK",
+         "quoteAsset": "USDT", "marginAsset": "USDT", "status": "TRADING"},
+    ]}) is None
