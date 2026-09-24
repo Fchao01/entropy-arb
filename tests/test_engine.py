@@ -25,6 +25,7 @@ thresholds:
   lower_bps: {lower}
 execution:
   premium_persist_sec: 0.0
+  min_execution_edge_bps: 0.0
 """)
     f.close()
     return load_config(f.name, NO_ENV,

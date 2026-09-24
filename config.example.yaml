@@ -74,6 +74,9 @@ execution:
   cooldown_sec: 0.0            # min gap between executions / 两次执行的最小间隔
   settle_timeout_sec: 10.0      # wait for fill confirmation / 等待成交确认
   leg_slippage_bps: 50.0       # taker limit protection per leg / 每腿滑点保护
+  # -1 means half of leg_slippage_bps; 0 disables this entry filter.
+  # -1 表示自动使用 leg_slippage_bps 的一半；0 表示关闭过滤。
+  min_execution_edge_bps: -1.0
   hedge_slippage_bps: 20.0     # price protection on delta hedges / 对冲滑点保护
   net_tolerance_base: 0.001    # max tolerated net delta (base units) / 允许的净敞口
   max_consecutive_errors: 3    # halt after N straight failures / 连续失败 N 次后停机

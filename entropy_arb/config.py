@@ -122,6 +122,7 @@ class Config:
     cooldown_sec: float
     settle_timeout_sec: float
     leg_slippage_bps: float
+    min_execution_edge_bps: float
     hedge_slippage_bps: float
     net_tolerance_base: float
     max_consecutive_errors: int
@@ -191,6 +192,7 @@ _SCHEMA: Dict[str, Any] = {
         "cooldown_sec": float,
         "settle_timeout_sec": float,
         "leg_slippage_bps": float,
+        "min_execution_edge_bps": float,
         "hedge_slippage_bps": float,
         "net_tolerance_base": float,
         "max_consecutive_errors": int,
@@ -396,6 +398,7 @@ def load_config(config_file: str = "config.yaml", env_file: str = ".env", *,
         cooldown_sec=float(_get(raw, "execution", "cooldown_sec", 0.0)),
         settle_timeout_sec=float(_get(raw, "execution", "settle_timeout_sec", 5.0)),
         leg_slippage_bps=float(_get(raw, "execution", "leg_slippage_bps", 50.0)),
+        min_execution_edge_bps=float(_get(raw, "execution", "min_execution_edge_bps", -1.0)),
         hedge_slippage_bps=float(_get(raw, "execution", "hedge_slippage_bps", 20.0)),
         net_tolerance_base=float(_get(raw, "execution", "net_tolerance_base", 0.001)),
         max_consecutive_errors=int(_get(raw, "execution", "max_consecutive_errors", 3)),

@@ -277,6 +277,12 @@ class Engine:
         hs = sell.cap_usd + sell.position * ref_px
         return min(hb, hs)
 
+    def _min_execution_edge_bps(self) -> float:
+        configured = self.cfg.min_execution_edge_bps
+        if configured >= 0.0:
+            return configured
+        return max(self.cfg.leg_slippage_bps, 0.0) * 0.5
+
     def _plan(self, buy, sell, cap_notional: float):
         return plan_arb(
             buy.book, sell.book,
@@ -408,6 +414,14 @@ class Engine:
             if not edge_present:
                 self._armed[dkey] = None
                 continue
+            if plan is not None:
+                min_edge = self._min_execution_edge_bps()
+                if plan.marginal_premium_bps < min_edge:
+                    self._armed[dkey] = None
+                    self._skiplog(
+                        "%s skipped: executable edge %.2fbps below minimum %.2fbps",
+                        dkey, plan.marginal_premium_bps, min_edge)
+                    continue
             armed = self._armed.get(dkey)
             if armed is None:
                 # premium persistence: only fire if the edge survives
@@ -427,6 +441,9 @@ class Engine:
                 if plan is None:
                     self._skiplog("%s blocked by position caps (headroom $%.0f)",
                                   dkey, max(headroom, 0.0))
+                    continue
+                if plan.marginal_premium_bps < self._min_execution_edge_bps():
+                    self._armed[dkey] = None
                     continue
             if best is None or plan.exp_edge_usd > best[2].exp_edge_usd:
                 best = (buy, sell, plan)
