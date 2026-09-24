@@ -450,16 +450,7 @@ class Engine:
                  direction, buy.name, plan.qty, plan.buy_limit, sell.name,
                  plan.sell_limit, plan.buy_notional, plan.q_max_notional,
                  plan.marginal_premium_bps, plan.exp_edge_usd)
-        edge_ratio = (plan.sell_limit * (1.0 - plan.sell_fee)
-                      / (plan.buy_limit * (1.0 + plan.buy_fee)))
-        safe_slip = max(0.0, (edge_ratio - 1.0) / (edge_ratio + 1.0))
-        slip_bps = min(max(cfg.leg_slippage_bps, 0.0),
-                        safe_slip * 1e4 * 0.95)
-        if slip_bps < cfg.leg_slippage_bps:
-            log.warning("[ARB] %s leg slippage capped %.2f -> %.2f bps "
-                        "to preserve positive worst-case edge",
-                        direction, cfg.leg_slippage_bps, slip_bps)
-        slip = slip_bps / 1e4
+        slip = max(cfg.leg_slippage_bps, 0.0) / 1e4
         buy_bound = buy.px_round(plan.buy_limit * (1 + slip), round_up=False)
         sell_bound = sell.px_round(plan.sell_limit * (1 - slip), round_up=True)
         self._record_send(buy)
