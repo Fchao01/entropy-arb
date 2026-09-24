@@ -66,7 +66,7 @@ _ZH = {
     "Σ equity": "总权益",
     "Σ exp edge": "累计预期收益",
     "Σ fill edge": "累计实际收益",
-    "trades / hedges": "执行 / 对冲",
+    "matched / attempts / hedges": "匹配成交 / 尝试 / 对冲",
     "net delta": "净敞口",
     "errors": "连续错误",
     "last exec": "上次执行",
@@ -95,7 +95,8 @@ _ZH = {
     "no executions yet": "暂无执行",
     "events (full log: {f})": "日志事件（完整日志：{f}）",
     "entropy-arb stopped": "entropy-arb 已停止",
-    " — {t} trades / {h} hedges, session PnL ": " —— 执行 {t} / 对冲 {h}，会话盈亏 ",
+    " — {t} matched / {a} attempts / {h} hedges, session PnL ":
+        " —— 匹配成交 {t} / 尝试 {a} / 对冲 {h}，会话盈亏 ",
     ", Σ fill edge ": "，累计实际收益 ",
     ", {n} minute rows recorded": "，已记录 {n} 行分钟数据",
     " — full log: {f}": " —— 完整日志：{f}",
@@ -160,8 +161,8 @@ class Dashboard:
                     pass
         t = Text()
         t.append(self._t("entropy-arb stopped"), style="bold")
-        t.append(self._t(" — {t} trades / {h} hedges, session PnL ",
-                         t=eng.trades, h=eng.hedges))
+        t.append(self._t(" — {t} matched / {a} attempts / {h} hedges, session PnL ",
+                         t=eng.trades, a=eng.attempts, h=eng.hedges))
         t.append_text(_usd(eng.session_pnl()))
         t.append(self._t(", Σ fill edge "))
         t.append_text(_usd(eng.total_fill_edge))
@@ -292,8 +293,8 @@ class Dashboard:
                        signed=False, decimals=2))
         g.add_row(self._t("Σ exp edge"), _usd(eng.total_exp_edge))
         g.add_row(self._t("Σ fill edge"), _usd(eng.total_fill_edge))
-        g.add_row(self._t("trades / hedges"),
-                  Text(f"{eng.trades} / {eng.hedges}"))
+        g.add_row(self._t("matched / attempts / hedges"),
+                  Text(f"{eng.trades} / {eng.attempts} / {eng.hedges}"))
         g.add_row(self._t("net delta"), Text(f"{net:+.6g}",
                   style="bold red" if abs(net) > cfg.net_tolerance_base
                   else "dim"))

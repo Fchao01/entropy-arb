@@ -80,7 +80,7 @@ def test_renders_key_numbers():
     eng.primary.position, eng.hedge.position = 0.5, -0.5
     eng.primary.equity, eng.primary.start_equity = 1000.0, 990.0
     eng.hedge.equity, eng.hedge.start_equity = 500.0, 500.0
-    eng.trades, eng.hedges = 7, 1
+    eng.trades, eng.attempts, eng.hedges = 7, 7, 1
     eng.recent_trades.append({
         "ts": time.time(), "direction": "sell_primary", "qty": 0.5,
         "notional": 50.0, "prem_bps": 15.0, "exp": 0.07, "fill": 0.05,
@@ -88,7 +88,7 @@ def test_renders_key_numbers():
     out = render(eng)
     for needle in ("LIGHT-RH", "RH", "SELL primary", "BUY primary",
                    "100.14", "99.99", "mid premium", "midline",
-                   "7 / 1", "filled",
+                   "7 / 7 / 1", "filled",
                    "$+10.00", "LIVE", "s ago"):
         assert needle in out, f"{needle!r} missing from render"
     assert "render error" not in out
@@ -102,7 +102,7 @@ def test_renders_in_chinese():
     eng = make_engine()
     eng.primary.set_book(100.14, 100.16)
     eng.hedge.set_book(99.99, 100.01)
-    eng.trades, eng.hedges = 7, 1
+    eng.trades, eng.attempts, eng.hedges = 7, 7, 1
     eng.last_trade_ts = time.time() - 42
     out = render(eng, lang="zh")
     for needle in ("实盘", "运行中", "交易所", "买一 / 卖一", "持仓", "会话",
@@ -119,10 +119,10 @@ def test_renders_in_chinese():
 
 def test_zh_stop_summary():
     eng = make_engine()
-    eng.trades, eng.hedges = 3, 1
+    eng.trades, eng.attempts, eng.hedges = 3, 3, 1
     dash = Dashboard(eng, BufferLogHandler(), "logs/engine.log", lang="zh")
-    assert dash._t(" — {t} trades / {h} hedges, session PnL ",
-                   t=3, h=1) == " —— 执行 3 / 对冲 1，会话盈亏 "
+    assert dash._t(" — {t} matched / {a} attempts / {h} hedges, session PnL ",
+                   t=3, a=3, h=1) == " —— 匹配成交 3 / 尝试 3 / 对冲 1，会话盈亏 "
     assert dash._t("no such key stays english") == "no such key stays english"
 
 

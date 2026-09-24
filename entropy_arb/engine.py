@@ -68,6 +68,7 @@ class Engine:
         self.consec_errors = 0
         self.last_trade_ts = 0.0
         self.trades = 0
+        self.attempts = 0
         self.hedges = 0
         self.total_exp_edge = 0.0
         self.total_fill_edge = 0.0
@@ -230,8 +231,9 @@ class Engine:
         for t in tasks:
             t.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
-        log.info("shutdown — %d trades, %d hedges, exp edge $%.4f, "
-                 "fill edge $%.4f", self.trades, self.hedges,
+        log.info("shutdown — %d matched trades / %d attempts, %d hedges, "
+                 "exp edge $%.4f, fill edge $%.4f", self.trades,
+                 self.attempts, self.hedges,
                  self.total_exp_edge, self.total_fill_edge)
 
     # --------------------------------------------------------------- signals
@@ -439,6 +441,7 @@ class Engine:
         if self.halted:
             return False
         cfg = self.cfg
+        self.attempts += 1
         inv_bps = self._inv_add_bps(buy, sell)
         direction = "sell_primary" if sell.key == "primary" else "buy_primary"
         self.last_trade_ts = time.time()
@@ -496,6 +499,9 @@ class Engine:
                  "matched %.6g | fill edge $%.4f", direction,
                  buy.name, binfo["status"], bfill, plan.qty,
                  sell.name, sinfo["status"], sfill, plan.qty, matched, fill_edge)
+        if matched <= 0 and (bfill > 0 or sfill > 0):
+            log.warning("[UNMATCHED] %s single-leg fill; emergency hedge "
+                        "required", direction)
         log.info("[LATENCY] %s order_roundtrip=%.1fms",
                  direction, (time.perf_counter() - send_started) * 1000.0)
         buy.last_traded_ts = sell.last_traded_ts = time.time()
@@ -513,6 +519,7 @@ class Engine:
                             "pausing venue", v.name)
                 self._mark_limited(v)
         sent_ok = not hard_err and not unresolved
+        matched_trade = sent_ok and matched > 0
         if sent_ok:
             self.consec_errors = 0
         elif not rate_limited:
@@ -522,24 +529,28 @@ class Engine:
                 log.critical("HALTED after %d consecutive execution problems "
                              "— flatten manually and restart / 连续执行异常，"
                              "引擎已停止，请手动平仓后重启", self.consec_errors)
-        if sent_ok:
+        expected_edge = 0.0
+        if matched_trade:
             self.trades += 1
-            self.total_exp_edge += plan.exp_edge_usd
+            matched_ratio = min(1.0, matched / plan.qty) if plan.qty else 0.0
+            expected_edge = plan.exp_edge_usd * matched_ratio
+            self.total_exp_edge += expected_edge
         self._record_trade(direction, plan,
                            None if unresolved else fill_edge,
-                           f"{binfo['status']}/{sinfo['status']}", sent_ok)
-        self._log_csv(direction, buy, sell, plan, sent_ok, bfill, sfill,
+                           f"{binfo['status']}/{sinfo['status']}",
+                           matched_trade, expected_edge)
+        self._log_csv(direction, buy, sell, plan, matched_trade, bfill, sfill,
                       binfo["status"], sinfo["status"], fill_edge, inv_bps)
         self.last_trade_ts = time.time()
         return bool(unresolved)
 
     def _record_trade(self, direction: str, plan: ArbPlan, fill_edge,
-                      status: str, ok: bool) -> None:
+                      status: str, ok: bool, expected_edge: float) -> None:
         self.recent_trades.append({
             "ts": time.time(), "direction": direction, "qty": plan.qty,
             "notional": plan.buy_notional,
-            "prem_bps": plan.marginal_premium_bps,
-            "exp": plan.exp_edge_usd, "fill": fill_edge, "status": status,
+            "prem_bps": plan.marginal_premium_bps, "exp": expected_edge,
+            "fill": fill_edge, "status": status,
             "ok": ok})
 
     async def _maybe_hedge(self) -> None:
@@ -776,11 +787,11 @@ class Engine:
             rec = (f" | rec {self.recorder.rows_written} rows"
                    if self.recorder else "")
             log.info("[status] %s | prem %s bps (band %+.2f..%+.2f) | pos %s "
-                     "net %+.6g | trades %d hedges %d | MTM %s expEdge $%.4f "
+                     "net %+.6g | matched %d/%d attempts hedges %d | MTM %s expEdge $%.4f "
                      "fillEdge $%.4f%s%s",
                      books, prem_s, cfg.midline_bps - cfg.lower_bps,
                      cfg.midline_bps + cfg.upper_bps, pos, net, self.trades,
-                     self.hedges,
+                     self.attempts, self.hedges,
                      f"${pnl:+.4f}" if pnl is not None else "—",
                      self.total_exp_edge, self.total_fill_edge, rec,
                      " *** HALTED ***" if self.halted else "")
