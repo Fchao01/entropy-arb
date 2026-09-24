@@ -68,25 +68,47 @@ class AsterVenue:
         p["signature"] = sig
         return p
 
-    async def _request(self, method, path, params=None, signed=False):
-        p = self._sign_params(params or {}) if signed else dict(params or {})
+    async def _request_once(self, method, path, params, base_url):
         kwargs = {"timeout": aiohttp.ClientTimeout(total=10)}
         kwargs["headers"] = {"User-Agent": "entropy-arb/1.0"}
         if method == "GET":
-            kwargs["params"] = p
+            kwargs["params"] = params
         else:
-            kwargs["data"] = p
+            kwargs["data"] = params
             kwargs["headers"]["Content-Type"] = "application/x-www-form-urlencoded"
-        async with self.session.request(method, self.api_url + path, **kwargs) as r:
-            body = await r.text()
-            if r.status >= 400:
-                # V3 documents HTTP 503 as an accepted-but-unknown outcome.
-                suffix = " (execution status unknown)" if r.status == 503 else ""
-                raise RuntimeError(f"Aster HTTP {r.status}{suffix}: {body[:300]}")
-            try:
-                return __import__("json").loads(body) if body else {}
-            except ValueError:
-                raise RuntimeError(f"Aster invalid JSON response: {body[:300]}")
+        async with self.session.request(method, base_url + path, **kwargs) as r:
+            return r.status, await r.text()
+
+    def _alternate_api_url(self):
+        if "fapi3." in self.api_url:
+            return self.api_url.replace("fapi3.", "fapi.")
+        if "fapi." in self.api_url:
+            return self.api_url.replace("fapi.", "fapi3.")
+        return None
+
+    async def _request(self, method, path, params=None, signed=False):
+        p = self._sign_params(params or {}) if signed else dict(params or {})
+        status, body = await self._request_once(method, path, p, self.api_url)
+        if status == 403:
+            alternate = self._alternate_api_url()
+            if alternate:
+                log.warning("[ASTER] API %s returned HTTP 403; retrying via %s",
+                            self.api_url, alternate)
+                retry_status, retry_body = await self._request_once(
+                    method, path, p, alternate)
+                status, body = retry_status, retry_body
+                if status < 400:
+                    self.api_url = alternate
+                    if self.market_api_version == "v3":
+                        self.market_api_url = alternate
+                    log.warning("[ASTER] using API endpoint %s", alternate)
+        if status >= 400:
+            suffix = " (execution status unknown)" if status == 503 else ""
+            raise RuntimeError(f"Aster HTTP {status}{suffix}: {body[:300]}")
+        try:
+            return __import__("json").loads(body) if body else {}
+        except ValueError:
+            raise RuntimeError(f"Aster invalid JSON response: {body[:300]}")
 
     async def _get(self, path, params=None, signed=False):
         return await self._request("GET", path, params, signed)
@@ -121,8 +143,6 @@ class AsterVenue:
             info = await self._get("/fapi/v3/exchangeInfo")
         except Exception as primary_error:
             fallback = self.api_url.replace("fapi3.", "fapi.")
-            if fallback == self.api_url:
-                raise
             log.warning("[ASTER] V3 market endpoint unavailable (%s); "
                         "trying public V1 market data at %s",
                         primary_error, fallback)

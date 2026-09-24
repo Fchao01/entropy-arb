@@ -37,6 +37,40 @@ def test_aster_uses_v3_paths():
     assert DEPTH_SNAPSHOT_LIMIT == 100
 
 
+def test_aster_fails_over_from_fapi3_on_waf_403():
+    class Response:
+        def __init__(self, status, body):
+            self.status, self.body = status, body
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+        async def text(self):
+            return self.body
+
+    class Session:
+        def __init__(self):
+            self.calls = []
+            self.responses = [Response(403, "forbidden"), Response(200, "{}")]
+
+        def request(self, method, url, **_kwargs):
+            self.calls.append((method, url))
+            return self.responses.pop(0)
+
+    venue = make_venue()
+    venue.session = Session()
+    result = asyncio.run(venue._get("/fapi/v3/positionSide/dual"))
+    assert result == {}
+    assert venue.api_url == "https://fapi.asterdex.com"
+    assert [url for _, url in venue.session.calls] == [
+        "https://fapi3.asterdex.com/fapi/v3/positionSide/dual",
+        "https://fapi.asterdex.com/fapi/v3/positionSide/dual",
+    ]
+
+
 def test_aster_maps_base_asset_to_usd1_symbol():
     venue = make_venue()
     venue.symbol = "SNDK"

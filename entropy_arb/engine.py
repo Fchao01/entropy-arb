@@ -135,6 +135,9 @@ class Engine:
         try:
             await self._run_inner()
         finally:
+            await asyncio.gather(
+                *(venue.close() for venue in self.venues.values()),
+                return_exceptions=True)
             await self.session.close()
 
     def _make_venue(self, vc):
@@ -227,8 +230,6 @@ class Engine:
         for t in tasks:
             t.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
-        for v in self.venues.values():
-            await v.close()
         log.info("shutdown — %d trades, %d hedges, exp edge $%.4f, "
                  "fill edge $%.4f", self.trades, self.hedges,
                  self.total_exp_edge, self.total_fill_edge)
