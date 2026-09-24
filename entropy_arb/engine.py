@@ -333,6 +333,17 @@ class Engine:
         if best is None:
             return
         buy, sell, plan = best
+        direction = "sell_primary" if sell.key == "primary" else "buy_primary"
+        armed = self._armed.get(direction)
+        signal_age_ms = ((now - armed) * 1000.0
+                         if armed is not None else 0.0)
+        book_age_ms = max(
+            0.0,
+            (now - buy.book.last_update_ts) * 1000.0,
+            (now - sell.book.last_update_ts) * 1000.0,
+        )
+        log.info("[LATENCY] %s signal_age=%.1fms book_age=%.1fms",
+                 direction, signal_age_ms, book_age_ms)
         # _scan verified both locks free and nothing ran since (no awaits),
         # so these acquires take the no-suspension fast path
         await self._vlock(buy.key).acquire()
@@ -436,11 +447,21 @@ class Engine:
                  direction, buy.name, plan.qty, plan.buy_limit, sell.name,
                  plan.sell_limit, plan.buy_notional, plan.q_max_notional,
                  plan.marginal_premium_bps, plan.exp_edge_usd)
-        slip = cfg.leg_slippage_bps / 1e4
+        edge_ratio = (plan.sell_limit * (1.0 - plan.sell_fee)
+                      / (plan.buy_limit * (1.0 + plan.buy_fee)))
+        safe_slip = max(0.0, (edge_ratio - 1.0) / (edge_ratio + 1.0))
+        slip_bps = min(max(cfg.leg_slippage_bps, 0.0),
+                        safe_slip * 1e4 * 0.95)
+        if slip_bps < cfg.leg_slippage_bps:
+            log.warning("[ARB] %s leg slippage capped %.2f -> %.2f bps "
+                        "to preserve positive worst-case edge",
+                        direction, cfg.leg_slippage_bps, slip_bps)
+        slip = slip_bps / 1e4
         buy_bound = buy.px_round(plan.buy_limit * (1 + slip), round_up=False)
         sell_bound = sell.px_round(plan.sell_limit * (1 - slip), round_up=True)
         self._record_send(buy)
         self._record_send(sell)
+        send_started = time.perf_counter()
         res = await asyncio.gather(
             buy.send_taker(is_buy=True, qty=plan.qty, limit_px=buy_bound),
             sell.send_taker(is_buy=False, qty=plan.qty, limit_px=sell_bound),
@@ -475,6 +496,8 @@ class Engine:
                  "matched %.6g | fill edge $%.4f", direction,
                  buy.name, binfo["status"], bfill, plan.qty,
                  sell.name, sinfo["status"], sfill, plan.qty, matched, fill_edge)
+        log.info("[LATENCY] %s order_roundtrip=%.1fms",
+                 direction, (time.perf_counter() - send_started) * 1000.0)
         buy.last_traded_ts = sell.last_traded_ts = time.time()
 
         unresolved = binfo.get("unresolved") or sinfo.get("unresolved")

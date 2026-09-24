@@ -7,7 +7,6 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from entropy_arb.config import VenueConf  # noqa: E402
 from entropy_arb.venue_aster import (  # noqa: E402
     AsterVenue,
-    DEPTH_SNAPSHOT_LIMIT,
 )
 
 
@@ -34,7 +33,18 @@ def test_aster_v3_signing_fields_and_nonce_are_monotonic():
 def test_aster_uses_v3_paths():
     venue = make_venue()
     assert venue.api_url == "https://fapi3.asterdex.com"
-    assert DEPTH_SNAPSHOT_LIMIT == 100
+
+
+def test_aster_partial_depth_replaces_top_of_book():
+    venue = make_venue()
+    venue._apply_partial_depth({
+        "b": [["100.0", "2.0"]],
+        "a": [["101.0", "3.0"]],
+    })
+    assert venue.book.best_bid() == 100.0
+    assert venue.book.best_ask() == 101.0
+    assert venue.book.bids[100.0] == 2.0
+    assert venue.book.asks[101.0] == 3.0
 
 
 def test_aster_fails_over_from_fapi3_on_waf_403():
