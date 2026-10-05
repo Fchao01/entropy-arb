@@ -40,6 +40,12 @@ thresholds:
   midline_bps: 0.0     # persistent premium center / 溢价长期中枢
   upper_bps: 4.0       # entry above midline: sell entropy / 中枢上方入场带宽
   lower_bps: 4.0       # entry below midline: buy entropy / 中枢下方入场带宽
+  # Closing bands are used when the opposite pair position is already open.
+  # Keep them equal to the entry bands to preserve the old behavior, or make
+  # them smaller to unwind inventory sooner and reduce threshold churn.
+  # 已有相反仓位时使用平仓带宽；与入场带宽相同可保持原有行为，调小后可更早平仓。
+  close_upper_bps: 4.0
+  close_lower_bps: 4.0
 
 # ======================== VENUES / 交易所参数 ==============================
 entropy:
