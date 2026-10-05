@@ -45,6 +45,8 @@ midline − lower  ────────────────────�
   计价货币不同、新上市溢价等），零中心的带只会朝一个方向开仓、打满仓位上限、
   永远无法平仓。请实际测量溢价所在的位置，然后填入。
 - `upper_bps` / `lower_bps` —— 中枢上下两侧的入场带宽。
+- `close_upper_bps` / `close_lower_bps` —— 已有一组相反仓位时的平仓带宽；
+  默认等于入场带宽，调小后可以形成滞回区，减少阈值附近反复开平仓。
 
 两个方向的门槛都作用于**可实际成交的价格**（Entropy 买一 对 对冲腿卖一，
 反之亦然），并且是**扣除双边吃单手续费之后的净门槛**——引擎会在阈值之上
@@ -139,11 +141,16 @@ python3 main.py --symbol SNDK --hedge lighter-rh
 交易市场由命令行指定（`--symbol`、`--hedge`）。完整的双语注释参考：
 [config.example.yaml](config.example.yaml)。核心项：
 
+默认第一条腿是 Entropy 的 `io` dex；如果交易 ETH 这类 Hyperliquid 核心市场，
+请把 `entropy.dex` 写成空字符串 `""`。这时第一条腿是 Hyperliquid core，
+不再是 Entropy 市场，且仍需确认对冲腿有同名的 active 市场。
+
 | 键 | 含义 | 默认值 |
 |---|---|---|
 | `thresholds.midline_bps` | 溢价中枢（必须实测！） | — |
 | `thresholds.upper_bps` / `lower_bps` | 入场带宽（> 0） | — |
-| `entropy.dex` | Entropy 在 Hyperliquid 上的 dex 名 | `io` |
+| `thresholds.close_upper_bps` / `close_lower_bps` | 平仓带宽（> 0） | 同入场带宽 |
+| `entropy.dex` | Hyperliquid 上第一条腿的 dex；Entropy 用 `io`，核心市场（如 ETH）用空字符串 `""` | `io` |
 | `*.taker_fee_bps` | 各所吃单费 | 0.0（tradexyz 对冲腿：1.0） |
 | `*.max_position_usd` | 各所持仓上限 | 1000 |
 | `*.max_orders_per_min` | 各所每分钟下单预算（滑动 60 秒） | 120；Lighter 对冲腿 30 |
@@ -152,8 +159,15 @@ python3 main.py --symbol SNDK --hedge lighter-rh
 | `inventory.scale_bps` / `floor_frac` | 库存阶梯（仓位超过上限的 `floor_frac` 后额外加价） | 10 / 0.5 |
 | `execution.premium_persist_sec` | 信号需持续多久才触发 | 0.3 |
 | `execution.*` | 滑点保护、超时、对账周期等 | 见配置文件 |
+| `execution.latency_buffer_bps` / `slippage_buffer_bps` | 在信号门槛上预留实测延迟和成交滑点 | 0 |
+| `execution.max_book_skew_sec` | 两边盘口本地更新时间允许的最大差值 | 0.5 |
 | `recorder.*` | 分钟数据采集器 | 开启，`logs/minutes.csv` |
 | `logging.dashboard` / `logging.file` | 终端仪表盘；开启时日志写入文件 | 开启，`logs/engine.log` |
+
+`logging.trades_csv` 现在还会记录盘口年龄、两边盘口更新时间差、两条腿发送耗时、
+实际成交价、成交后的实际 edge，以及相对计划 edge 的损失。运行一段时间后，可以用
+这些字段估计 p95 延迟和滑点，再回填 `latency_buffer_bps` 与
+`slippage_buffer_bps`，不要直接猜一个固定值。
 
 ## 密钥配置（`.env`，仅实盘需要）
 

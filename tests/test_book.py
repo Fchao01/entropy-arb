@@ -4,6 +4,7 @@ Run:  python3 -m pytest tests/  (or  python3 tests/test_book.py)
 """
 import os
 import sys
+import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -89,6 +90,14 @@ def test_lighter_diff_maintenance():
                      "asks": [{"price": "100.2", "size": "3"}]},
                     snapshot=True)
     assert b.best_bid() == 98.9 and b.best_ask() == 100.2
+
+
+def test_freshness_uses_book_update_not_heartbeat():
+    b = make_book(bids=[(99.0, 1)], asks=[(100.0, 1)])
+    b.last_update_ts = time.time() - 10.0
+    b.alive_ts = time.time()
+    assert not b.is_fresh(1.0)
+    assert b.is_alive(1.0)
 
 
 if __name__ == "__main__":

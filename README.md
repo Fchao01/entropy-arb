@@ -50,6 +50,8 @@ midline − lower  ────────────────────�
   premia), so a zero-centered band would fire one direction only, cap out and
   never unwind. Measure where the premium actually sits and type it in.
 - `upper_bps` / `lower_bps` — the entry bands on each side of the midline.
+- `close_upper_bps` / `close_lower_bps` — narrower bands used when the
+  opposite pair position is already open; they default to the entry bands.
 
 Both hurdles are applied to **executable** prices (entropy bid vs hedge ask,
 and vice versa) and are **net of both venues' taker fees** — the engine adds
@@ -152,11 +154,17 @@ errors), credentials in `.env`, and the markets on the command line
 (`--symbol`, `--hedge`). Full commented reference:
 [config.example.yaml](config.example.yaml). The essentials:
 
+The default first leg is Entropy's `io` dex. For a Hyperliquid core market
+such as ETH, set `entropy.dex: ""`; that makes the first leg Hyperliquid core,
+not an Entropy market, and the hedge venue must still list the same active
+symbol.
+
 | key | meaning | default |
 |---|---|---|
 | `thresholds.midline_bps` | premium center (measure it!) | — |
 | `thresholds.upper_bps` / `lower_bps` | entry bands (> 0) | — |
-| `entropy.dex` | Entropy's dex name on Hyperliquid | `io` |
+| `thresholds.close_upper_bps` / `close_lower_bps` | closing bands (> 0) | entry bands |
+| `entropy.dex` | Hyperliquid dex for the first leg; use `io` for Entropy or `""` for core markets such as ETH | `io` |
 | `*.taker_fee_bps` | per-venue taker fee | 0.0 (tradexyz hedge: 1.0) |
 | `*.max_position_usd` | per-venue position cap | 1000 |
 | `*.max_orders_per_min` | per-venue send budget (sliding 60 s) | 120; lighter hedges 30 |
@@ -165,8 +173,16 @@ errors), credentials in `.env`, and the markets on the command line
 | `inventory.scale_bps` / `floor_frac` | inventory ladder (extra bps past `floor_frac` of the cap) | 10 / 0.5 |
 | `execution.premium_persist_sec` | edge must persist before firing | 0.3 |
 | `execution.*` | slippage bounds, timeouts, reconcile cadence… | see file |
+| `execution.latency_buffer_bps` / `slippage_buffer_bps` | measured p95 cost reserves added to the hurdle | 0 |
+| `execution.max_book_skew_sec` | maximum local receipt-time gap between books | 0.5 |
 | `recorder.*` | minute-data recorder | on, `logs/minutes.csv` |
 | `logging.dashboard` / `logging.file` | Rich dashboard on a tty; log file while it runs | on, `logs/engine.log` |
+
+`logging.trades_csv` also records book age, cross-book receipt skew, per-leg
+send latency, actual fill prices, realized edge, and edge shortfall versus the
+plan. Use a sample of live or record-only runs to estimate p95 latency and
+slippage before setting the two buffer fields; do not guess them once and
+leave them unchanged.
 
 ## Credentials (`.env`, live only)
 

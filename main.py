@@ -55,6 +55,7 @@ def setup_logging(level: str, log_file: str = None,
 async def amain(cfg, record_only: bool, use_dashboard: bool, force_tty: bool,
                 log_buffer, lang: str) -> None:
     eng = Engine(cfg, record_only=record_only)
+    eng.ensure_async_state()
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(sig, eng.request_stop)

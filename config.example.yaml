@@ -11,7 +11,8 @@
 # WHICH MARKETS to trade is NOT in this file — you state it explicitly on
 # every start with command-line flags:
 #     python3 main.py --symbol SNDK --hedge lighter-rh
-# Entropy is always one leg; --hedge picks the other:
+# By default one leg is Entropy (the `io` builder dex); for a core market such
+# as ETH, set `entropy.dex: ""` in the strategy file. --hedge picks the other:
 #   lighter      Lighter mainnet            (USDC, 0 bps taker)
 #   lighter-rh   Lighter Robinhood chain    (USDG, 0 bps taker)
 #   tradexyz     Hyperliquid trade.xyz dex  (USDC, ~1 bps taker)
@@ -42,7 +43,7 @@ thresholds:
 
 # ======================== VENUES / 交易所参数 ==============================
 entropy:
-  dex: io                    # Entropy's dex name on Hyperliquid / Entropy 的 dex 名
+  dex: io                    # Entropy's dex; use "" for Hyperliquid core (e.g. ETH) / Entropy 的 dex 名；核心市场（如 ETH）填 ""
   taker_fee_bps: 0.0         # taker fee / 吃单手续费
   max_position_usd: 1000     # position cap / 持仓上限（美元）
   max_orders_per_min: 120    # order-send budget, sliding 60s / 每分钟下单预算
@@ -82,6 +83,9 @@ execution:
   reconcile_sec: 15.0          # on-chain position sync cadence / 链上持仓核对周期
   venue_probe_sec: 30.0        # probe cadence for a down venue / 故障交易所探测周期
   http_keepalive_sec: 10.0     # keep order-path TLS warm; 0 = off / 订单链路保活
+  latency_buffer_bps: 0.0      # measured p95 latency reserve / 延迟损失预留
+  slippage_buffer_bps: 0.0     # measured p95 fill reserve / 实际滑点预留
+  max_book_skew_sec: 0.5       # max receipt-time gap between two books / 两边盘口最大时间差
 
 # ================== DATA RECORDER / 数据采集 ===============================
 # Always-on while the bot runs: samples both real order books 1/sec and

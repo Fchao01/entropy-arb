@@ -105,8 +105,11 @@ class HLVenue:
                                f"{[n for n in names if n][:20]}...)")
         dex_index = names.index(self.conf.hl_dex)
         meta = await self._info({"type": "meta", "dex": self.conf.hl_dex})
+        dex_label = self.conf.hl_dex or "core"
         want = f"{self.conf.hl_dex}:{self.conf.symbol}"
+        available = []
         for idx, a in enumerate(meta["universe"]):
+            available.append(a.get("name", ""))
             if a["name"] not in (want, self.conf.symbol):
                 continue
             if a.get("isDelisted"):
@@ -120,7 +123,11 @@ class HLVenue:
                      a.get("maxLeverage"),
                      "isolated-only" if a.get("onlyIsolated") else "")
             return
-        raise RuntimeError(f"[{self.name}] {want} not found")
+        shown = ", ".join(x for x in available if x) or "<none>"
+        raise RuntimeError(
+            f"[{self.name}] {self.conf.symbol} not found on Hyperliquid "
+            f"dex '{dex_label}' (config entropy.dex={self.conf.hl_dex!r}); "
+            f"available symbols: {shown}")
 
     def init_signer(self) -> None:
         c = self.conf.hl_creds

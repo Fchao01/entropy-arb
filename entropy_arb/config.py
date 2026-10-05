@@ -104,6 +104,8 @@ class Config:
     midline_bps: float
     upper_bps: float
     lower_bps: float
+    close_upper_bps: float
+    close_lower_bps: float
     # sizing
     take_fraction: float
     max_order_notional: float
@@ -124,6 +126,9 @@ class Config:
     reconcile_sec: float
     venue_probe_sec: float
     http_keepalive_sec: float
+    latency_buffer_bps: float
+    slippage_buffer_bps: float
+    max_book_skew_sec: float
     # recorder
     recorder_enabled: bool
     recorder_csv: str
@@ -156,6 +161,8 @@ _SCHEMA: Dict[str, Any] = {
         "midline_bps": float,
         "upper_bps": float,
         "lower_bps": float,
+        "close_upper_bps": float,
+        "close_lower_bps": float,
     },
     "entropy": {
         "dex": str,
@@ -190,6 +197,9 @@ _SCHEMA: Dict[str, Any] = {
         "reconcile_sec": float,
         "venue_probe_sec": float,
         "http_keepalive_sec": float,
+        "latency_buffer_bps": float,
+        "slippage_buffer_bps": float,
+        "max_book_skew_sec": float,
     },
     "recorder": {
         "enabled": bool,
@@ -284,6 +294,11 @@ def load_config(config_file: str = "config.yaml", env_file: str = ".env", *,
     if upper <= 0 or lower <= 0:
         raise ConfigError("thresholds.upper_bps and lower_bps must be > 0 "
                           "(the round trip nets upper+lower bps after fees)")
+    close_upper = float(_get(raw, "thresholds", "close_upper_bps", upper))
+    close_lower = float(_get(raw, "thresholds", "close_lower_bps", lower))
+    if close_upper <= 0 or close_lower <= 0:
+        raise ConfigError("thresholds.close_upper_bps and close_lower_bps "
+                          "must be > 0")
 
     take_fraction = float(_get(raw, "sizing", "take_fraction", 0.5))
     if not 0.0 < take_fraction <= 1.0:
@@ -334,6 +349,18 @@ def load_config(config_file: str = "config.yaml", env_file: str = ".env", *,
                                        _env_s("LIGHTER_API_PRIVATE_KEY")),
         )
 
+    latency_buffer_bps = float(_get(raw, "execution", "latency_buffer_bps", 0.0))
+    slippage_buffer_bps = float(_get(raw, "execution", "slippage_buffer_bps", 0.0))
+    max_book_skew_sec = float(_get(raw, "execution", "max_book_skew_sec", 0.5))
+    leg_slippage_bps = float(_get(raw, "execution", "leg_slippage_bps", 50.0))
+    hedge_slippage_bps = float(_get(raw, "execution", "hedge_slippage_bps", 20.0))
+    if latency_buffer_bps < 0 or slippage_buffer_bps < 0:
+        raise ConfigError("execution latency/slippage buffers must be >= 0")
+    if leg_slippage_bps < 0 or hedge_slippage_bps < 0:
+        raise ConfigError("execution slippage limits must be >= 0")
+    if max_book_skew_sec <= 0:
+        raise ConfigError("execution.max_book_skew_sec must be > 0")
+
     return Config(
         symbol=symbol,
         hedge_venue=hedge_venue,
@@ -342,6 +369,8 @@ def load_config(config_file: str = "config.yaml", env_file: str = ".env", *,
         midline_bps=float(thr["midline_bps"]),
         upper_bps=upper,
         lower_bps=lower,
+        close_upper_bps=close_upper,
+        close_lower_bps=close_lower,
         take_fraction=take_fraction,
         max_order_notional=float(_get(raw, "sizing", "max_order_notional_usd", 500.0)),
         min_order_notional=float(_get(raw, "sizing", "min_order_notional_usd", 10.0)),
@@ -350,8 +379,8 @@ def load_config(config_file: str = "config.yaml", env_file: str = ".env", *,
         premium_persist_sec=float(_get(raw, "execution", "premium_persist_sec", 0.3)),
         cooldown_sec=float(_get(raw, "execution", "cooldown_sec", 0.0)),
         settle_timeout_sec=float(_get(raw, "execution", "settle_timeout_sec", 5.0)),
-        leg_slippage_bps=float(_get(raw, "execution", "leg_slippage_bps", 50.0)),
-        hedge_slippage_bps=float(_get(raw, "execution", "hedge_slippage_bps", 20.0)),
+        leg_slippage_bps=leg_slippage_bps,
+        hedge_slippage_bps=hedge_slippage_bps,
         net_tolerance_base=float(_get(raw, "execution", "net_tolerance_base", 0.001)),
         max_consecutive_errors=int(_get(raw, "execution", "max_consecutive_errors", 3)),
         rate_limit_pause_sec=float(_get(raw, "execution", "rate_limit_pause_sec", 10.0)),
@@ -359,6 +388,9 @@ def load_config(config_file: str = "config.yaml", env_file: str = ".env", *,
         reconcile_sec=float(_get(raw, "execution", "reconcile_sec", 15.0)),
         venue_probe_sec=float(_get(raw, "execution", "venue_probe_sec", 30.0)),
         http_keepalive_sec=float(_get(raw, "execution", "http_keepalive_sec", 10.0)),
+        latency_buffer_bps=latency_buffer_bps,
+        slippage_buffer_bps=slippage_buffer_bps,
+        max_book_skew_sec=max_book_skew_sec,
         recorder_enabled=bool(_get(raw, "recorder", "enabled", True)),
         recorder_csv=_get(raw, "recorder", "csv", "logs/minutes.csv"),
         log_level=str(_get(raw, "logging", "level", "INFO")).upper(),

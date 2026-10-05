@@ -36,7 +36,10 @@ CSV_HEADER = ["ts", "direction", "buy_venue", "sell_venue", "qty",
               "buy_limit", "sell_limit", "buy_notional", "sell_notional",
               "exp_edge_usd", "gross_edge_usd", "marginal_premium_bps",
               "midline_bps", "inv_add_bps", "ok", "buy_fill", "sell_fill",
-              "buy_status", "sell_status", "fill_edge_usd"]
+              "buy_status", "sell_status", "fill_edge_usd",
+              "book_age_ms", "book_skew_ms", "send_total_ms",
+              "buy_send_ms", "sell_send_ms", "buy_avg_px", "sell_avg_px",
+              "realized_edge_bps", "edge_shortfall_bps"]
 BALANCE_POLL_SEC = 30.0
 
 
@@ -50,14 +53,19 @@ class Engine:
         self.venues: Dict[str, object] = {}
         self.recorder: Optional[MinuteRecorder] = None
         self.markets_ready = False
-        self.stop = asyncio.Event()
-        self._update_evt = asyncio.Event()
-        self._reconcile_evt = asyncio.Event()
+        # asyncio primitives are created lazily on the running loop.  This
+        # keeps Engine constructible from synchronous tooling and Python 3.9,
+        # where asyncio.Event() binds to the current loop at construction.
+        self.stop = None
+        self._update_evt = None
+        self._reconcile_evt = None
+        self._stop_requested = False
         # per-venue locks: an execution holds both; a reconcile holds one, so
         # a chain read can never race an in-flight order on that venue
         self._venue_locks: Dict[str, asyncio.Lock] = {}
         self._exec_tasks: set = set()
         self.halted = False
+        self._unresolved_execution = False
         self.consec_errors = 0
         self.last_trade_ts = 0.0
         self.trades = 0
@@ -85,6 +93,15 @@ class Engine:
         self._venue_fetch_fails: Dict[str, int] = {}
         # per-execution records for the dashboard (newest last)
         self.recent_trades: deque = deque(maxlen=50)
+
+    def ensure_async_state(self) -> None:
+        """Create loop-bound events once the application loop is running."""
+        if self.stop is None:
+            self.stop = asyncio.Event()
+            self._update_evt = asyncio.Event()
+            self._reconcile_evt = asyncio.Event()
+            if self._stop_requested:
+                self.stop.set()
 
     # ------------------------------------------------------------- utilities
 
@@ -114,13 +131,16 @@ class Engine:
         self._sends.setdefault(v.key, deque()).append(time.time())
 
     def request_stop(self) -> None:
-        self.stop.set()
-        self._update_evt.set()
-        self._reconcile_evt.set()
+        self._stop_requested = True
+        if self.stop is not None:
+            self.stop.set()
+            self._update_evt.set()
+            self._reconcile_evt.set()
 
     # ------------------------------------------------------------- lifecycle
 
     async def run(self) -> None:
+        self.ensure_async_state()
         # Long keepalive so order-path connections survive quiet spells; the
         # keepalive loop pings inside this window to hold them open.
         self.session = aiohttp.ClientSession(connector=aiohttp.TCPConnector(
@@ -251,11 +271,28 @@ class Engine:
 
         selling entropy: executable premium must clear midline + upper;
         buying entropy: the reverse premium must clear lower - midline."""
+        # A pair opened in one direction is closed by the opposite direction.
+        # Give the closing direction its own hysteresis band so the strategy
+        # can reduce inventory before requiring a fresh full-width entry.
+        closing = buy.position < 0 and sell.position > 0
         if sell.key == "entropy":
-            base = self.cfg.midline_bps + self.cfg.upper_bps
+            band = self.cfg.close_upper_bps if closing else self.cfg.upper_bps
+            base = self.cfg.midline_bps + band
         else:
-            base = self.cfg.lower_bps - self.cfg.midline_bps
-        return base + self._inv_add_bps(buy, sell)
+            band = self.cfg.close_lower_bps if closing else self.cfg.lower_bps
+            base = band - self.cfg.midline_bps
+        return (base + self._inv_add_bps(buy, sell)
+                + self.cfg.latency_buffer_bps
+                + self.cfg.slippage_buffer_bps)
+
+    def _books_tradeable(self) -> bool:
+        """Require fresh books whose local receipt times are close together."""
+        eb, hb = self.entropy.book, self.hedge.book
+        if not (eb.is_fresh(self.cfg.staleness_sec)
+                and hb.is_fresh(self.cfg.staleness_sec)):
+            return False
+        skew = abs(eb.last_update_ts - hb.last_update_ts)
+        return skew <= self.cfg.max_book_skew_sec
 
     def _headroom(self, buy, sell, ref_px: float) -> float:
         hb = buy.cap_usd - buy.position * ref_px
@@ -343,10 +380,15 @@ class Engine:
             raise
         except Exception:
             log.exception("execute failed")
+            unresolved = True
         finally:
             self._vlock(buy.key).release()
             self._vlock(sell.key).release()
         if unresolved:
+            # Do not resume scanning while either leg has an unknown outcome.
+            # The reconcile loop will fetch chain positions and hedge before
+            # clearing this gate.
+            self._unresolved_execution = True
             self._reconcile_evt.set()
         else:
             await self._maybe_hedge()
@@ -357,10 +399,11 @@ class Engine:
         (buy, sell, plan), or None."""
         cfg = self.cfg
         best = None
+        if self._unresolved_execution:
+            return None
         for buy, sell, dkey in ((self.hedge, self.entropy, "sell_entropy"),
                                 (self.entropy, self.hedge, "buy_entropy")):
-            if not (buy.book.is_fresh(cfg.staleness_sec)
-                    and sell.book.is_fresh(cfg.staleness_sec)):
+            if not self._books_tradeable():
                 continue
             if not (buy.ready_to_trade() and sell.ready_to_trade()):
                 continue
@@ -408,6 +451,22 @@ class Engine:
 
     # ------------------------------------------------------------- execution
 
+    async def _timed_send(self, venue, *, is_buy: bool, qty: float,
+                          limit_px: float) -> tuple:
+        """Send one leg and return (result, elapsed_ms).
+
+        The elapsed value is local event-loop time, so it is suitable for
+        latency distributions even when wall-clock time is adjusted.
+        """
+        started = time.perf_counter()
+        try:
+            result = await venue.send_taker(is_buy=is_buy, qty=qty,
+                                            limit_px=limit_px)
+        except Exception as e:
+            result = {"status": "send-failed", "filled_base": 0.0,
+                      "avg_px": None, "err": repr(e), "unresolved": False}
+        return result, (time.perf_counter() - started) * 1000.0
+
     async def _execute(self, buy, sell, plan: ArbPlan) -> bool:
         """Send both legs and settle the fills. Both venue locks are held by
         the caller. Returns True when an outcome is unresolved and the caller
@@ -417,25 +476,40 @@ class Engine:
         cfg = self.cfg
         inv_bps = self._inv_add_bps(buy, sell)
         direction = "sell_entropy" if sell.key == "entropy" else "buy_entropy"
+        signal_ts = time.time()
+        book_age_ms = max(0.0, signal_ts - min(buy.book.last_update_ts,
+                                               sell.book.last_update_ts)) * 1000.0
+        book_skew_ms = abs(buy.book.last_update_ts - sell.book.last_update_ts) * 1000.0
         self.last_trade_ts = time.time()
         log.info("[ARB] %s: BUY %s %.6g @<=%.6g | SELL %s @>=%.6g | "
                  "take $%.0f of $%.0f | prem %.2fbps | exp $%.4f",
                  direction, buy.name, plan.qty, plan.buy_limit, sell.name,
                  plan.sell_limit, plan.buy_notional, plan.q_max_notional,
                  plan.marginal_premium_bps, plan.exp_edge_usd)
-        slip = cfg.leg_slippage_bps / 1e4
+        # The configured leg protection is a hard ceiling, not a free source
+        # of extra risk.  Split the edge headroom across both legs so a fill
+        # at the protection limits cannot consume the entire expected edge.
+        hurdle = self._eff_threshold(buy, sell)
+        fee_bps = buy.fee_bps + sell.fee_bps
+        edge_headroom_bps = max(
+            0.0, plan.marginal_premium_bps - hurdle - fee_bps)
+        effective_slip_bps = min(cfg.leg_slippage_bps,
+                                 edge_headroom_bps / 2.0)
+        slip = effective_slip_bps / 1e4
         buy_bound = buy.px_round(plan.buy_limit * (1 + slip), round_up=False)
         sell_bound = sell.px_round(plan.sell_limit * (1 - slip), round_up=True)
+        log.info("[PROTECTION] %s: configured_slip=%.2fbps effective_slip=%.2fbps "
+                 "edge_headroom=%.2fbps", direction, cfg.leg_slippage_bps,
+                 effective_slip_bps, edge_headroom_bps)
         self._record_send(buy)
         self._record_send(sell)
-        res = await asyncio.gather(
-            buy.send_taker(is_buy=True, qty=plan.qty, limit_px=buy_bound),
-            sell.send_taker(is_buy=False, qty=plan.qty, limit_px=sell_bound),
-            return_exceptions=True)
-        binfo, sinfo = (r if isinstance(r, dict) else
-                        {"status": "send-failed", "filled_base": 0.0,
-                         "avg_px": None, "err": repr(r), "unresolved": False}
-                        for r in res)
+        send_started = time.perf_counter()
+        (binfo, buy_send_ms), (sinfo, sell_send_ms) = await asyncio.gather(
+            self._timed_send(buy, is_buy=True, qty=plan.qty,
+                             limit_px=buy_bound),
+            self._timed_send(sell, is_buy=False, qty=plan.qty,
+                             limit_px=sell_bound))
+        send_total_ms = (time.perf_counter() - send_started) * 1000.0
         for v, info, side in ((buy, binfo, "buy"), (sell, sinfo, "sell")):
             if info.get("err"):
                 log.error("[%s] %s leg: %s", v.name, side, info["err"])
@@ -454,14 +528,26 @@ class Engine:
 
         matched = min(bfill, sfill)
         fill_edge = 0.0
+        realized_edge_bps = None
         if matched > 0 and binfo.get("avg_px") and sinfo.get("avg_px"):
             fill_edge = matched * (sinfo["avg_px"] * (1 - plan.sell_fee)
                                    - binfo["avg_px"] * (1 + plan.buy_fee))
+            realized_edge_bps = (
+                sinfo["avg_px"] * (1 - plan.sell_fee)
+                / (binfo["avg_px"] * (1 + plan.buy_fee)) - 1.0) * 1e4
             self.total_fill_edge += fill_edge
         log.info("[SETTLED] %s: buy %s %s %.6g/%.6g | sell %s %s %.6g/%.6g | "
                  "matched %.6g | fill edge $%.4f", direction,
                  buy.name, binfo["status"], bfill, plan.qty,
                  sell.name, sinfo["status"], sfill, plan.qty, matched, fill_edge)
+        shortfall_bps = (realized_edge_bps - plan.marginal_premium_bps
+                         if realized_edge_bps is not None else None)
+        log.info("[TIMING] %s: book_age=%.1fms skew=%.1fms send=%.1fms "
+                 "buy=%.1fms sell=%.1fms realized_edge=%s shortfall=%s",
+                 direction, book_age_ms, book_skew_ms, send_total_ms,
+                 buy_send_ms, sell_send_ms,
+                 f"{realized_edge_bps:.3f}bps" if realized_edge_bps is not None else "—",
+                 f"{shortfall_bps:+.3f}bps" if shortfall_bps is not None else "—")
         buy.last_traded_ts = sell.last_traded_ts = time.time()
 
         unresolved = binfo.get("unresolved") or sinfo.get("unresolved")
@@ -493,7 +579,14 @@ class Engine:
                            None if unresolved else fill_edge,
                            f"{binfo['status']}/{sinfo['status']}", sent_ok)
         self._log_csv(direction, buy, sell, plan, sent_ok, bfill, sfill,
-                      binfo["status"], sinfo["status"], fill_edge, inv_bps)
+                      binfo["status"], sinfo["status"], fill_edge, inv_bps,
+                      book_age_ms=book_age_ms, book_skew_ms=book_skew_ms,
+                      send_total_ms=send_total_ms, buy_send_ms=buy_send_ms,
+                      sell_send_ms=sell_send_ms,
+                      buy_avg_px=binfo.get("avg_px"),
+                      sell_avg_px=sinfo.get("avg_px"),
+                      realized_edge_bps=realized_edge_bps,
+                      edge_shortfall_bps=shortfall_bps)
         self.last_trade_ts = time.time()
         return bool(unresolved)
 
@@ -549,6 +642,7 @@ class Engine:
                 if info.get("err") or info.get("unresolved"):
                     log.error("[HEDGE] %s: %s", v.name,
                               info.get("err") or "unresolved")
+                    self._unresolved_execution = True
                     if str(info.get("err", "")).startswith("RATE_LIMITED"):
                         self._mark_limited(v)
                     self._reconcile_evt.set()
@@ -578,31 +672,36 @@ class Engine:
     RECONCILE_GRACE_SEC = 5.0
 
     async def _reconcile_positions(self, hedge: bool,
-                                   strict: bool = False) -> None:
+                                   strict: bool = False,
+                                   force_recent: bool = False) -> None:
         now = time.time()
         vs = []
         for v in self.venues.values():
-            if now - v.last_traded_ts <= self.RECONCILE_GRACE_SEC:
+            if (not force_recent
+                    and now - v.last_traded_ts <= self.RECONCILE_GRACE_SEC):
                 continue  # just traded: chain read would be stale
             if v.key in self._venue_down \
                     and now < self._venue_probe_at.get(v.key, 0.0):
                 continue  # down venue: probe only every venue_probe_sec
             vs.append(v)
         if not vs:
-            return
+            return False
         got = await asyncio.gather(
-            *(self._reconcile_venue(v, strict) for v in vs),
+            *(self._reconcile_venue(v, strict, force_recent) for v in vs),
             return_exceptions=True)
         for r in got:
             if isinstance(r, BaseException):
                 raise r  # strict startup: fail loudly
         if hedge:
             await self._maybe_hedge()
+        return True
 
-    async def _reconcile_venue(self, v, strict: bool) -> None:
+    async def _reconcile_venue(self, v, strict: bool,
+                               force_recent: bool = False) -> None:
         async with self._vlock(v.key):
             now = time.time()
-            if now - v.last_traded_ts <= self.RECONCILE_GRACE_SEC:
+            if (not force_recent
+                    and now - v.last_traded_ts <= self.RECONCILE_GRACE_SEC):
                 return  # traded while waiting for the lock
             try:
                 r = await v.fetch_position()
@@ -645,17 +744,31 @@ class Engine:
 
     async def _reconcile_loop(self) -> None:
         while not self.stop.is_set():
+            force_recent = self._unresolved_execution
             try:
                 await asyncio.wait_for(self._reconcile_evt.wait(),
                                        timeout=self.cfg.reconcile_sec)
                 self._reconcile_evt.clear()
-                await asyncio.sleep(1.0)
+                if self._unresolved_execution:
+                    # Give the venue's asynchronous settlement stream a short
+                    # chance to publish the final fill before querying chain
+                    # state.  Trading remains paused during this interval.
+                    await asyncio.sleep(self.RECONCILE_GRACE_SEC)
+                    force_recent = True
+                else:
+                    await asyncio.sleep(1.0)
             except asyncio.TimeoutError:
                 pass
             if self.stop.is_set():
                 break
             try:
-                await self._reconcile_positions(hedge=True)
+                reconciled = await self._reconcile_positions(
+                    hedge=True, force_recent=force_recent)
+                net = sum(v.position for v in self.venues.values())
+                if (force_recent and reconciled
+                        and abs(net) <= self.cfg.net_tolerance_base
+                        and not self._venue_down):
+                    self._unresolved_execution = False
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -750,7 +863,11 @@ class Engine:
                      " *** HALTED ***" if self.halted else "")
 
     def _log_csv(self, direction, buy, sell, plan: ArbPlan, ok: bool, bfill,
-                 sfill, bstatus, sstatus, fill_edge, inv_bps) -> None:
+                 sfill, bstatus, sstatus, fill_edge, inv_bps, *,
+                 book_age_ms=None, book_skew_ms=None, send_total_ms=None,
+                 buy_send_ms=None, sell_send_ms=None, buy_avg_px=None,
+                 sell_avg_px=None, realized_edge_bps=None,
+                 edge_shortfall_bps=None) -> None:
         try:
             path = self.cfg.trades_csv
             d = os.path.dirname(path)
@@ -773,6 +890,15 @@ class Engine:
                             f"{plan.marginal_premium_bps:.3f}",
                             f"{self.cfg.midline_bps:.3f}",
                             f"{inv_bps:.3f}", int(ok), f"{bfill:.8g}",
-                            f"{sfill:.8g}", bstatus, sstatus, f"{fill_edge:.4f}"])
+                            f"{sfill:.8g}", bstatus, sstatus, f"{fill_edge:.4f}",
+                            "" if book_age_ms is None else f"{book_age_ms:.3f}",
+                            "" if book_skew_ms is None else f"{book_skew_ms:.3f}",
+                            "" if send_total_ms is None else f"{send_total_ms:.3f}",
+                            "" if buy_send_ms is None else f"{buy_send_ms:.3f}",
+                            "" if sell_send_ms is None else f"{sell_send_ms:.3f}",
+                            "" if buy_avg_px is None else f"{buy_avg_px:.10g}",
+                            "" if sell_avg_px is None else f"{sell_avg_px:.10g}",
+                            "" if realized_edge_bps is None else f"{realized_edge_bps:.3f}",
+                            "" if edge_shortfall_bps is None else f"{edge_shortfall_bps:.3f}"])
         except Exception:
             log.exception("csv write failed")

@@ -78,6 +78,30 @@ def test_eff_threshold_directions():
         approx(total, 7.0)
 
 
+def test_close_band_and_cost_buffers_apply_when_reducing():
+    eng = make_engine(midline=5.0, upper=8.0, lower=7.0)
+    eng.cfg.close_upper_bps = 2.0
+    eng.cfg.close_lower_bps = 1.0
+    eng.cfg.latency_buffer_bps = 1.5
+    eng.cfg.slippage_buffer_bps = 2.5
+    e, h = eng.entropy, eng.hedge
+    e.position, h.position = -1.0, 1.0
+    # Buying entropy / selling hedge reduces the pair: close_lower - midline
+    # plus the measured cost reserves.
+    approx(eng._eff_threshold(buy=e, sell=h), -4.0 + 4.0)
+    # With flat inventory the regular lower band remains in force.
+    e.position = h.position = 0.0
+    approx(eng._eff_threshold(buy=e, sell=h), 2.0 + 4.0)
+
+
+def test_scan_rejects_books_with_large_receipt_skew():
+    eng = make_engine(midline=0.0, upper=1.0, lower=1.0)
+    eng.entropy.set_book(100.14, 100.16)
+    eng.hedge.set_book(99.99, 100.01)
+    eng.hedge.book.last_update_ts -= eng.cfg.max_book_skew_sec + 0.01
+    assert run_scan(eng) is None
+
+
 def test_inventory_ladder():
     eng = make_engine()
     eng.cfg.inventory_scale_bps, eng.cfg.inventory_floor_frac = 10.0, 0.5
