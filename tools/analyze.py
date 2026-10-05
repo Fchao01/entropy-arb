@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Analyze recorded minute data and suggest config.yaml thresholds.
 
-Reads the CSV written by the built-in recorder (logs/minutes.csv by default)
+Reads the CSV written by the built-in recorder (logs/minutes.csv by default,
+or logs/{symbol}/minutes.csv when --symbol is provided)
 and prints:
 
   * the premium distribution (midline candidates),
@@ -12,7 +13,7 @@ and prints:
 以及可直接粘贴进 config.yaml 的 thresholds 建议值。
 
 Usage:
-    python3 tools/analyze.py                    # logs/minutes.csv
+    python3 tools/analyze.py --symbol ETH       # logs/ETH/minutes.csv
     python3 tools/analyze.py --csv path.csv --hours 24 --min-samples 10
 """
 from __future__ import annotations
@@ -63,7 +64,9 @@ def load_rows(path: str, hours: float, min_samples: int) -> list:
 def main() -> None:
     p = argparse.ArgumentParser(description="suggest thresholds from recorded "
                                             "minute data")
-    p.add_argument("--csv", default="logs/minutes.csv")
+    p.add_argument("--symbol", help="market symbol; reads logs/{symbol}/minutes.csv")
+    p.add_argument("--csv", default=None,
+                   help="CSV path (overrides --symbol path)")
     p.add_argument("--hours", type=float, default=0.0,
                    help="only use the last N hours (0 = all data)")
     p.add_argument("--min-samples", type=int, default=10,
@@ -74,11 +77,13 @@ def main() -> None:
                         "is subtracted before counting firings (default 0.0 — "
                         "pass ~1.0 with a tradexyz hedge)")
     args = p.parse_args()
+    csv_path = args.csv or (f"logs/{args.symbol}/minutes.csv"
+                            if args.symbol else "logs/minutes.csv")
 
     try:
-        rows = load_rows(args.csv, args.hours, args.min_samples)
+        rows = load_rows(csv_path, args.hours, args.min_samples)
     except FileNotFoundError:
-        print(f"{args.csv} not found — run the bot (even --record-only) to "
+        print(f"{csv_path} not found — run the bot (even --record-only) to "
               f"collect data first / 未找到数据文件，请先运行机器人采集数据",
               file=sys.stderr)
         sys.exit(1)
@@ -95,7 +100,7 @@ def main() -> None:
     var = sum((x - mean) ** 2 for x in prem) / len(prem)
     median = pctl(prem, 50)
 
-    print(f"\n=== {args.csv}: {len(rows)} minutes over {span_h:.1f}h ===\n")
+    print(f"\n=== {csv_path}: {len(rows)} minutes over {span_h:.1f}h ===\n")
     print("premium of Entropy over hedge, minute close (bps) / "
           "Entropy 相对对冲腿的溢价:")
     print(f"  mean {mean:+.2f}   std {math.sqrt(var):.2f}   "

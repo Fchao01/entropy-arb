@@ -44,7 +44,10 @@ def test_example_config_loads():
     assert cfg.hedge.kind == "lighter"
     assert cfg.hedge.lighter_profile.chain_id == 466324
     assert cfg.entropy.symbol == "SNDK" and cfg.hedge.symbol == "SNDK"
-    assert cfg.recorder_enabled and cfg.recorder_csv
+    assert cfg.recorder_enabled
+    assert cfg.recorder_csv == "logs/SNDK/minutes.csv"
+    assert cfg.trades_csv == "logs/SNDK/trades.csv"
+    assert cfg.log_file == "logs/SNDK/engine.log"
     assert cfg.dashboard and cfg.log_file
 
 

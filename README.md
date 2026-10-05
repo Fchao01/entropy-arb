@@ -94,12 +94,13 @@ python3 main.py --record-only --symbol SNDK --hedge lighter-rh
 ```
 
 Let it run for at least a few hours (a day is better — premiums have
-intraday regimes). It writes `logs/minutes.csv`.
+intraday regimes). It writes `logs/SNDK/minutes.csv` (the `--symbol` value is
+part of the path, so different markets do not share files).
 
 **2. Analyze and set your thresholds:**
 
 ```bash
-python3 tools/analyze.py
+python3 tools/analyze.py --symbol SNDK
 ```
 
 It prints the premium distribution, how often each candidate band would have
@@ -121,7 +122,7 @@ books with age/spread, positions and caps, equity and session PnL, the
 executable premium of each direction against its full hurdle (fees and
 inventory surcharge included, ● = armed), recorder progress, the last
 executions, and a tail of the log (the full log goes to `logging.file`,
-default `logs/engine.log`). It works in `--record-only` too. Add `--cn` to
+default `logs/{symbol}/engine.log`). It works in `--record-only` too. Add `--cn` to
 display the dashboard in Chinese. Use `--no-dashboard` for plain console
 logs (nohup/systemd — off-terminal runs fall back automatically), or set
 `logging.dashboard: false`.
@@ -175,8 +176,8 @@ symbol.
 | `execution.*` | slippage bounds, timeouts, reconcile cadence… | see file |
 | `execution.latency_buffer_bps` / `slippage_buffer_bps` | measured p95 cost reserves added to the hurdle | 0 |
 | `execution.max_book_skew_sec` | maximum local receipt-time gap between books | 0.5 |
-| `recorder.*` | minute-data recorder | on, `logs/minutes.csv` |
-| `logging.dashboard` / `logging.file` | Rich dashboard on a tty; log file while it runs | on, `logs/engine.log` |
+| `recorder.*` | minute-data recorder | on, `logs/{symbol}/minutes.csv` |
+| `logging.dashboard` / `logging.file` | Rich dashboard on a tty; log file while it runs | on, `logs/{symbol}/engine.log` |
 
 `logging.trades_csv` also records book age, cross-book receipt skew, per-leg
 send latency, actual fill prices, realized edge, and edge shortfall versus the

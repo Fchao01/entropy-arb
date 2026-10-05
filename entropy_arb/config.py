@@ -248,6 +248,16 @@ def _get(d: dict, section: str, key: str, default):
     return (d.get(section) or {}).get(key, default)
 
 
+def _path_for_market(template: str, symbol: str, hedge_venue: str) -> str:
+    """Expand per-market output paths while allowing fixed custom paths."""
+    try:
+        return template.format(symbol=symbol, hedge=hedge_venue)
+    except (KeyError, ValueError) as e:
+        raise ConfigError(
+            f"invalid output path template {template!r}: {e}; use only "
+            "{symbol} and {hedge} / 路径模板只能使用 {symbol} 和 {hedge}")
+
+
 # ------------------------------------------------------------------ env layer
 
 def _env_s(name: str) -> Optional[str]:
@@ -392,10 +402,16 @@ def load_config(config_file: str = "config.yaml", env_file: str = ".env", *,
         slippage_buffer_bps=slippage_buffer_bps,
         max_book_skew_sec=max_book_skew_sec,
         recorder_enabled=bool(_get(raw, "recorder", "enabled", True)),
-        recorder_csv=_get(raw, "recorder", "csv", "logs/minutes.csv"),
+        recorder_csv=_path_for_market(
+            _get(raw, "recorder", "csv", "logs/{symbol}/minutes.csv"),
+            symbol, hedge_venue),
         log_level=str(_get(raw, "logging", "level", "INFO")).upper(),
         status_interval_sec=float(_get(raw, "logging", "status_interval_sec", 30.0)),
-        trades_csv=_get(raw, "logging", "trades_csv", "logs/trades.csv"),
+        trades_csv=_path_for_market(
+            _get(raw, "logging", "trades_csv", "logs/{symbol}/trades.csv"),
+            symbol, hedge_venue),
         dashboard=bool(_get(raw, "logging", "dashboard", True)),
-        log_file=_get(raw, "logging", "file", "logs/engine.log"),
+        log_file=_path_for_market(
+            _get(raw, "logging", "file", "logs/{symbol}/engine.log"),
+            symbol, hedge_venue),
     )

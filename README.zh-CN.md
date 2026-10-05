@@ -86,12 +86,12 @@ python3 main.py --record-only --symbol SNDK --hedge lighter-rh
 ```
 
 至少运行几个小时（最好一整天——溢价存在日内规律），数据写入
-`logs/minutes.csv`。
+`logs/SNDK/minutes.csv`（路径中的 `SNDK` 来自 `--symbol`，不同币种不会共用文件）。
 
 **第二步：分析数据、设定阈值：**
 
 ```bash
-python3 tools/analyze.py
+python3 tools/analyze.py --symbol SNDK
 ```
 
 它会输出溢价分布、各档带宽的历史触发频率，以及可直接粘贴进
@@ -111,7 +111,7 @@ python3 main.py --symbol SNDK --hedge lighter-rh
 **仪表盘。** 在终端运行时会显示实时 Rich 仪表盘：两边盘口（含数据龄/点差）、
 持仓与上限、账户权益与本次会话盈亏、两个方向的可成交溢价对比完整门槛
 （已含手续费与库存加价，● 表示已武装）、数据采集进度、最近成交，以及日志
-尾部（完整日志写入 `logging.file`，默认 `logs/engine.log`）。`--record-only`
+尾部（完整日志写入 `logging.file`，默认 `logs/{symbol}/engine.log`）。`--record-only`
 模式同样可用。加 `--cn` 参数可使仪表盘全部以中文显示。`--no-dashboard`
 可切换为纯日志输出（nohup/systemd 等非终端环境会自动退回纯日志），也可
 设置 `logging.dashboard: false`。
@@ -161,8 +161,8 @@ python3 main.py --symbol SNDK --hedge lighter-rh
 | `execution.*` | 滑点保护、超时、对账周期等 | 见配置文件 |
 | `execution.latency_buffer_bps` / `slippage_buffer_bps` | 在信号门槛上预留实测延迟和成交滑点 | 0 |
 | `execution.max_book_skew_sec` | 两边盘口本地更新时间允许的最大差值 | 0.5 |
-| `recorder.*` | 分钟数据采集器 | 开启，`logs/minutes.csv` |
-| `logging.dashboard` / `logging.file` | 终端仪表盘；开启时日志写入文件 | 开启，`logs/engine.log` |
+| `recorder.*` | 分钟数据采集器 | 开启，`logs/{symbol}/minutes.csv` |
+| `logging.dashboard` / `logging.file` | 终端仪表盘；开启时日志写入文件 | 开启，`logs/{symbol}/engine.log` |
 
 `logging.trades_csv` 现在还会记录盘口年龄、两边盘口更新时间差、两条腿发送耗时、
 实际成交价、成交后的实际 edge，以及相对计划 edge 的损失。运行一段时间后，可以用

@@ -30,10 +30,11 @@
 # full round trip nets >= upper + lower bps after fees by construction.
 #
 # midline_bps is a number YOU derive from recorded data. Run the bot
-# (--record-only) to collect logs/minutes.csv, then:  python3 tools/analyze.py
+# (--record-only) to collect logs/{symbol}/minutes.csv, then:
+# python3 tools/analyze.py --symbol SNDK
 #
 # midline_bps 是你根据采集数据设定的值。先运行机器人（--record-only）采集
-# logs/minutes.csv，再运行 python3 tools/analyze.py 获取建议值。
+# logs/{symbol}/minutes.csv，再运行 python3 tools/analyze.py --symbol SNDK 获取建议值。
 # 两个方向的门槛都已扣除手续费（引擎会在此之上另加手续费），因此一次完整往返
 # 扣费后净赚 >= upper + lower bps。
 thresholds:
@@ -100,7 +101,9 @@ execution:
 # 供 tools/analyze.py 分析并设定上方 thresholds。
 recorder:
   enabled: true
-  csv: logs/minutes.csv
+  # {symbol} is replaced by --symbol, so each market has its own file.
+  # {symbol} 会替换为命令行的 --symbol，每个币种使用独立文件。
+  csv: logs/{symbol}/minutes.csv
 
 # ==================== LOGGING & DASHBOARD / 日志与仪表盘 ====================
 # On a terminal the bot shows a live Rich dashboard (books, signal, positions,
@@ -113,6 +116,6 @@ recorder:
 logging:
   level: INFO
   status_interval_sec: 30.0
-  trades_csv: logs/trades.csv
+  trades_csv: logs/{symbol}/trades.csv
   dashboard: true
-  file: logs/engine.log
+  file: logs/{symbol}/engine.log
