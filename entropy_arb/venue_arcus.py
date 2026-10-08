@@ -110,8 +110,9 @@ class ArcusVenue:
                        if m["marketDisplayName"].upper() == want + "-USD"]
         if len(matches) != 1:
             names = ", ".join(m["marketDisplayName"] for m in markets)
+            section = "primary" if self.key == "entropy" else "hedge"
             raise RuntimeError(f"[ARCUS] {self.conf.symbol} not found; "
-                               f"set hedge.symbol to a market name: {names}")
+                               f"set {section}.symbol to a market name: {names}")
         market = matches[0]
         if market["status"] != "ONLINE" or market["type"] != "PERPETUAL":
             raise RuntimeError(f"[ARCUS] market unavailable: {market['marketDisplayName']}")

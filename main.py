@@ -27,7 +27,7 @@ import os
 import signal
 import sys
 
-from entropy_arb.config import HEDGE_VENUES, ConfigError, load_config
+from entropy_arb.config import HEDGE_VENUES, PRIMARY_VENUES, ConfigError, load_config
 from entropy_arb.engine import Engine
 
 
@@ -78,17 +78,19 @@ async def amain(cfg, record_only: bool, use_dashboard: bool, force_tty: bool,
 
 def main() -> None:
     p = argparse.ArgumentParser(
-        description="Two-venue LIVE arbitrage: Entropy vs Lighter mainnet / "
-                    "Lighter Robinhood / trade.xyz / Arcus. Without --record-only, "
+        description="Two-venue LIVE arbitrage with a configurable primary and hedge venue. "
+                    "Without --record-only, "
                     "real orders are sent.")
     p.add_argument("--symbol", required=True,
                    help="pair name and default symbol on both venues, e.g. SNDK; "
-                        "override names with entropy.symbol / hedge.symbol in YAML / "
+                        "override names with primary.symbol (legacy entropy.symbol) / hedge.symbol in YAML / "
                         "交易组名称及两边默认品种；不同名称可在 YAML 分别指定")
     p.add_argument("--hedge", required=True, choices=HEDGE_VENUES,
                    metavar="VENUE",
                    help=f"hedge venue, one of: {', '.join(HEDGE_VENUES)} / "
                         f"对冲腿，选择一个交易所")
+    p.add_argument("--primary", choices=PRIMARY_VENUES, default=None,
+                   help="primary venue; overrides YAML primary.venue (default: entropy) / 主腿交易所")
     p.add_argument("--config", default="config.yaml",
                    help="strategy config (default: config.yaml)")
     p.add_argument("--env-file", default=".env",
@@ -107,7 +109,8 @@ def main() -> None:
 
     try:
         cfg = load_config(args.config, args.env_file,
-                          symbol=args.symbol, hedge_venue=args.hedge)
+                          symbol=args.symbol, hedge_venue=args.hedge,
+                          primary_venue=args.primary)
     except ConfigError as e:
         print(f"config error: {e}", file=sys.stderr)
         sys.exit(2)

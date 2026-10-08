@@ -140,6 +140,74 @@ def test_hyperliquid_core_dex_is_allowed():
     assert cfg.entropy.hl_dex == ""
 
 
+def test_rh_primary_arcus_hedge_needs_no_hl_credentials(monkeypatch):
+    monkeypatch.delenv("HL_PRIVATE_KEY", raising=False)
+    monkeypatch.delenv("HL_ACCOUNT_ADDRESS", raising=False)
+    for key, value in {"LIGHTER_ACCOUNT_INDEX": "12", "LIGHTER_API_KEY_INDEX": "3",
+                       "LIGHTER_API_PRIVATE_KEY": "fixture",
+                       "ARCUS_ACCOUNT_ADDRESS": "0x" + "01" * 20,
+                       "ARCUS_ACCOUNT_INDEX": "0", "ARCUS_API_SIGNING_KEY": "02" * 32}.items():
+        monkeypatch.setenv(key, value)
+    cfg = load(MINIMAL + """
+primary:
+  venue: lighter-rh
+  symbol: ETH
+hedge:
+  symbol: ETH-USD
+  taker_fee_bps: 2.25
+logging:
+  file: logs/{primary}-{hedge}/{symbol}/engine.log
+""", symbol="ETH", hedge="arcus")
+    assert cfg.primary is cfg.entropy and cfg.primary_venue == "lighter-rh"
+    assert cfg.primary.kind == "lighter" and cfg.primary.label == "RH"
+    assert cfg.primary.lighter_profile.chain_id == 466324
+    assert cfg.hedge.kind == "arcus" and cfg.hedge.fee_bps == 2.25
+    assert cfg.creds_complete and cfg.primary.hl_creds is None
+    assert cfg.log_file == "logs/lighter-rh-arcus/ETH/engine.log"
+
+
+def test_primary_venue_validation_and_legacy_conflicts():
+    expect_error(MINIMAL + '\nprimary:\n  venue: binance\n', "primary.venue")
+    expect_error(MINIMAL + '\nprimary:\n  venue: lighter-rh\n', "same venue")
+    expect_error(MINIMAL + '\nprimary:\n  venue: lighter\nentropy:\n  dex: io\n', "not both")
+    expect_error(MINIMAL + '\nprimary:\n  venue: lighter\n  dex: io\n', "only to Hyperliquid")
+    expect_error(MINIMAL + '\nprimary:\n  venue: arcus\n', "primary.taker_fee_bps")
+
+
+def test_primary_cli_override_and_reverse_arcus_pair(monkeypatch):
+    monkeypatch.delenv("ARCUS_ACCOUNT_INDEX", raising=False)
+    path = write_tmp(MINIMAL + '\nprimary:\n  venue: lighter\n  taker_fee_bps: 2.25\n')
+    cfg = load_config(path, NO_ENV, symbol="ETH", hedge_venue="lighter-rh", primary_venue="arcus")
+    assert cfg.primary.kind == "arcus" and cfg.hedge.kind == "lighter"
+    assert cfg.primary.fee_bps == 2.25
+
+
+def test_two_lighter_deployments_use_separate_credentials(monkeypatch):
+    for key, value in {"PRIMARY_LIGHTER_ACCOUNT_INDEX": "11", "PRIMARY_LIGHTER_API_KEY_INDEX": "1",
+                       "PRIMARY_LIGHTER_API_PRIVATE_KEY": "primary-fixture",
+                       "LIGHTER_ACCOUNT_INDEX": "22", "LIGHTER_API_KEY_INDEX": "2",
+                       "LIGHTER_API_PRIVATE_KEY": "hedge-fixture"}.items():
+        monkeypatch.setenv(key, value)
+    cfg = load(MINIMAL + '\nprimary:\n  venue: lighter\n', hedge="lighter-rh")
+    assert cfg.primary.lighter_creds.account_index == 11
+    assert cfg.hedge.lighter_creds.account_index == 22
+    monkeypatch.delenv("PRIMARY_LIGHTER_API_PRIVATE_KEY")
+    cfg = load(MINIMAL + '\nprimary:\n  venue: lighter\n', hedge="lighter-rh")
+    assert not cfg.primary.lighter_creds.complete
+
+
+def test_all_venue_roles_build_with_explicit_fees():
+    from entropy_arb.config import PRIMARY_VENUES
+    for primary in PRIMARY_VENUES:
+        for hedge in PRIMARY_VENUES:
+            if primary == hedge:
+                continue
+            cfg = load(MINIMAL + f'\nprimary:\n  venue: {primary}\n  taker_fee_bps: 1\n'
+                       '\nhedge:\n  taker_fee_bps: 2\n', hedge=hedge)
+            assert cfg.primary_venue == primary and cfg.hedge_venue == hedge
+            assert cfg.primary.key != cfg.hedge.key
+
+
 def expect_error(yaml_text: str, needle: str, **kw):
     try:
         load(yaml_text, **kw)

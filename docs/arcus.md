@@ -1,7 +1,9 @@
 # Arcus 永续合约接入
 
 启动参数 `--hedge arcus` 将对冲腿切换到 Arcus。引擎仍然只交易两条腿：
-Entropy / Hyperliquid + Arcus，不会同时在多个对冲交易所下单。
+配置的主腿 + Arcus，不会同时在多个对冲交易所下单。主腿默认 Entropy，
+RH 主腿可使用 [configs/rh-arcus.yaml](../configs/rh-arcus.yaml)，见
+[主腿配置说明](primary.md)。
 
 实现依据 Arcus 官方文档：
 
@@ -28,13 +30,13 @@ entropy:
   # 保留其他原有参数
 hedge:
   symbol: SNDK-USD
-  taker_fee_bps: 你的账户已确认费率
+  taker_fee_bps: 2.25  # 用户提供的账户费率 0.0225%，如有变动应更新
   # 保留其他原有参数
 arcus:
   network: mainnet
 ```
 
-上面的费率占位文字必须替换为非负数字，才能通过配置校验。示例文件中的
+费率使用非负数字，单位 bps；这里按用户提供的费率填写。通用示例文件中的
 `0.0` 适用于原来的零费交易所，不代表 Arcus 免费；不能用 API 文档的静态
 示例数据作为账户实际费率。1 bps = 0.01%。分析 Arcus 数据时，也要向
 `tools/analyze.py --symbol SNDK --fees-bps 数字` 传入两边吃单费之和。
@@ -58,8 +60,8 @@ python3 main.py --record-only --symbol SNDK --hedge arcus \
 `--symbol` 时，这个目录也相同。并行运行不同对冲交易所时，应在各自 YAML 中
 给 `recorder.csv`、`logging.trades_csv`、`logging.file` 设置独立路径。
 
-`arcus.network: testnet` 只切换 Arcus 到测试网；Entropy / Hyperliquid 第一条腿
-仍连主网。这个设置不构成整套套利策略的模拟盘，不能据此认为双方都是测试资金。
+`arcus.network: testnet` 只切换 Arcus 到测试网；另一条腿仍连其正式环境。
+这个设置不构成整套套利策略的模拟盘，不能据此认为双方都是测试资金。
 
 ## 实盘凭据
 
@@ -73,7 +75,8 @@ ARCUS_API_SIGNING_KEY=你的64位十六进制API签名种子
 
 签名种子是 32 字节 Ed25519 API Signing Key，**不是 EVM 钱包私钥**。
 公钥由种子推导，无须另填。网络、主钱包地址、子账户编号和已授权密钥必须
-对应；子账户编号范围为 0–9。Entropy 第一条腿仍需要原来的 HL 凭据。
+对应；子账户编号范围为 0–9。主腿凭据按所选交易所填写，例如 RH 用 LIGHTER_*，
+Entropy 用 HL_*。
 账户也需要 Arcus 的访问权限及足够保证金。不要将密钥写入 YAML 或提交到 Git。
 
 安装 `requirements-live.txt` 后，去掉 `--record-only` 就会运行真实交易。

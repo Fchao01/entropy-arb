@@ -2,8 +2,9 @@
 
 **[English documentation / 英文文档 → README.md](README.md)**
 
-开源双交易所永续合约套利机器人。其中一条腿永远是 **Entropy**（Hyperliquid 上的
-`io` builder dex）；另一条腿（对冲腿）可选择：
+开源双交易所永续合约套利机器人。主腿默认是 **Entropy**（Hyperliquid 上的
+`io` builder dex），也可通过 `primary.venue` 或 `--primary` 选择其他已接入场所。
+另一条腿（对冲腿）可选择：
 
 | `--hedge` | 交易所 | 计价货币 | 吃单费 | 协议 |
 |---|---|---|---|---|
@@ -11,6 +12,13 @@
 | `lighter-rh` | Lighter Robinhood 链 | **USDG** | 0 bps | zkLighter ws |
 | `tradexyz` | Hyperliquid trade.xyz dex | USDC | ~1 bps | HL l2Book，IOC 同步结算 |
 | `arcus` | Arcus 永续合约 | USD | 填已确认的账户费率 | Arcus WS 全量盘口、签名 IOC、异步确认 |
+| `entropy` | Entropy / Hyperliquid `io` | USDC | 填已确认的账户费率 | HL l2Book，IOC |
+
+**RH 主腿 + Arcus 对冲** 可直接使用 [configs/rh-arcus.yaml](configs/rh-arcus.yaml)，
+其中 Arcus 手续费按你提供的 0.0225% 填为 2.25 bps。先采集：
+`python3 main.py --record-only --symbol ETH --hedge arcus --config configs/rh-arcus.yaml`。
+凭据、阈值方向和日志说明见 [主腿配置说明](docs/primary.md)。下面的策略说明
+以默认 Entropy 主腿为例；其他主腿的溢价为 `(主腿价格 / 对冲腿价格 - 1) × 10000`。
 
 > **推荐链接** —— 通过以下链接注册即可支持本项目：
 > - Entropy — Tier 4 推荐，100% 返佣：<https://entropy.io/?r=yourquantguy>
@@ -74,7 +82,7 @@ cp .env.example .env                     # 密钥——交易必填
 
 交易哪个市场**不在**配置文件中——每次启动时用命令行参数显式指定：
 `--symbol`（交易组名称及两边默认品种）和 `--hedge`（选择一个：
-`lighter`、`lighter-rh`、`tradexyz`、`arcus`；Entropy 永远是
+`lighter`、`lighter-rh`、`tradexyz`、`arcus`、`entropy`；配置的主腿是
 另一条腿）。
 
 本机器人**没有模拟盘**——要么采集数据（`--record-only`），要么实盘交易。
@@ -152,6 +160,8 @@ python3 main.py --symbol SNDK --hedge lighter-rh
 | `thresholds.upper_bps` / `lower_bps` | 入场带宽（> 0） | — |
 | `thresholds.close_upper_bps` / `close_lower_bps` | 平仓带宽（> 0） | 同入场带宽 |
 | `entropy.symbol` / `hedge.symbol` | 各交易所的实际市场名称 | 同 `--symbol` |
+| `primary.venue` / `--primary` | 主腿交易所；使用时把旧 `entropy` 段替换成 `primary` | `entropy` |
+| `primary.symbol` | 使用 `primary` 段时的主腿市场名 | `--symbol` |
 | `entropy.dex` | Hyperliquid 上第一条腿的 dex；Entropy 用 `io`，核心市场（如 ETH）用空字符串 `""` | `io` |
 | `*.taker_fee_bps` | 各所吃单费 | 0.0（tradexyz：1.0）；Arcus 必须显式填写已确认费率 |
 | `arcus.network` | Arcus 接口及密钥所在网络 | `mainnet`；也支持 `testnet`，但第一条腿仍为主网 |

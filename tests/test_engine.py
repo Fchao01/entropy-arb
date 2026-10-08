@@ -78,6 +78,81 @@ def test_eff_threshold_directions():
         approx(total, 7.0)
 
 
+def test_rh_primary_uses_primary_premium_and_parallel_orders():
+    from unittest.mock import AsyncMock, patch
+    eng = make_engine(midline=0.0, upper=1.0, lower=1.0)
+    eng.cfg.primary_venue = "lighter-rh"
+    eng.entropy.name, eng.hedge.name = "RH", "ARCUS"
+    eng.entropy.volume_usd = eng.hedge.volume_usd = 0.0
+    for v in (eng.entropy, eng.hedge):
+        v.px_round = lambda px, round_up: px
+    eng.entropy.set_book(100.14, 100.16)
+    eng.hedge.set_book(99.99, 100.01)
+    eng.hedge.fee_bps = 2.25
+    approx(eng.premium_bps(), 15.0)
+    assert eng.direction_key(True) == "sell_primary"
+    eng.cfg.close_lower_bps = 0.5
+    eng.entropy.position, eng.hedge.position = -1.0, 1.0
+    approx(eng._eff_threshold(eng.entropy, eng.hedge), 0.5)
+    eng.entropy.position = eng.hedge.position = 0
+    plan, reason = eng._plan(eng.hedge, eng.entropy, 100)
+    assert plan is not None, reason
+    async def run():
+        eng.ensure_async_state()
+        gate = asyncio.Event()
+        started = []
+        async def send(v, *, is_buy, qty, limit_px):
+            started.append((v.name, is_buy, qty))
+            if len(started) == 2:
+                gate.set()
+            await asyncio.wait_for(gate.wait(), 1)
+            return {"status": "filled", "filled_base": qty, "avg_px": limit_px,
+                    "err": None, "unresolved": False}, 1.0
+        eng._timed_send = AsyncMock(side_effect=send)
+        with patch.object(eng, "_log_csv"):
+            assert not await eng._execute(eng.hedge, eng.entropy, plan)
+        assert {row[:2] for row in started} == {("RH", False), ("ARCUS", True)}
+        assert eng.recent_trades[-1]["direction"] == "sell_primary"
+        approx(eng.entropy.position + eng.hedge.position, 0)
+    asyncio.run(run())
+
+
+def test_live_non_hl_primary_initializes_without_hl_methods():
+    from unittest.mock import AsyncMock, Mock
+    eng = make_engine()
+    eng.cfg.primary_venue = "lighter-rh"
+    eng.cfg.entropy.kind, eng.cfg.hedge.kind = "lighter", "arcus"
+    from entropy_arb.config import LighterCreds, ArcusCreds
+    eng.cfg.entropy.lighter_creds = LighterCreds(1, 1, "fixture")
+    eng.cfg.hedge.arcus_creds = ArcusCreds("0x" + "01" * 20, 0, "02" * 32)
+    eng.cfg.recorder_enabled = False
+    created = []
+    def make(conf):
+        v = StubVenue(conf.key, "RH" if conf.key == "entropy" else "ARCUS")
+        v.kind, v.conf = conf.kind, conf
+        v.load_market = AsyncMock()
+        v.init_signer = Mock()
+        v.fetch_position = AsyncMock(return_value=0.0)
+        v.close = AsyncMock()
+        def start(stop, notify, live):
+            assert live
+            stop.set()
+            return []
+        v.start_tasks = start
+        created.append(v)
+        return v
+    eng._make_venue = make
+    async def run():
+        eng.ensure_async_state()
+        await eng._run_inner()
+    asyncio.run(run())
+    assert len(created) == 2
+    for v in created:
+        v.init_signer.assert_called_once()
+        v.fetch_position.assert_awaited_once()
+        v.close.assert_awaited_once()
+
+
 def test_close_band_and_cost_buffers_apply_when_reducing():
     eng = make_engine(midline=5.0, upper=8.0, lower=7.0)
     eng.cfg.close_upper_bps = 2.0

@@ -27,6 +27,26 @@ import time
 CANDIDATES = [1.0, 1.5, 2.0, 3.0, 4.0, 5.0, 6.0, 8.0, 10.0, 15.0, 20.0]
 
 
+class ChineseHelpFormatter(argparse.HelpFormatter):
+    def add_usage(self, usage, actions, groups, prefix=None):
+        super().add_usage(usage, actions, groups,
+                          prefix if prefix is not None else "用法：")
+
+
+class ChineseArgumentParser(argparse.ArgumentParser):
+    def error(self, message):
+        for source, translated in (
+            ("unrecognized arguments:", "无法识别的参数："),
+            ("expected one argument", "缺少参数值"),
+            ("invalid float value:", "浮点数无效："),
+            ("invalid int value:", "整数无效："),
+            ("argument ", "参数 "),
+        ):
+            message = message.replace(source, translated)
+        self.print_usage(sys.stderr)
+        self.exit(2, f"参数错误：{message}\n")
+
+
 def pctl(sorted_vals: list, q: float) -> float:
     """Linear-interpolated percentile of a pre-sorted list, q in [0, 100]."""
     if not sorted_vals:
@@ -62,20 +82,24 @@ def load_rows(path: str, hours: float, min_samples: int) -> list:
 
 
 def main() -> None:
-    p = argparse.ArgumentParser(description="suggest thresholds from recorded "
-                                            "minute data")
-    p.add_argument("--symbol", help="market symbol; reads logs/{symbol}/minutes.csv")
-    p.add_argument("--csv", default=None,
-                   help="CSV path (overrides --symbol path)")
+    p = ChineseArgumentParser(description="分析分钟级盘口数据，生成阈值参考值",
+                              formatter_class=ChineseHelpFormatter,
+                              add_help=False)
+    p._positionals.title = "位置参数"
+    p._optionals.title = "可选参数"
+    p.add_argument("-h", "--help", action="help", help="显示帮助信息并退出")
+    p.add_argument("--symbol", metavar="币种",
+                   help="读取 logs/{symbol}/minutes.csv 中的币种数据")
+    p.add_argument("--csv", default=None, metavar="文件路径",
+                   help="CSV 文件路径；优先于 --symbol 指定的路径")
     p.add_argument("--hours", type=float, default=0.0,
-                   help="only use the last N hours (0 = all data)")
+                   metavar="小时数", help="只分析距当前时间最近的 N 小时（0 表示全部数据）")
     p.add_argument("--min-samples", type=int, default=10,
-                   help="skip minutes with fewer fresh samples than this")
+                   metavar="采样数", help="跳过有效采样数少于此值的分钟（默认：10）")
     p.add_argument("--fees-bps", type=float, default=0.0,
-                   help="SUM of both venues' taker fees in bps (each crossing "
-                        "pays both legs); recorded edges are pre-fee, so this "
-                        "is subtracted before counting firings (default 0.0 — "
-                        "pass ~1.0 with a tradexyz hedge)")
+                   metavar="手续费",
+                   help="两边吃单手续费之和，单位 bps（默认：0）；一次双腿交易各付"
+                        "一边手续费，统计前从盘口价差中扣除。1 bps = 0.01%%")
     args = p.parse_args()
     csv_path = args.csv or (f"logs/{args.symbol}/minutes.csv"
                             if args.symbol else "logs/minutes.csv")
@@ -83,14 +107,13 @@ def main() -> None:
     try:
         rows = load_rows(csv_path, args.hours, args.min_samples)
     except FileNotFoundError:
-        print(f"{csv_path} not found — run the bot (even --record-only) to "
-              f"collect data first / 未找到数据文件，请先运行机器人采集数据",
+        print(f"未找到数据文件：{csv_path}。请先运行机器人采集数据"
+              "（可使用 --record-only）。",
               file=sys.stderr)
         sys.exit(1)
     if len(rows) < 30:
-        print(f"only {len(rows)} usable minute(s) in {args.csv} — collect at "
-              f"least a few hours before trusting the numbers / 数据太少，"
-              f"建议至少采集数小时", file=sys.stderr)
+        print(f"数据不足：{csv_path} 中只有 {len(rows)} 个有效分钟，"
+              "建议至少采集数小时后再参考分析结果。", file=sys.stderr)
         if not rows:
             sys.exit(1)
 
@@ -100,13 +123,13 @@ def main() -> None:
     var = sum((x - mean) ** 2 for x in prem) / len(prem)
     median = pctl(prem, 50)
 
-    print(f"\n=== {csv_path}: {len(rows)} minutes over {span_h:.1f}h ===\n")
-    print("premium of Entropy over hedge, minute close (bps) / "
-          "Entropy 相对对冲腿的溢价:")
-    print(f"  mean {mean:+.2f}   std {math.sqrt(var):.2f}   "
-          f"median {median:+.2f}")
-    print(f"  p5 {pctl(prem, 5):+.2f}   p25 {pctl(prem, 25):+.2f}   "
-          f"p75 {pctl(prem, 75):+.2f}   p95 {pctl(prem, 95):+.2f}")
+    print(f"\n=== 数据文件：{csv_path} ===")
+    print(f"有效数据：{len(rows)} 个分钟；首尾时间跨度：{span_h:.1f} 小时\n")
+    print("主腿相对对冲腿的溢价分布（分钟结束时的中间价，单位：bps）：")
+    print(f"  平均值 {mean:+.2f}   标准差 {math.sqrt(var):.2f}   "
+          f"中位数 {median:+.2f}")
+    print(f"  5%分位数 {pctl(prem, 5):+.2f}   25%分位数 {pctl(prem, 25):+.2f}")
+    print(f"  75%分位数 {pctl(prem, 75):+.2f}   95%分位数 {pctl(prem, 95):+.2f}")
 
     midline = round(median, 1) or 0.0   # normalize -0.0
     # room beyond the midline that was actually executable each minute, net
@@ -118,37 +141,34 @@ def main() -> None:
     buy_room = sorted((r["buy_max"] + midline - fees for r in rows),
                       reverse=True)
 
-    print(f"\nwith midline_bps = {midline:+.1f} (median) and {fees:.1f} bps "
-          f"round-trip taker fees, minutes each band would have fired / "
-          f"各档净阈值触发的分钟数:")
-    print(f"  {'band bps':>9} | {'SELL entropy':>17} | {'BUY entropy':>17}")
-    print(f"  {'':>9} | {'minutes':>8} {'per day':>8} | "
-          f"{'minutes':>8} {'per day':>8}")
+    print(f"\n中线 midline_bps = {midline:+.1f}（中位数）；"
+          f"每次双腿交易的吃单手续费合计：{fees:.1f} bps。")
+    print("各档净阈值达到条件的分钟数：")
+    print("  净阈值(bps) |        卖出主腿        |        买入主腿")
+    print("              | 达标分钟数  折合每日数 | 达标分钟数  折合每日数")
     per_day = 24.0 / span_h if span_h > 0 else 0.0
     for t in CANDIDATES:
         s_hits = sum(1 for x in sell_room if x >= t)
         b_hits = sum(1 for x in buy_room if x >= t)
-        print(f"  {t:>9.1f} | {s_hits:>8} {s_hits * per_day:>8.1f} | "
-              f"{b_hits:>8} {b_hits * per_day:>8.1f}")
+        print(f"  {t:>11.1f} | {s_hits:>10} {s_hits * per_day:>10.1f} | "
+              f"{b_hits:>10} {b_hits * per_day:>10.1f}")
 
     # default suggestion: the band that fired in ~10% of minutes (p90 of the
     # fee-adjusted executable room), floored at 1 bps — tune from the table
     sug_upper = max(round(pctl(sorted(sell_room), 90) * 2) / 2, 1.0)
     sug_lower = max(round(pctl(sorted(buy_room), 90) * 2) / 2, 1.0)
     print(f"""
-suggested starting point (fires ~10% of minutes, already net of the
-{fees:.1f} bps fees passed via --fees-bps; a full round trip nets
->= upper+lower bps after fees) /
-建议起点（约 10% 的分钟触发；已扣除 --fees-bps 传入的 {fees:.1f} bps 手续费，
-一次完整往返扣费后净赚 >= upper+lower bps）:
+阈值参考值（目标为两边各约 10% 的分钟达到条件；四舍五入和最小阈值会影响比例，
+已扣除 --fees-bps 传入的 {fees:.1f} bps 手续费）：
 
 thresholds:
   midline_bps: {midline}
   upper_bps: {sug_upper}
   lower_bps: {sug_lower}
 
-Re-run with --hours to focus on recent regimes; premiums drift, so refresh
-these numbers regularly. / 溢价中枢会漂移，请定期重新分析并更新配置。
+说明：达标分钟数不等于成交笔数，折合每日数按首尾时间跨度换算，可能包含断档。
+参考值根据分钟内最大盘口价差计算，未验证实际成交、滑点或完整开平仓收益。
+溢价中枢可能漂移，可使用 --hours 分析距当前时间较近的数据，并定期复查参数。
 """)
 
 

@@ -1,6 +1,6 @@
 """Configuration: strategy from a YAML file, credentials from .env, market
 selection (pair symbol + hedge venue) from the command line, with optional
-per-venue symbol overrides in YAML.
+per-venue symbol overrides and configurable primary venue in YAML.
 
 The split is deliberate: config.yaml IS the strategy (thresholds, sizing,
 risk) and is safe to share/commit as an example; .env holds only secrets;
@@ -34,7 +34,8 @@ from dotenv import load_dotenv
 HL_API_URL = "https://api.hyperliquid.xyz"
 HL_WS_URL = "wss://api.hyperliquid.xyz/ws"   # official ws — the only HL feed used
 
-HEDGE_VENUES = ("lighter", "lighter-rh", "tradexyz", "arcus")
+HEDGE_VENUES = ("lighter", "lighter-rh", "tradexyz", "arcus", "entropy")
+PRIMARY_VENUES = ("entropy", "lighter", "lighter-rh", "tradexyz", "arcus")
 
 ARCUS_ENDPOINTS = {
     "mainnet": ("https://api.arcus.xyz", "wss://api.arcus.xyz/v1/ws"),
@@ -163,6 +164,11 @@ class Config:
     # runtime
     hl_api_url: str = HL_API_URL
     hl_ws_url: str = HL_WS_URL
+    primary_venue: str = "entropy"
+
+    @property
+    def primary(self) -> VenueConf:
+        return self.entropy  # legacy field retained for API/CSV compatibility
 
     @property
     def creds_complete(self) -> bool:
@@ -181,6 +187,14 @@ class Config:
 
 # Schema: nested dict of key -> type (or nested dict). Unknown keys are errors.
 _SCHEMA: Dict[str, Any] = {
+    "primary": {
+        "venue": str,
+        "symbol": str,
+        "dex": str,
+        "taker_fee_bps": float,
+        "max_position_usd": float,
+        "max_orders_per_min": int,
+    },
     "thresholds": {
         "midline_bps": float,
         "upper_bps": float,
@@ -197,6 +211,7 @@ _SCHEMA: Dict[str, Any] = {
     },
     "hedge": {
         "symbol": str,
+        "dex": str,
         "taker_fee_bps": float,
         "max_position_usd": float,
         "max_orders_per_min": int,
@@ -277,14 +292,15 @@ def _get(d: dict, section: str, key: str, default):
     return (d.get(section) or {}).get(key, default)
 
 
-def _path_for_market(template: str, symbol: str, hedge_venue: str) -> str:
+def _path_for_market(template: str, symbol: str, hedge_venue: str,
+                     primary_venue: str = "entropy") -> str:
     """Expand per-market output paths while allowing fixed custom paths."""
     try:
-        return template.format(symbol=symbol, hedge=hedge_venue)
+        return template.format(symbol=symbol, hedge=hedge_venue, primary=primary_venue)
     except (KeyError, ValueError) as e:
         raise ConfigError(
             f"invalid output path template {template!r}: {e}; use only "
-            "{symbol} and {hedge} / 路径模板只能使用 {symbol} 和 {hedge}")
+            "{symbol}, {primary} and {hedge} / 路径模板只能使用 {symbol}、{primary} 和 {hedge}")
 
 
 # ------------------------------------------------------------------ env layer
@@ -294,15 +310,71 @@ def _env_s(name: str) -> Optional[str]:
     return v.strip() if v not in (None, "") else None
 
 
-def _env_i(name: str) -> Optional[int]:
-    v = os.getenv(name)
-    return int(v) if v not in (None, "") else None
+def _build_venue(raw: dict, section: str, venue: str, key: str, symbol: str,
+                 separate_lighter_keys: bool = False) -> VenueConf:
+    params = raw.get(section) or {}
+    is_primary = key == "entropy"
+
+    def env_s(name, fallback=None):
+        if is_primary:
+            value = _env_s("PRIMARY_" + name)
+            if value or separate_lighter_keys:
+                return value
+        return _env_s(fallback or name)
+
+    def env_i(name):
+        value = env_s(name)
+        try:
+            return int(value) if value is not None else None
+        except ValueError as e:
+            raise ConfigError(f"{('PRIMARY_' if is_primary else '') + name} must be an integer") from e
+
+    default_fee = 1.0 if venue == "tradexyz" else 0.0
+    fee = float(params.get("taker_fee_bps", default_fee))
+    if not math.isfinite(fee) or fee < 0:
+        raise ConfigError(f"{section}.taker_fee_bps must be finite and >= 0")
+    default_budget = 120 if venue in ("entropy", "tradexyz") else 30
+    common = dict(key=key, symbol=symbol, fee_bps=fee,
+                  cap_usd=float(params.get("max_position_usd", 1000.0)),
+                  orders_per_min=int(params.get("max_orders_per_min", default_budget)))
+    if venue in ("entropy", "tradexyz"):
+        dex = params.get("dex", "io" if venue == "entropy" else "xyz")
+        if venue == "tradexyz" and dex != "xyz":
+            raise ConfigError(f"{section}.dex must be xyz for tradexyz")
+        label = "XYZ" if venue == "tradexyz" else ("ENTROPY" if dex == "io" else "HL:" + (dex or "core"))
+        private_fallback = ("HL_PRIVATE_KEY_XYZ" if venue == "tradexyz"
+                            and _env_s("HL_PRIVATE_KEY_XYZ") else "HL_PRIVATE_KEY")
+        address_fallback = ("HL_ACCOUNT_ADDRESS_XYZ" if venue == "tradexyz"
+                            and _env_s("HL_ACCOUNT_ADDRESS_XYZ") else "HL_ACCOUNT_ADDRESS")
+        return VenueConf(**common, kind="hl", label=label, hl_dex=dex,
+                         hl_creds=HLCreds(env_s("HL_PRIVATE_KEY", private_fallback),
+                                          env_s("HL_ACCOUNT_ADDRESS", address_fallback)))
+    if "dex" in params:
+        raise ConfigError(f"{section}.dex applies only to Hyperliquid venues")
+    if venue == "arcus":
+        network = _get(raw, "arcus", "network", "mainnet")
+        if network not in ARCUS_ENDPOINTS:
+            raise ConfigError("arcus.network must be mainnet or testnet")
+        if "taker_fee_bps" not in params:
+            raise ConfigError(f"{section}.taker_fee_bps is required for Arcus; set the verified account fee")
+        index = env_i("ARCUS_ACCOUNT_INDEX")
+        index = 0 if index is None else index
+        if not 0 <= index <= 9:
+            raise ConfigError("ARCUS_ACCOUNT_INDEX must be in [0, 9]")
+        return VenueConf(**common, kind="arcus", label="ARCUS", arcus_network=network,
+                         arcus_creds=ArcusCreds(env_s("ARCUS_ACCOUNT_ADDRESS"), index,
+                                                env_s("ARCUS_API_SIGNING_KEY")))
+    return VenueConf(**common, kind="lighter", label="LIGHTER" if venue == "lighter" else "RH",
+                     lighter_profile=LIGHTER_PROFILES[venue],
+                     lighter_creds=LighterCreds(env_i("LIGHTER_ACCOUNT_INDEX"),
+                                                env_i("LIGHTER_API_KEY_INDEX"),
+                                                env_s("LIGHTER_API_PRIVATE_KEY")))
 
 
 # -------------------------------------------------------------------- loading
 
 def load_config(config_file: str = "config.yaml", env_file: str = ".env", *,
-                symbol: str, hedge_venue: str) -> Config:
+                symbol: str, hedge_venue: str, primary_venue: Optional[str] = None) -> Config:
     load_dotenv(env_file)
     try:
         with open(config_file) as fh:
@@ -323,9 +395,17 @@ def load_config(config_file: str = "config.yaml", env_file: str = ".env", *,
             f"--hedge must be one of {list(HEDGE_VENUES)}, got "
             f"{hedge_venue!r} / --hedge 必须是 {list(HEDGE_VENUES)} 之一")
 
-    entropy_symbol = _get(raw, "entropy", "symbol", symbol).strip()
+    primary_venue = primary_venue or _get(raw, "primary", "venue", "entropy")
+    if primary_venue not in PRIMARY_VENUES:
+        raise ConfigError(f"primary.venue / --primary must be one of {list(PRIMARY_VENUES)}")
+    if "primary" in raw and "entropy" in raw:
+        raise ConfigError("use primary or legacy entropy, not both / 请将 entropy 段替换为 primary，避免配置冲突")
+    if primary_venue != "entropy" and "entropy" in raw:
+        raise ConfigError("non-Entropy primary requires a primary section / 更换主腿后请将 entropy 段替换为 primary")
+    primary_section = "primary" if "primary" in raw else "entropy"
+    entropy_symbol = _get(raw, primary_section, "symbol", symbol).strip()
     hedge_symbol = _get(raw, "hedge", "symbol", symbol).strip()
-    for section, market_symbol in (("entropy", entropy_symbol),
+    for section, market_symbol in ((primary_section, entropy_symbol),
                                    ("hedge", hedge_symbol)):
         if not market_symbol:
             raise ConfigError(f"'{section}.symbol' must not be empty / "
@@ -353,73 +433,13 @@ def load_config(config_file: str = "config.yaml", env_file: str = ".env", *,
                           "more than the profitable depth loses money on the "
                           "tail / 必须在 (0, 1] 之间")
 
-    entropy_dex = _get(raw, "entropy", "dex", "io")
-    if hedge_venue == "tradexyz" and entropy_dex == "xyz":
-        raise ConfigError("entropy.dex 'xyz' with hedge_venue 'tradexyz' is "
-                          "the same market on both legs / 两条腿是同一个市场")
-
-    entropy_hl_creds = HLCreds(_env_s("HL_PRIVATE_KEY"),
-                               _env_s("HL_ACCOUNT_ADDRESS"))
-    entropy = VenueConf(
-        key="entropy", kind="hl", label="ENTROPY",
-        symbol=entropy_symbol,
-        fee_bps=float(_get(raw, "entropy", "taker_fee_bps", 0.0)),
-        cap_usd=float(_get(raw, "entropy", "max_position_usd", 1000.0)),
-        orders_per_min=int(_get(raw, "entropy", "max_orders_per_min", 120)),
-        hl_dex=entropy_dex,
-        hl_creds=entropy_hl_creds,
-    )
-
-    if hedge_venue == "arcus":
-        network = _get(raw, "arcus", "network", "mainnet")
-        if network not in ARCUS_ENDPOINTS:
-            raise ConfigError("arcus.network must be mainnet or testnet")
-        # Fees are account/tier dependent; do not invent a default for a new venue.
-        if "taker_fee_bps" not in (raw.get("hedge") or {}):
-            raise ConfigError("hedge.taker_fee_bps is required with --hedge arcus; "
-                              "set the verified fee for your Arcus account / "
-                              "请填写实测或账户费率表中的吃单手续费")
-        fee_bps = float(raw["hedge"]["taker_fee_bps"])
-        if not math.isfinite(fee_bps) or fee_bps < 0:
-            raise ConfigError("hedge.taker_fee_bps must be finite and >= 0 for Arcus")
-        account_index = _env_i("ARCUS_ACCOUNT_INDEX")
-        account_index = 0 if account_index is None else account_index
-        if not 0 <= account_index <= 9:
-            raise ConfigError("ARCUS_ACCOUNT_INDEX must be in [0, 9]")
-        hedge = VenueConf(
-            key="hedge", kind="arcus", label="ARCUS", symbol=hedge_symbol,
-            fee_bps=fee_bps,
-            cap_usd=float(_get(raw, "hedge", "max_position_usd", 1000.0)),
-            orders_per_min=int(_get(raw, "hedge", "max_orders_per_min", 30)),
-            arcus_network=network,
-            arcus_creds=ArcusCreds(_env_s("ARCUS_ACCOUNT_ADDRESS"), account_index,
-                                  _env_s("ARCUS_API_SIGNING_KEY")),
-        )
-    elif hedge_venue == "tradexyz":
-        hedge = VenueConf(
-            key="hedge", kind="hl", label="XYZ",
-            symbol=hedge_symbol,
-            fee_bps=float(_get(raw, "hedge", "taker_fee_bps", 1.0)),
-            cap_usd=float(_get(raw, "hedge", "max_position_usd", 1000.0)),
-            orders_per_min=int(_get(raw, "hedge", "max_orders_per_min", 120)),
-            hl_dex="xyz",
-            hl_creds=HLCreds(
-                _env_s("HL_PRIVATE_KEY_XYZ") or _env_s("HL_PRIVATE_KEY"),
-                _env_s("HL_ACCOUNT_ADDRESS_XYZ") or _env_s("HL_ACCOUNT_ADDRESS")),
-        )
-    else:
-        hedge = VenueConf(
-            key="hedge", kind="lighter",
-            label="LIGHTER" if hedge_venue == "lighter" else "RH",
-            symbol=hedge_symbol,
-            fee_bps=float(_get(raw, "hedge", "taker_fee_bps", 0.0)),
-            cap_usd=float(_get(raw, "hedge", "max_position_usd", 1000.0)),
-            orders_per_min=int(_get(raw, "hedge", "max_orders_per_min", 30)),
-            lighter_profile=LIGHTER_PROFILES[hedge_venue],
-            lighter_creds=LighterCreds(_env_i("LIGHTER_ACCOUNT_INDEX"),
-                                       _env_i("LIGHTER_API_KEY_INDEX"),
-                                       _env_s("LIGHTER_API_PRIVATE_KEY")),
-        )
+    entropy = _build_venue(raw, primary_section, primary_venue, "entropy", entropy_symbol,
+                           separate_lighter_keys=(primary_venue in LIGHTER_PROFILES
+                                                  and hedge_venue in LIGHTER_PROFILES))
+    hedge = _build_venue(raw, "hedge", hedge_venue, "hedge", hedge_symbol)
+    if (primary_venue == hedge_venue
+            or (entropy.kind == hedge.kind == "hl" and entropy.hl_dex == hedge.hl_dex)):
+        raise ConfigError("primary and hedge resolve to the same venue / 主腿与对冲腿不能是同一个交易所")
 
     latency_buffer_bps = float(_get(raw, "execution", "latency_buffer_bps", 0.0))
     slippage_buffer_bps = float(_get(raw, "execution", "slippage_buffer_bps", 0.0))
@@ -436,6 +456,7 @@ def load_config(config_file: str = "config.yaml", env_file: str = ".env", *,
     return Config(
         symbol=symbol,
         hedge_venue=hedge_venue,
+        primary_venue=primary_venue,
         entropy=entropy,
         hedge=hedge,
         midline_bps=float(thr["midline_bps"]),
@@ -466,14 +487,14 @@ def load_config(config_file: str = "config.yaml", env_file: str = ".env", *,
         recorder_enabled=bool(_get(raw, "recorder", "enabled", True)),
         recorder_csv=_path_for_market(
             _get(raw, "recorder", "csv", "logs/{symbol}/minutes.csv"),
-            symbol, hedge_venue),
+            symbol, hedge_venue, primary_venue),
         log_level=str(_get(raw, "logging", "level", "INFO")).upper(),
         status_interval_sec=float(_get(raw, "logging", "status_interval_sec", 30.0)),
         trades_csv=_path_for_market(
             _get(raw, "logging", "trades_csv", "logs/{symbol}/trades.csv"),
-            symbol, hedge_venue),
+            symbol, hedge_venue, primary_venue),
         dashboard=bool(_get(raw, "logging", "dashboard", True)),
         log_file=_path_for_market(
             _get(raw, "logging", "file", "logs/{symbol}/engine.log"),
-            symbol, hedge_venue),
+            symbol, hedge_venue, primary_venue),
     )

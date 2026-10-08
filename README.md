@@ -2,8 +2,9 @@
 
 **[中文文档 / Chinese documentation → README.zh-CN.md](README.zh-CN.md)**
 
-Open-source two-venue perp arbitrage bot. One leg is always **Entropy**
-(the `io` builder dex on Hyperliquid); the other leg — the hedge — is one of:
+Open-source two-venue perp arbitrage bot. The primary defaults to **Entropy**
+(the `io` builder dex on Hyperliquid), and can be selected with `primary.venue`
+or `--primary`. The other leg — the hedge — is one of:
 
 | `--hedge` | venue | quote | taker fee | protocol |
 |---|---|---|---|---|
@@ -11,6 +12,14 @@ Open-source two-venue perp arbitrage bot. One leg is always **Entropy**
 | `lighter-rh` | Lighter Robinhood chain | **USDG** | 0 bps | zkLighter ws |
 | `tradexyz` | Hyperliquid trade.xyz dex | USDC | ~1 bps | HL l2Book, sync IOC settle |
 | `arcus` | Arcus perpetuals | USD | set verified account fee | Arcus WS full L2 snapshots, signed IOC, async settle |
+| `entropy` | Entropy / Hyperliquid `io` | USDC | set verified account fee | HL l2Book, IOC |
+
+For RH primary + Arcus hedge, use [configs/rh-arcus.yaml](configs/rh-arcus.yaml).
+It sets Arcus to the user-provided fee of 2.25 bps (0.0225%). Start with
+`python3 main.py --record-only --symbol ETH --hedge arcus --config configs/rh-arcus.yaml`.
+See [primary-leg configuration](docs/primary.md) for credentials and threshold
+semantics. The strategy explanation below uses the default Entropy primary;
+for other primaries, premium is `(primary price / hedge price - 1) * 10000`.
 
 > **Referral links** — signing up through these supports this project:
 > - Entropy — Tier 4 referral, 100% rebates: <https://entropy.io/?r=yourquantguy>
@@ -81,7 +90,7 @@ cp .env.example .env                     # credentials — required to trade
 
 The markets are **not** in the config file — you state them explicitly on
 every start: `--symbol` (traded on both venues) and `--hedge` (one of
-`lighter`, `lighter-rh`, `tradexyz`, `arcus`; Entropy is always the
+`lighter`, `lighter-rh`, `tradexyz`, `arcus`, `entropy`; the configured primary is the
 other leg).
 
 There is **no paper mode** — the bot either collects data (`--record-only`)
@@ -167,6 +176,8 @@ symbol.
 | `thresholds.upper_bps` / `lower_bps` | entry bands (> 0) | — |
 | `thresholds.close_upper_bps` / `close_lower_bps` | closing bands (> 0) | entry bands |
 | `entropy.symbol` / `hedge.symbol` | exact market name on each venue | `--symbol` |
+| `primary.venue` / `--primary` | select primary; replace legacy `entropy` section with `primary` | `entropy` |
+| `primary.symbol` | exact symbol when using the `primary` section | `--symbol` |
 | `entropy.dex` | Hyperliquid dex for the first leg; use `io` for Entropy or `""` for core markets such as ETH | `io` |
 | `*.taker_fee_bps` | per-venue taker fee | 0.0 (tradexyz: 1.0); Arcus requires an explicit verified value |
 | `arcus.network` | Arcus endpoint and credential network | `mainnet` (`testnet` also supported; first leg stays on mainnet) |

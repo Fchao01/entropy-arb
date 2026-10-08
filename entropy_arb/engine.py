@@ -1,4 +1,4 @@
-"""Two-venue arbitrage engine: Entropy vs one hedge venue.
+"""Two-venue arbitrage engine: configurable primary vs hedge venue.
 
 The signal is a fixed band around a configured midline (config.yaml):
 
@@ -77,8 +77,8 @@ class Engine:
         self._last_skiplog = 0.0
         self._poke_due: Optional[float] = None
         # per-direction persistence arming: direction key -> first-seen ts
-        self._armed: Dict[str, Optional[float]] = {"sell_entropy": None,
-                                                   "buy_entropy": None}
+        self._armed: Dict[str, Optional[float]] = {self.direction_key(True): None,
+                                                   self.direction_key(False): None}
         self._step = 1e-4
         self._min_base = 0.0
         self._min_notional = 10.0
@@ -177,9 +177,9 @@ class Engine:
                     "请用 --record-only")
             self.entropy.init_signer()
             self.hedge.init_signer()
-            if self.hedge.kind == "hl":
+            if self.entropy.kind == self.hedge.kind == "hl":
                 self.entropy.share_nonces_with(self.hedge)
-        if (self.hedge.kind == "hl"
+        if (self.entropy.kind == self.hedge.kind == "hl"
                 and self.entropy._query_address()
                 and self.entropy._query_address() == self.hedge._query_address()):
             self.hedge.include_core_equity = False  # shared account: count once
@@ -190,9 +190,9 @@ class Engine:
                              self._step)
         self._min_notional = max(cfg.min_order_notional,
                                  self.entropy.min_quote, self.hedge.min_quote)
-        log.info("pair ENTROPY(%s)-%s(%s): midline=%+.2fbps band=[-%.2f, +%.2f] "
+        log.info("pair %s(%s)-%s(%s): midline=%+.2fbps band=[-%.2f, +%.2f] "
                  "fees=%.2f+%.2f step=%g min_ntl=$%g",
-                 self.entropy.conf.symbol, self.hedge.name,
+                 self.entropy.name, self.entropy.conf.symbol, self.hedge.name,
                  self.hedge.conf.symbol, cfg.midline_bps, cfg.lower_bps,
                  cfg.upper_bps, self.entropy.fee_bps, self.hedge.fee_bps,
                  self._step, self._min_notional)
@@ -323,6 +323,11 @@ class Engine:
 
     # -------------------------------------------------------------- strategy
 
+    def direction_key(self, sell_primary: bool) -> str:
+        # Preserve old direction values for existing Entropy CSV consumers.
+        suffix = "entropy" if self.cfg.primary_venue == "entropy" else "primary"
+        return ("sell_" if sell_primary else "buy_") + suffix
+
     async def _strategy_loop(self) -> None:
         while not self.stop.is_set():
             await self._update_evt.wait()
@@ -411,8 +416,8 @@ class Engine:
         best = None
         if self._unresolved_execution:
             return None
-        for buy, sell, dkey in ((self.hedge, self.entropy, "sell_entropy"),
-                                (self.entropy, self.hedge, "buy_entropy")):
+        for buy, sell, dkey in ((self.hedge, self.entropy, self.direction_key(True)),
+                                (self.entropy, self.hedge, self.direction_key(False))):
             if not self._books_tradeable():
                 continue
             if not (buy.ready_to_trade() and sell.ready_to_trade()):
@@ -485,7 +490,7 @@ class Engine:
             return False
         cfg = self.cfg
         inv_bps = self._inv_add_bps(buy, sell)
-        direction = "sell_entropy" if sell.key == "entropy" else "buy_entropy"
+        direction = self.direction_key(sell.key == self.entropy.key)
         signal_ts = time.time()
         book_age_ms = max(0.0, signal_ts - min(buy.book.last_update_ts,
                                                sell.book.last_update_ts)) * 1000.0

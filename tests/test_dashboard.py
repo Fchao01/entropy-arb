@@ -70,6 +70,18 @@ def test_renders_before_markets_resolve():
     assert "resolving markets" in out
 
 
+def test_rh_arcus_dashboard_shows_actual_primary_and_directions():
+    eng = make_engine()
+    eng.cfg.primary_venue = "lighter-rh"
+    eng.entropy.name, eng.hedge.name = "RH", "ARCUS"
+    eng.entropy.set_book(100.14, 100.16)
+    eng.hedge.set_book(99.99, 100.01)
+    out = render(eng)
+    assert "RH" in out and "ARCUS" in out
+    assert "SELL RH" in out and "BUY RH" in out
+    assert "ENTROPY" not in out
+
+
 def test_renders_key_numbers():
     eng = make_engine()
     eng.entropy.set_book(100.14, 100.16)   # ~+15 bps rich vs hedge

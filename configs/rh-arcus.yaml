@@ -1,0 +1,52 @@
+# RH 主腿 + Arcus 对冲。先用 --record-only 采集；阈值是示例，须重新测量。
+# Arcus 手续费按你提供的 0.0225% 填为 2.25 bps；RH 费率也应核对账户。
+# 两边品种名称不同时分别添加 primary.symbol / hedge.symbol。
+thresholds:
+  midline_bps: 0.0
+  upper_bps: 4.0
+  lower_bps: 4.0
+  close_upper_bps: 4.0
+  close_lower_bps: 4.0
+primary:
+  venue: lighter-rh
+  taker_fee_bps: 0.0
+  max_position_usd: 1000
+  max_orders_per_min: 30
+hedge:
+  taker_fee_bps: 2.25
+  max_position_usd: 1000
+  max_orders_per_min: 30
+arcus:
+  network: mainnet
+sizing:
+  take_fraction: 0.5
+  max_order_notional_usd: 500
+  min_order_notional_usd: 10
+inventory:
+  scale_bps: 10.0
+  floor_frac: 0
+execution:
+  premium_persist_sec: 0
+  cooldown_sec: 0.0
+  settle_timeout_sec: 10.0
+  leg_slippage_bps: 50.0
+  hedge_slippage_bps: 20.0
+  net_tolerance_base: 0.001
+  max_consecutive_errors: 3
+  rate_limit_pause_sec: 10.0
+  staleness_sec: 10.0
+  reconcile_sec: 15.0
+  venue_probe_sec: 30.0
+  http_keepalive_sec: 10.0
+  latency_buffer_bps: 0.0
+  slippage_buffer_bps: 0.0
+  max_book_skew_sec: 0.5
+recorder:
+  enabled: true
+  csv: logs/{primary}-{hedge}/{symbol}/minutes.csv
+logging:
+  level: INFO
+  status_interval_sec: 30.0
+  trades_csv: logs/{primary}-{hedge}/{symbol}/trades.csv
+  dashboard: true
+  file: logs/{primary}-{hedge}/{symbol}/engine.log

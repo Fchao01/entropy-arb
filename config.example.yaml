@@ -19,7 +19,9 @@
 #   arcus        Arcus perpetuals          (USD, set verified account fee)
 # 交易哪个市场不在本文件中配置——每次启动时用命令行参数显式指定：
 #     python3 main.py --symbol SNDK --hedge lighter-rh
-# Entropy 永远是其中一条腿；--hedge 选择一个对冲交易所，见上表。
+# 默认主腿是 Entropy。其他主腿使用 primary.venue 或 --primary；
+# 将下面 entropy 段替换为 primary 段，不要同时保留。详见 docs/primary.md。
+# RH + Arcus 的完整示例见 configs/rh-arcus.yaml，Arcus 费率填 2.25 bps。
 
 # ============================ THE SIGNAL / 信号 ============================
 # premium_bps = (Entropy price / hedge price - 1) * 10000
@@ -65,6 +67,7 @@ hedge:
   taker_fee_bps: 0.0         # Lighter venues: 0; tradexyz: ~1.0
   # Arcus requires this field: replace 0.0 with your verified account fee.
   # Arcus 必须填写已确认的账户吃单费率；这里的 0.0 不代表 Arcus 免费。
+  # Your quoted Arcus fee 0.0225% = 2.25 bps / 你提供的 Arcus 费率填写 2.25。
   max_position_usd: 1000
   max_orders_per_min: 30     # Lighter's ceiling is ~40/min / Lighter 上限约 40/分钟
 

@@ -79,6 +79,8 @@ _ZH = {
     "   band ": "   区间 ",
     "SELL entropy → buy {h}": "卖出 entropy → 买入 {h}",
     "BUY entropy → sell {h}": "买入 entropy → 卖出 {h}",
+    "SELL {p} → buy {h}": "卖出 {p} → 买入 {h}",
+    "BUY {p} → sell {h}": "买入 {p} → 卖出 {h}",
     "direction": "方向",
     "exec prem bps": "可成交溢价 bps",
     "hurdle bps": "门槛 bps",
@@ -223,7 +225,7 @@ class Dashboard:
         g.add_column(justify="left")
         g.add_column(justify="right")
         left = Text.assemble(("entropy-arb  ", "bold"),
-                             (f"{cfg.symbol} × ENTROPY · {eng.hedge.name}",
+                             (f"{cfg.symbol} × {eng.entropy.name} · {eng.hedge.name}",
                               "bold cyan"))
         right = Text()
         right.append_text(mode)
@@ -345,12 +347,13 @@ class Dashboard:
         t.add_column(self._t("hurdle bps"), justify="right")
         t.add_column(self._t("gap bps"), justify="right")
         t.add_column("", justify="left")
-        self._dir_row(t, self._t("SELL entropy → buy {h}", h=eng.hedge.name),
+        primary_name = "entropy" if cfg.primary_venue == "entropy" else eng.entropy.name
+        self._dir_row(t, self._t("SELL {p} → buy {h}", p=primary_name, h=eng.hedge.name),
                       eng.hedge, eng.entropy,
-                      cfg.midline_bps + cfg.upper_bps, "sell_entropy")
-        self._dir_row(t, self._t("BUY entropy → sell {h}", h=eng.hedge.name),
+                      cfg.midline_bps + cfg.upper_bps, eng.direction_key(True))
+        self._dir_row(t, self._t("BUY {p} → sell {h}", p=primary_name, h=eng.hedge.name),
                       eng.entropy, eng.hedge,
-                      cfg.lower_bps - cfg.midline_bps, "buy_entropy")
+                      cfg.lower_bps - cfg.midline_bps, eng.direction_key(False))
         return Panel(Group(head, t),
                      title=self._t("signal — executable premium vs full "
                                    "hurdle incl. fees (● = armed)"),
