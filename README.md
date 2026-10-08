@@ -10,6 +10,7 @@ Open-source two-venue perp arbitrage bot. One leg is always **Entropy**
 | `lighter` | Lighter mainnet | USDC | 0 bps | zkLighter ws (diff books, async settle) |
 | `lighter-rh` | Lighter Robinhood chain | **USDG** | 0 bps | zkLighter ws |
 | `tradexyz` | Hyperliquid trade.xyz dex | USDC | ~1 bps | HL l2Book, sync IOC settle |
+| `arcus` | Arcus perpetuals | USD | set verified account fee | Arcus WS full L2 snapshots, signed IOC, async settle |
 
 > **Referral links** — signing up through these supports this project:
 > - Entropy — Tier 4 referral, 100% rebates: <https://entropy.io/?r=yourquantguy>
@@ -80,7 +81,7 @@ cp .env.example .env                     # credentials — required to trade
 
 The markets are **not** in the config file — you state them explicitly on
 every start: `--symbol` (traded on both venues) and `--hedge` (one of
-`lighter`, `lighter-rh`, `tradexyz`; Entropy is always the
+`lighter`, `lighter-rh`, `tradexyz`, `arcus`; Entropy is always the
 other leg).
 
 There is **no paper mode** — the bot either collects data (`--record-only`)
@@ -165,8 +166,10 @@ symbol.
 | `thresholds.midline_bps` | premium center (measure it!) | — |
 | `thresholds.upper_bps` / `lower_bps` | entry bands (> 0) | — |
 | `thresholds.close_upper_bps` / `close_lower_bps` | closing bands (> 0) | entry bands |
+| `entropy.symbol` / `hedge.symbol` | exact market name on each venue | `--symbol` |
 | `entropy.dex` | Hyperliquid dex for the first leg; use `io` for Entropy or `""` for core markets such as ETH | `io` |
-| `*.taker_fee_bps` | per-venue taker fee | 0.0 (tradexyz hedge: 1.0) |
+| `*.taker_fee_bps` | per-venue taker fee | 0.0 (tradexyz: 1.0); Arcus requires an explicit verified value |
+| `arcus.network` | Arcus endpoint and credential network | `mainnet` (`testnet` also supported; first leg stays on mainnet) |
 | `*.max_position_usd` | per-venue position cap | 1000 |
 | `*.max_orders_per_min` | per-venue send budget (sliding 60 s) | 120; lighter hedges 30 |
 | `sizing.take_fraction` | fraction of crossable depth taken | 0.5 |
@@ -178,6 +181,27 @@ symbol.
 | `execution.max_book_skew_sec` | maximum local receipt-time gap between books | 0.5 |
 | `recorder.*` | minute-data recorder | on, `logs/{symbol}/minutes.csv` |
 | `logging.dashboard` / `logging.file` | Rich dashboard on a tty; log file while it runs | on, `logs/{symbol}/engine.log` |
+
+When market names differ, set each leg's exact name in its YAML section.
+For the Entropy `ANTH` / RH `ANTHROPIC` pair, add:
+
+```yaml
+entropy:
+  dex: io
+  symbol: ANTH
+hedge:
+  symbol: ANTHROPIC
+```
+
+Keep your existing thresholds, fees and risk settings in the same file, then
+start data collection with
+`python3 main.py --record-only --symbol ANTH --hedge lighter-rh --config configs/anth.yaml`.
+The Entropy market is resolved as `io:ANTH`; RH is queried for `ANTHROPIC`.
+`--symbol ANTH` still names the pair and its `logs/ANTH/` directory.
+Omitting either override makes that leg use `--symbol`. Use a separate YAML
+for this pair; fixed overrides will also apply if you change `--symbol`.
+This maps names only: it does not verify matching underlying assets or convert
+contract quantities, price units or oracle definitions.
 
 `logging.trades_csv` also records book age, cross-book receipt skew, per-leg
 send latency, actual fill prices, realized edge, and edge shortfall versus the
@@ -197,6 +221,10 @@ leave them unchanged.
   `LIGHTER_API_PRIVATE_KEY`, registered on the **same deployment** as your
   `--hedge` flag (mainnet and the Robinhood chain are separate accounts and
   keys — see [lighter-python](https://github.com/elliottech/lighter-python)).
+- **Arcus** — `ARCUS_ACCOUNT_ADDRESS`, `ARCUS_ACCOUNT_INDEX` (0–9),
+  `ARCUS_API_SIGNING_KEY` (32-byte Ed25519 seed). Authorize the key on the
+  selected Arcus network and subaccount first. See the configuration,
+  official API links and validation limits in [Arcus setup](docs/arcus.md).
 
 ## How execution works
 
@@ -204,6 +232,10 @@ leave them unchanged.
   with average-price protection settling on the authenticated account
   websocket; Hyperliquid IOC limits settling synchronously (with
   orderStatus polling for unknown outcomes).
+- Arcus uses signed WebSocket IOC LIMIT orders; `ACK` only acknowledges
+  acceptance. Final cumulative fills and average prices come from `orders`
+  updates or REST order queries. Unknown submissions are never resubmitted;
+  new trading waits for their final state and a successful position query.
 - A **persistence gate** (`premium_persist_sec`) arms each direction and only
   fires if the edge survives — one-tick phantoms are filtered.
 - **Inventory ladder**: past `floor_frac` of a venue's cap, adding to the
@@ -227,6 +259,7 @@ entropy_arb/book.py      order books + fee-aware crossing/sizing math
 entropy_arb/feeds.py     official HL ws + zkLighter ws book feeds
 entropy_arb/venue_hl.py  Hyperliquid dex adapter (Entropy, tradexyz)
 entropy_arb/venue_lighter.py  zkLighter adapter (mainnet, Robinhood chain)
+entropy_arb/venue_arcus.py    Arcus perpetuals adapter (mainnet, testnet)
 entropy_arb/engine.py    the two-venue strategy loop
 entropy_arb/dashboard.py Rich terminal dashboard
 entropy_arb/recorder.py  1-minute orderbook bars

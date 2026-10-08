@@ -3,13 +3,14 @@
 **[English documentation / 英文文档 → README.md](README.md)**
 
 开源双交易所永续合约套利机器人。其中一条腿永远是 **Entropy**（Hyperliquid 上的
-`io` builder dex）；另一条腿（对冲腿）三选一：
+`io` builder dex）；另一条腿（对冲腿）可选择：
 
 | `--hedge` | 交易所 | 计价货币 | 吃单费 | 协议 |
 |---|---|---|---|---|
 | `lighter` | Lighter 主网 | USDC | 0 bps | zkLighter ws（增量订单簿，异步结算） |
 | `lighter-rh` | Lighter Robinhood 链 | **USDG** | 0 bps | zkLighter ws |
 | `tradexyz` | Hyperliquid trade.xyz dex | USDC | ~1 bps | HL l2Book，IOC 同步结算 |
+| `arcus` | Arcus 永续合约 | USD | 填已确认的账户费率 | Arcus WS 全量盘口、签名 IOC、异步确认 |
 
 > **推荐链接** —— 通过以下链接注册即可支持本项目：
 > - Entropy — Tier 4 推荐，100% 返佣：<https://entropy.io/?r=yourquantguy>
@@ -72,8 +73,8 @@ cp .env.example .env                     # 密钥——交易必填
 ```
 
 交易哪个市场**不在**配置文件中——每次启动时用命令行参数显式指定：
-`--symbol`（两个交易所共同交易的品种）和 `--hedge`（三选一：
-`lighter`、`lighter-rh`、`tradexyz`；Entropy 永远是
+`--symbol`（交易组名称及两边默认品种）和 `--hedge`（选择一个：
+`lighter`、`lighter-rh`、`tradexyz`、`arcus`；Entropy 永远是
 另一条腿）。
 
 本机器人**没有模拟盘**——要么采集数据（`--record-only`），要么实盘交易。
@@ -150,8 +151,10 @@ python3 main.py --symbol SNDK --hedge lighter-rh
 | `thresholds.midline_bps` | 溢价中枢（必须实测！） | — |
 | `thresholds.upper_bps` / `lower_bps` | 入场带宽（> 0） | — |
 | `thresholds.close_upper_bps` / `close_lower_bps` | 平仓带宽（> 0） | 同入场带宽 |
+| `entropy.symbol` / `hedge.symbol` | 各交易所的实际市场名称 | 同 `--symbol` |
 | `entropy.dex` | Hyperliquid 上第一条腿的 dex；Entropy 用 `io`，核心市场（如 ETH）用空字符串 `""` | `io` |
-| `*.taker_fee_bps` | 各所吃单费 | 0.0（tradexyz 对冲腿：1.0） |
+| `*.taker_fee_bps` | 各所吃单费 | 0.0（tradexyz：1.0）；Arcus 必须显式填写已确认费率 |
+| `arcus.network` | Arcus 接口及密钥所在网络 | `mainnet`；也支持 `testnet`，但第一条腿仍为主网 |
 | `*.max_position_usd` | 各所持仓上限 | 1000 |
 | `*.max_orders_per_min` | 各所每分钟下单预算（滑动 60 秒） | 120；Lighter 对冲腿 30 |
 | `sizing.take_fraction` | 吃掉可套利深度的比例 | 0.5 |
@@ -163,6 +166,32 @@ python3 main.py --symbol SNDK --hedge lighter-rh
 | `execution.max_book_skew_sec` | 两边盘口本地更新时间允许的最大差值 | 0.5 |
 | `recorder.*` | 分钟数据采集器 | 开启，`logs/{symbol}/minutes.csv` |
 | `logging.dashboard` / `logging.file` | 终端仪表盘；开启时日志写入文件 | 开启，`logs/{symbol}/engine.log` |
+
+两边市场名称不同时，可以分别指定。例如 Entropy 的 `ANTH` 对应 RH 的
+`ANTHROPIC`，在这组交易的 YAML 中加入：
+
+```yaml
+entropy:
+  dex: io
+  symbol: ANTH
+hedge:
+  symbol: ANTHROPIC
+```
+
+保留原有的阈值、手续费和风险参数，将完整配置保存为 `configs/anth.yaml`，
+先采集数据：
+
+```bash
+python3 main.py --record-only --symbol ANTH --hedge lighter-rh --config configs/anth.yaml
+```
+
+程序在 Entropy 查找 `io:ANTH`，在 RH 查找 `ANTHROPIC`；交易组名称和日志目录
+仍由 `--symbol ANTH` 决定，默认写入 `logs/ANTH/`。任何一边未填写 `symbol`
+时，该边使用命令行的 `--symbol`。请为这组交易使用独立 YAML：改命令行币种
+不会覆盖 YAML 中写死的两边名称。
+
+此配置只映射名称，不核实标的一致性，也不换算合约数量、价格单位或预言机口径；
+实盘前需要确认这些规格一致。
 
 `logging.trades_csv` 现在还会记录盘口年龄、两边盘口更新时间差、两条腿发送耗时、
 实际成交价、成交后的实际 edge，以及相对计划 edge 的损失。运行一段时间后，可以用
@@ -181,12 +210,19 @@ python3 main.py --symbol SNDK --hedge lighter-rh
   `LIGHTER_API_PRIVATE_KEY`，必须注册在与启动参数 `--hedge` **相同的部署**上
   （主网与 Robinhood 链是两套独立的账户和密钥——参见
   [lighter-python](https://github.com/elliottech/lighter-python)）。
+- **Arcus** —— `ARCUS_ACCOUNT_ADDRESS`、`ARCUS_ACCOUNT_INDEX`（0–9）、
+  `ARCUS_API_SIGNING_KEY`（32 字节 Ed25519 种子）。先在所选 Arcus 网络和
+  子账户授权 API 密钥。配置方法、官方文档链接及验证范围见
+  [Arcus 接入说明](docs/arcus.md)。
 
 ## 执行机制
 
 - 两条腿**同时发出吃单**：Lighter 用带均价保护的市价单，在鉴权 websocket
   上异步确认成交；Hyperliquid 用 IOC 限价单同步结算（结果未知时轮询
   orderStatus 兜底）。
+- Arcus 使用签名 WebSocket IOC 限价单。`ACK` 只表示接受请求；通过订单
+  推送或 REST 查询确认最终成交数量与均价。未知结果不重复发送，确认最终
+  订单状态并成功读取持仓后才允许新交易。
 - **持续性闸门**（`premium_persist_sec`）：信号先"武装"，持续存在才触发，
   过滤单 tick 的假信号。
 - **库存阶梯**：仓位超过上限的 `floor_frac` 后，同方向加仓需要线性递增的
@@ -208,6 +244,7 @@ entropy_arb/book.py      订单簿 + 含手续费的套利规模计算
 entropy_arb/feeds.py     官方 HL ws + zkLighter ws 行情
 entropy_arb/venue_hl.py  Hyperliquid dex 适配器（Entropy、tradexyz）
 entropy_arb/venue_lighter.py  zkLighter 适配器（主网、Robinhood 链）
+entropy_arb/venue_arcus.py    Arcus 永续合约适配器（主网、测试网）
 entropy_arb/engine.py    双交易所策略主循环
 entropy_arb/dashboard.py Rich 终端仪表盘
 entropy_arb/recorder.py  分钟级盘口数据采集

@@ -29,6 +29,7 @@ from .config import Config
 from .recorder import MinuteRecorder
 from .venue_hl import HLVenue
 from .venue_lighter import LighterVenue
+from .venue_arcus import ArcusVenue
 
 log = logging.getLogger("engine")
 
@@ -151,6 +152,8 @@ class Engine:
             await self.session.close()
 
     def _make_venue(self, vc):
+        if vc.kind == "arcus":
+            return ArcusVenue(vc, self.session, self.cfg.settle_timeout_sec)
         if vc.kind == "lighter":
             return LighterVenue(vc, self.session, self.cfg.settle_timeout_sec)
         return HLVenue(vc, self.cfg.hl_api_url, self.cfg.hl_ws_url,
@@ -300,6 +303,13 @@ class Engine:
         return min(hb, hs)
 
     def _plan(self, buy, sell, cap_notional: float):
+        max_base = min(getattr(buy, "max_base", float("inf")),
+                       getattr(sell, "max_base", float("inf")))
+        ask = buy.book.best_ask()
+        if ask is not None:
+            # A base-size cap must apply to BOTH legs before either order is
+            # sent. Lowest ask is conservative when walking more depth.
+            cap_notional = min(cap_notional, max_base * ask)
         return plan_arb(
             buy.book, sell.book,
             threshold_bps=self._eff_threshold(buy, sell),
@@ -621,7 +631,8 @@ class Engine:
             lk = self._vlock(v.key)
             if lk.locked():
                 continue
-            qty = floor_step(min(abs(net), abs(v.position)), self._step)
+            qty = floor_step(min(abs(net), abs(v.position),
+                                 getattr(v, "max_base", float("inf"))), self._step)
             if qty < v.min_base:
                 continue
             ref = v.book.best_bid() if is_sell else v.book.best_ask()

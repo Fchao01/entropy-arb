@@ -79,15 +79,16 @@ async def amain(cfg, record_only: bool, use_dashboard: bool, force_tty: bool,
 def main() -> None:
     p = argparse.ArgumentParser(
         description="Two-venue LIVE arbitrage: Entropy vs Lighter mainnet / "
-                    "Lighter Robinhood / trade.xyz. Without --record-only, "
+                    "Lighter Robinhood / trade.xyz / Arcus. Without --record-only, "
                     "real orders are sent.")
     p.add_argument("--symbol", required=True,
-                   help="symbol traded on both venues, e.g. SNDK / "
-                        "两个交易所共同交易的品种")
+                   help="pair name and default symbol on both venues, e.g. SNDK; "
+                        "override names with entropy.symbol / hedge.symbol in YAML / "
+                        "交易组名称及两边默认品种；不同名称可在 YAML 分别指定")
     p.add_argument("--hedge", required=True, choices=HEDGE_VENUES,
                    metavar="VENUE",
                    help=f"hedge venue, one of: {', '.join(HEDGE_VENUES)} / "
-                        f"对冲腿，三选一")
+                        f"对冲腿，选择一个交易所")
     p.add_argument("--config", default="config.yaml",
                    help="strategy config (default: config.yaml)")
     p.add_argument("--env-file", default=".env",

@@ -6,6 +6,9 @@
 hyperliquid-python-sdk>=0.9
 eth-account>=0.10
 
+# Arcus Ed25519 request signing (imported only for live trading).
+cryptography>=41.0
+
 # Lighter signing (only needed with --hedge lighter / lighter-rh).
 # Installs from the SDK's current main; for reproducible deploys, append a
 # known-good commit: ...lighter-python.git@<commit-sha>

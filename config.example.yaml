@@ -16,9 +16,10 @@
 #   lighter      Lighter mainnet            (USDC, 0 bps taker)
 #   lighter-rh   Lighter Robinhood chain    (USDG, 0 bps taker)
 #   tradexyz     Hyperliquid trade.xyz dex  (USDC, ~1 bps taker)
+#   arcus        Arcus perpetuals          (USD, set verified account fee)
 # 交易哪个市场不在本文件中配置——每次启动时用命令行参数显式指定：
 #     python3 main.py --symbol SNDK --hedge lighter-rh
-# Entropy 永远是其中一条腿；--hedge 选择对冲腿（三选一，见上表）。
+# Entropy 永远是其中一条腿；--hedge 选择一个对冲交易所，见上表。
 
 # ============================ THE SIGNAL / 信号 ============================
 # premium_bps = (Entropy price / hedge price - 1) * 10000
@@ -50,15 +51,27 @@ thresholds:
 
 # ======================== VENUES / 交易所参数 ==============================
 entropy:
+  # Optional venue-specific symbol; otherwise uses --symbol.
+  # 名称不同时可指定本交易所名称；不填则使用 --symbol。
+  # symbol: ANTH
   dex: io                    # Entropy's dex; use "" for Hyperliquid core (e.g. ETH) / Entropy 的 dex 名；核心市场（如 ETH）填 ""
   taker_fee_bps: 0.0         # taker fee / 吃单手续费
   max_position_usd: 1000     # position cap / 持仓上限（美元）
   max_orders_per_min: 120    # order-send budget, sliding 60s / 每分钟下单预算
 
 hedge:
+  # symbol: ANTHROPIC  # RH name corresponding to Entropy ANTH / RH 对应名称
+  # symbol: SNDK-USD   # Arcus exact market name / Arcus 市场名称
   taker_fee_bps: 0.0         # Lighter venues: 0; tradexyz: ~1.0
+  # Arcus requires this field: replace 0.0 with your verified account fee.
+  # Arcus 必须填写已确认的账户吃单费率；这里的 0.0 不代表 Arcus 免费。
   max_position_usd: 1000
   max_orders_per_min: 30     # Lighter's ceiling is ~40/min / Lighter 上限约 40/分钟
+
+# Arcus only; credentials must belong to this network and subaccount.
+# 仅 Arcus 使用；API 密钥必须与网络、子账户一致，详见 docs/arcus.md。
+arcus:
+  network: mainnet           # mainnet | testnet; Entropy remains mainnet
 
 # ========================= SIZING / 下单规模 ===============================
 sizing:

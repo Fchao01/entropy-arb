@@ -1,10 +1,12 @@
 """Configuration: strategy from a YAML file, credentials from .env, market
-selection (symbol + hedge venue) from the command line.
+selection (pair symbol + hedge venue) from the command line, with optional
+per-venue symbol overrides in YAML.
 
 The split is deliberate: config.yaml IS the strategy (thresholds, sizing,
 risk) and is safe to share/commit as an example; .env holds only secrets;
-which markets to trade is stated explicitly on every start (--symbol,
---hedge). Every YAML key is validated against the schema below, so a typo
+the pair is stated explicitly on every start (--symbol, --hedge); venue-specific
+names can be set with entropy.symbol / hedge.symbol. Every YAML key is
+validated against the schema below, so a typo
 is an error rather than a setting that silently does nothing.
 
 Threshold model (fixed numbers the user derives from recorded minute data):
@@ -22,6 +24,7 @@ Threshold model (fixed numbers the user derives from recorded minute data):
 from __future__ import annotations
 
 import os
+import math
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
@@ -31,7 +34,12 @@ from dotenv import load_dotenv
 HL_API_URL = "https://api.hyperliquid.xyz"
 HL_WS_URL = "wss://api.hyperliquid.xyz/ws"   # official ws — the only HL feed used
 
-HEDGE_VENUES = ("lighter", "lighter-rh", "tradexyz")
+HEDGE_VENUES = ("lighter", "lighter-rh", "tradexyz", "arcus")
+
+ARCUS_ENDPOINTS = {
+    "mainnet": ("https://api.arcus.xyz", "wss://api.arcus.xyz/v1/ws"),
+    "testnet": ("https://api.testnet.arcus.xyz", "wss://api.testnet.arcus.xyz/v1/ws"),
+}
 
 
 @dataclass(frozen=True)
@@ -78,9 +86,20 @@ class HLCreds:
 
 
 @dataclass
+class ArcusCreds:
+    account_address: Optional[str]
+    account_index: int
+    signing_key: Optional[str]
+
+    @property
+    def complete(self) -> bool:
+        return bool(self.account_address and self.signing_key)
+
+
+@dataclass
 class VenueConf:
     key: str                  # "entropy" | "hedge"
-    kind: str                 # "hl" | "lighter"
+    kind: str                 # "hl" | "lighter" | "arcus"
     label: str                # human name for logs, e.g. "ENTROPY", "RH"
     symbol: str
     fee_bps: float
@@ -92,6 +111,9 @@ class VenueConf:
     # lighter
     lighter_profile: Optional[LighterProfile] = None
     lighter_creds: Optional[LighterCreds] = None
+    # Arcus perpetuals (Ed25519 API Signing Key, not an EVM private key)
+    arcus_network: str = "mainnet"
+    arcus_creds: Optional[ArcusCreds] = None
 
 
 @dataclass
@@ -150,6 +172,8 @@ class Config:
             if v.kind == "lighter" and not (v.lighter_creds
                                             and v.lighter_creds.complete):
                 return False
+            if v.kind == "arcus" and not (v.arcus_creds and v.arcus_creds.complete):
+                return False
         return True
 
 
@@ -165,15 +189,20 @@ _SCHEMA: Dict[str, Any] = {
         "close_lower_bps": float,
     },
     "entropy": {
+        "symbol": str,
         "dex": str,
         "taker_fee_bps": float,
         "max_position_usd": float,
         "max_orders_per_min": int,
     },
     "hedge": {
+        "symbol": str,
         "taker_fee_bps": float,
         "max_position_usd": float,
         "max_orders_per_min": int,
+    },
+    "arcus": {
+        "network": str,
     },
     "sizing": {
         "take_fraction": float,
@@ -294,6 +323,14 @@ def load_config(config_file: str = "config.yaml", env_file: str = ".env", *,
             f"--hedge must be one of {list(HEDGE_VENUES)}, got "
             f"{hedge_venue!r} / --hedge 必须是 {list(HEDGE_VENUES)} 之一")
 
+    entropy_symbol = _get(raw, "entropy", "symbol", symbol).strip()
+    hedge_symbol = _get(raw, "hedge", "symbol", symbol).strip()
+    for section, market_symbol in (("entropy", entropy_symbol),
+                                   ("hedge", hedge_symbol)):
+        if not market_symbol:
+            raise ConfigError(f"'{section}.symbol' must not be empty / "
+                              "交易所币种名称不能为空")
+
     thr = raw.get("thresholds") or {}
     for k in ("midline_bps", "upper_bps", "lower_bps"):
         if k not in thr:
@@ -325,7 +362,7 @@ def load_config(config_file: str = "config.yaml", env_file: str = ".env", *,
                                _env_s("HL_ACCOUNT_ADDRESS"))
     entropy = VenueConf(
         key="entropy", kind="hl", label="ENTROPY",
-        symbol=symbol,
+        symbol=entropy_symbol,
         fee_bps=float(_get(raw, "entropy", "taker_fee_bps", 0.0)),
         cap_usd=float(_get(raw, "entropy", "max_position_usd", 1000.0)),
         orders_per_min=int(_get(raw, "entropy", "max_orders_per_min", 120)),
@@ -333,10 +370,35 @@ def load_config(config_file: str = "config.yaml", env_file: str = ".env", *,
         hl_creds=entropy_hl_creds,
     )
 
-    if hedge_venue == "tradexyz":
+    if hedge_venue == "arcus":
+        network = _get(raw, "arcus", "network", "mainnet")
+        if network not in ARCUS_ENDPOINTS:
+            raise ConfigError("arcus.network must be mainnet or testnet")
+        # Fees are account/tier dependent; do not invent a default for a new venue.
+        if "taker_fee_bps" not in (raw.get("hedge") or {}):
+            raise ConfigError("hedge.taker_fee_bps is required with --hedge arcus; "
+                              "set the verified fee for your Arcus account / "
+                              "请填写实测或账户费率表中的吃单手续费")
+        fee_bps = float(raw["hedge"]["taker_fee_bps"])
+        if not math.isfinite(fee_bps) or fee_bps < 0:
+            raise ConfigError("hedge.taker_fee_bps must be finite and >= 0 for Arcus")
+        account_index = _env_i("ARCUS_ACCOUNT_INDEX")
+        account_index = 0 if account_index is None else account_index
+        if not 0 <= account_index <= 9:
+            raise ConfigError("ARCUS_ACCOUNT_INDEX must be in [0, 9]")
+        hedge = VenueConf(
+            key="hedge", kind="arcus", label="ARCUS", symbol=hedge_symbol,
+            fee_bps=fee_bps,
+            cap_usd=float(_get(raw, "hedge", "max_position_usd", 1000.0)),
+            orders_per_min=int(_get(raw, "hedge", "max_orders_per_min", 30)),
+            arcus_network=network,
+            arcus_creds=ArcusCreds(_env_s("ARCUS_ACCOUNT_ADDRESS"), account_index,
+                                  _env_s("ARCUS_API_SIGNING_KEY")),
+        )
+    elif hedge_venue == "tradexyz":
         hedge = VenueConf(
             key="hedge", kind="hl", label="XYZ",
-            symbol=symbol,
+            symbol=hedge_symbol,
             fee_bps=float(_get(raw, "hedge", "taker_fee_bps", 1.0)),
             cap_usd=float(_get(raw, "hedge", "max_position_usd", 1000.0)),
             orders_per_min=int(_get(raw, "hedge", "max_orders_per_min", 120)),
@@ -349,7 +411,7 @@ def load_config(config_file: str = "config.yaml", env_file: str = ".env", *,
         hedge = VenueConf(
             key="hedge", kind="lighter",
             label="LIGHTER" if hedge_venue == "lighter" else "RH",
-            symbol=symbol,
+            symbol=hedge_symbol,
             fee_bps=float(_get(raw, "hedge", "taker_fee_bps", 0.0)),
             cap_usd=float(_get(raw, "hedge", "max_position_usd", 1000.0)),
             orders_per_min=int(_get(raw, "hedge", "max_orders_per_min", 30)),

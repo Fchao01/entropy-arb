@@ -147,6 +147,15 @@ def test_scan_quiet_inside_band():
     assert run_scan(eng) is None
 
 
+def test_market_maximum_base_size_caps_both_legs():
+    eng = make_engine(midline=0.0, upper=1.0, lower=1.0)
+    eng.entropy.set_book(100.14, 100.16)
+    eng.hedge.set_book(99.99, 100.01)
+    eng.hedge.max_base = 0.25
+    best = run_scan(eng)
+    assert best is not None and best[2].qty <= 0.25
+
+
 def test_scan_fires_buy_entropy_below_band():
     eng = make_engine(midline=5.0, upper=4.0, lower=3.0)
     # entropy 5 bps CHEAP (premium -5): below midline-lower=+2 -> buy entropy

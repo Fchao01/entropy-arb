@@ -59,6 +59,35 @@ def test_minimal_defaults():
     assert cfg.hedge.lighter_profile.chain_id == 304
     assert cfg.take_fraction == 0.5          # defaults kick in
     assert cfg.recorder_enabled is True
+    assert cfg.entropy.symbol == cfg.hedge.symbol == "SNDK"
+
+
+def test_independent_market_symbols_keep_pair_log_paths():
+    cfg = load(MINIMAL + """
+entropy:
+  symbol: ANTH
+hedge:
+  symbol: ANTHROPIC
+""", symbol="ANTH")
+    assert cfg.entropy.symbol == "ANTH"
+    assert cfg.hedge.symbol == "ANTHROPIC"
+    assert cfg.symbol == "ANTH"
+    assert cfg.recorder_csv == "logs/ANTH/minutes.csv"
+    assert cfg.trades_csv == "logs/ANTH/trades.csv"
+    assert cfg.log_file == "logs/ANTH/engine.log"
+
+
+def test_one_market_symbol_override():
+    cfg = load(MINIMAL + '\nhedge:\n  symbol: " ANTHROPIC "\n',
+               symbol="ANTH", hedge="tradexyz")
+    assert cfg.entropy.symbol == "ANTH"
+    assert cfg.hedge.symbol == "ANTHROPIC"
+
+
+def test_empty_market_symbol_rejected():
+    for section in ("entropy", "hedge"):
+        expect_error(MINIMAL + f'\n{section}:\n  symbol: " "\n',
+                     f"{section}.symbol")
 
 
 def test_execution_buffers_and_close_bands():
@@ -85,6 +114,27 @@ def test_tradexyz_hedge():
     assert cfg.hedge.label == "XYZ"
 
 
+def test_arcus_config_and_network(monkeypatch):
+    monkeypatch.delenv("ARCUS_ACCOUNT_ADDRESS", raising=False)
+    monkeypatch.delenv("ARCUS_API_SIGNING_KEY", raising=False)
+    monkeypatch.delenv("ARCUS_ACCOUNT_INDEX", raising=False)
+    text = MINIMAL + '\nhedge:\n  symbol: ETH-USD\n  taker_fee_bps: 1.0\n'
+    cfg = load(text, symbol="ETH", hedge="arcus")
+    assert cfg.hedge.kind == "arcus" and cfg.hedge.label == "ARCUS"
+    assert cfg.hedge.symbol == "ETH-USD" and cfg.hedge.arcus_network == "mainnet"
+    assert cfg.hedge.arcus_creds.account_index == 0
+    assert cfg.creds_complete is False
+    cfg = load(text + '\narcus:\n  network: testnet\n', symbol="ETH", hedge="arcus")
+    assert cfg.hedge.arcus_network == "testnet"
+    expect_error(text + '\narcus:\n  network: bad\n', "arcus.network", hedge="arcus")
+    expect_error(MINIMAL, "hedge.taker_fee_bps", hedge="arcus")
+    for fee in ("-1", ".nan", ".inf"):
+        expect_error(MINIMAL + f'\nhedge:\n  taker_fee_bps: {fee}\n',
+                     "hedge.taker_fee_bps", hedge="arcus")
+    monkeypatch.setenv("ARCUS_ACCOUNT_INDEX", "10")
+    expect_error(text, "ARCUS_ACCOUNT_INDEX", hedge="arcus")
+
+
 def test_hyperliquid_core_dex_is_allowed():
     cfg = load(MINIMAL + '\nentropy:\n  dex: ""\n')
     assert cfg.entropy.hl_dex == ""
@@ -107,8 +157,8 @@ def test_unknown_key_rejected():
 
 
 def test_markets_no_longer_config_keys():
-    # symbol / hedge_venue moved to --symbol / --hedge: leftovers in the
-    # YAML must fail loudly, not silently override the flags
+    # Top-level symbol / hedge_venue remain CLI-only. Per-venue symbols
+    # are configured under entropy / hedge.
     expect_error("symbol: SNDK\n" + MINIMAL, "unknown config key 'symbol'")
     expect_error("hedge_venue: tradexyz\n" + MINIMAL,
                  "unknown config key 'hedge_venue'")
