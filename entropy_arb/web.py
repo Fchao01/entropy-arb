@@ -124,6 +124,34 @@ def signer_resources(venue) -> set:
     return resources
 
 
+def missing_credentials(config) -> list[str]:
+    missing = []
+    lighter_primary_separate = (
+        config.primary_venue in ("lighter", "lighter-rh")
+        and config.hedge.kind == "lighter"
+    )
+    for venue in (config.entropy, config.hedge):
+        if venue.kind == "hl":
+            if not venue.hl_creds or not venue.hl_creds.private_key:
+                missing.append("HL_PRIVATE_KEY")
+        elif venue.kind == "lighter":
+            prefix = "PRIMARY_" if venue.key == "entropy" and lighter_primary_separate else ""
+            credentials = venue.lighter_creds
+            if not credentials or credentials.account_index is None:
+                missing.append(prefix + "LIGHTER_ACCOUNT_INDEX")
+            if not credentials or credentials.api_key_index is None:
+                missing.append(prefix + "LIGHTER_API_KEY_INDEX")
+            if not credentials or not credentials.api_private_key:
+                missing.append(prefix + "LIGHTER_API_PRIVATE_KEY")
+        elif venue.kind == "arcus":
+            credentials = venue.arcus_creds
+            if not credentials or not credentials.account_address:
+                missing.append("ARCUS_ACCOUNT_ADDRESS")
+            if not credentials or not credentials.signing_key:
+                missing.append("ARCUS_API_SIGNING_KEY")
+    return list(dict.fromkeys(missing))
+
+
 class TaskManager:
     def __init__(self, root: Path, data: Path, max_running=12):
         self.root = root.resolve()
@@ -481,8 +509,10 @@ class TaskManager:
             if task["mode"] == "live":
                 if confirmed is not True:
                     raise ConsoleError("实盘启动需要明确确认，程序将发送真实订单")
-                if not cfg.creds_complete:
-                    raise ConsoleError("实盘缺少交易凭据，请在服务器配置所选 .env 文件")
+                missing = missing_credentials(cfg)
+                if missing:
+                    location = ".env" if task["profile"] == "default" else f"credentials/{task['profile']}.env"
+                    raise ConsoleError(f"实盘缺少凭据字段：{', '.join(missing)}；请检查 {location}")
             for other_id, runtime in self.running.items():
                 other = self.tasks[other_id]
                 if other["symbol"] == task["symbol"] and {other["primary"], other["hedge"]} == {task["primary"], task["hedge"]}:

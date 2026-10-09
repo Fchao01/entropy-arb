@@ -133,7 +133,7 @@ def test_live_confirmation_credentials_and_signer_conflicts(tmp_path):
             empty = await manager.put(first_payload)
             with pytest.raises(ConsoleError, match="明确确认"):
                 await manager.start(empty["id"])
-            with pytest.raises(ConsoleError, match="缺少"):
+            with pytest.raises(ConsoleError, match="LIGHTER_ACCOUNT_INDEX.*ARCUS_API_SIGNING_KEY"):
                 await manager.start(empty["id"], True)
             credentials(manager, "eth")
             credentials(manager, "btc-same")
