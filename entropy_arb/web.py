@@ -512,7 +512,10 @@ class TaskManager:
                 missing = missing_credentials(cfg)
                 if missing:
                     location = ".env" if task["profile"] == "default" else f"credentials/{task['profile']}.env"
-                    raise ConsoleError(f"实盘缺少凭据字段：{', '.join(missing)}；请检查 {location}")
+                    route = f"{cfg.primary_venue} → {cfg.hedge_venue}"
+                    raise ConsoleError(
+                        f"当前路径 {route} 需要的凭据字段未完整配置：{', '.join(missing)}；"
+                        f"任务使用 {location}，请检查该文件")
             for other_id, runtime in self.running.items():
                 other = self.tasks[other_id]
                 if other["symbol"] == task["symbol"] and {other["primary"], other["hedge"]} == {task["primary"], task["hedge"]}:
