@@ -425,15 +425,12 @@ def load_config(config_file: str = "config.yaml", env_file: str = ".env", *,
             raise ConfigError(f"'thresholds.{k}' is required — derive it from "
                               f"recorded minute data / 必须填写，请用采集的分钟"
                               f"数据计算后填入")
+    midline = float(thr["midline_bps"])
     upper, lower = float(thr["upper_bps"]), float(thr["lower_bps"])
-    if upper <= 0 or lower <= 0:
-        raise ConfigError("thresholds.upper_bps and lower_bps must be > 0 "
-                          "(the round trip nets upper+lower bps after fees)")
     close_upper = float(_get(raw, "thresholds", "close_upper_bps", upper))
     close_lower = float(_get(raw, "thresholds", "close_lower_bps", lower))
-    if close_upper <= 0 or close_lower <= 0:
-        raise ConfigError("thresholds.close_upper_bps and close_lower_bps "
-                          "must be > 0")
+    if not all(math.isfinite(value) for value in (midline, upper, lower, close_upper, close_lower)):
+        raise ConfigError("threshold values must be finite numbers")
 
     take_fraction = float(_get(raw, "sizing", "take_fraction", 0.5))
     if not 0.0 < take_fraction <= 1.0:
@@ -469,7 +466,7 @@ def load_config(config_file: str = "config.yaml", env_file: str = ".env", *,
         primary_venue=primary_venue,
         entropy=entropy,
         hedge=hedge,
-        midline_bps=float(thr["midline_bps"]),
+        midline_bps=midline,
         upper_bps=upper,
         lower_bps=lower,
         close_upper_bps=close_upper,

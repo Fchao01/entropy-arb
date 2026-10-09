@@ -247,8 +247,6 @@ class TaskManager:
         thresholds = raw.get("thresholds", {})
         if any(key not in thresholds for key in ("midline_bps", "upper_bps", "lower_bps")):
             raise ConsoleError("YAML 必须包含 midline_bps、upper_bps、lower_bps 阈值")
-        if min(thresholds["upper_bps"], thresholds["lower_bps"]) <= 0:
-            raise ConsoleError("上下入场带宽必须大于 0")
         return raw
 
     def credential_status(self, profile):

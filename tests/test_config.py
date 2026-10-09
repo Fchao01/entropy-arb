@@ -108,6 +108,14 @@ execution:
     assert cfg.max_book_skew_sec == 0.2
 
 
+def test_negative_close_bands_are_allowed():
+    cfg = load("thresholds:\n"
+               "  midline_bps: -5\n  upper_bps: -4\n  lower_bps: -3\n"
+               "  close_upper_bps: -2\n  close_lower_bps: -3\n")
+    assert (cfg.midline_bps, cfg.upper_bps, cfg.lower_bps,
+            cfg.close_upper_bps, cfg.close_lower_bps) == (-5.0, -4.0, -3.0, -2.0, -3.0)
+
+
 def test_tradexyz_hedge():
     cfg = load(MINIMAL, hedge="tradexyz")
     assert cfg.hedge.kind == "hl" and cfg.hedge.hl_dex == "xyz"
@@ -241,10 +249,12 @@ def test_missing_thresholds():
     expect_error("recorder:\n  enabled: true\n", "thresholds.")
 
 
-def test_nonpositive_band():
-    expect_error("thresholds:\n"
-                 "  midline_bps: 5\n  upper_bps: 0\n  lower_bps: 3\n",
-                 "must be > 0")
+def test_negative_thresholds_are_allowed():
+    cfg = load("thresholds:\n"
+               "  midline_bps: -5\n  upper_bps: -4\n  lower_bps: -3\n"
+               "  close_upper_bps: -2\n  close_lower_bps: -1\n")
+    assert (cfg.midline_bps, cfg.upper_bps, cfg.lower_bps,
+            cfg.close_upper_bps, cfg.close_lower_bps) == (-5.0, -4.0, -3.0, -2.0, -1.0)
 
 
 def test_negative_slippage_is_rejected():

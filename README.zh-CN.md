@@ -159,8 +159,8 @@ python3 main.py --symbol SNDK --hedge lighter-rh
 | 键 | 含义 | 默认值 |
 |---|---|---|
 | `thresholds.midline_bps` | 溢价中枢（必须实测！） | — |
-| `thresholds.upper_bps` / `lower_bps` | 入场带宽（> 0） | — |
-| `thresholds.close_upper_bps` / `close_lower_bps` | 平仓带宽（> 0） | 同入场带宽 |
+| `thresholds.upper_bps` / `lower_bps` | 入场带宽（必须是有限数，可为负数） | — |
+| `thresholds.close_upper_bps` / `close_lower_bps` | 平仓带宽（必须是有限数，可为负数） | 同入场带宽 |
 | `entropy.symbol` / `hedge.symbol` | 各交易所的实际市场名称 | 同 `--symbol` |
 | `primary.venue` / `--primary` | 主腿交易所；使用时把旧 `entropy` 段替换成 `primary` | `entropy` |
 | `primary.symbol` | 使用 `primary` 段时的主腿市场名 | `--symbol` |

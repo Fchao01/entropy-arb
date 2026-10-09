@@ -291,7 +291,7 @@ async function openEditor(task = null) {
   for (const kind of ["primary", "hedge"]) element(`task-${kind}`).innerHTML = state.meta[`${kind}_venues`].map((value) => `<option value="${value}">${escapeHtml(venues[value])}</option>`).join("");
   element("task-profile").innerHTML = state.meta.profiles.map((profile) => `<option value="${escapeHtml(profile)}">${escapeHtml(profile === "default" ? "default · 默认 .env" : profile)}</option>`).join("");
   element("task-strategy").innerHTML = '<option value="">独立配置 · 此任务专用</option>' + state.meta.strategies.map((name) => `<option value="${escapeHtml(name)}">${escapeHtml(strategyLabel(name))}</option>`).join("");
-  element("task-strategy").value = task ? task.strategy_file || "" : "";
+  element("task-strategy").value = task ? task.strategy_file || "" : state.meta.strategies[0] || "";
   element("task-primary").value = task?.primary || "lighter-rh";
   element("task-hedge").value = task?.hedge || "arcus";
   element("task-profile").value = task?.profile || "default";

@@ -175,8 +175,8 @@ symbol.
 | key | meaning | default |
 |---|---|---|
 | `thresholds.midline_bps` | premium center (measure it!) | — |
-| `thresholds.upper_bps` / `lower_bps` | entry bands (> 0) | — |
-| `thresholds.close_upper_bps` / `close_lower_bps` | closing bands (> 0) | entry bands |
+| `thresholds.upper_bps` / `lower_bps` | entry bands (finite values; negative values allowed) | — |
+| `thresholds.close_upper_bps` / `close_lower_bps` | closing bands (finite; negative values allowed) | entry bands |
 | `entropy.symbol` / `hedge.symbol` | exact market name on each venue | `--symbol` |
 | `primary.venue` / `--primary` | select primary; replace legacy `entropy` section with `primary` | `entropy` |
 | `primary.symbol` | exact symbol when using the `primary` section | `--symbol` |
