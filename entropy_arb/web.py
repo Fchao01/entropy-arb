@@ -7,6 +7,7 @@ import fcntl
 import hashlib
 import hmac
 import json
+import logging
 import math
 import os
 import re
@@ -17,15 +18,22 @@ import tempfile
 import time
 import uuid
 from collections import deque
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import urlsplit
+from zoneinfo import ZoneInfo
 
 import yaml
+import aiohttp
 from aiohttp import web
 from dotenv import dotenv_values
 
 from .config import ConfigError, HEDGE_VENUES, PRIMARY_VENUES, _SCHEMA, _validate, load_config
+from .market_monitor import MonitorRules, TripleVenueMonitor, discover_candidates
 from .privacy import PrivateLogCapture
+from .thresholds import (ThresholdDataError, daily_window, load_window_rows,
+                         prune_csv, suggest)
+from .telegram import TelegramNotifier
 
 ROOT = Path(__file__).resolve().parent.parent
 STATIC = ROOT / "web"
@@ -33,15 +41,23 @@ CREDENTIAL_BASES = (
     "HL_PRIVATE_KEY", "HL_ACCOUNT_ADDRESS", "HL_PRIVATE_KEY_XYZ", "HL_ACCOUNT_ADDRESS_XYZ",
     "LIGHTER_ACCOUNT_INDEX", "LIGHTER_API_KEY_INDEX", "LIGHTER_API_PRIVATE_KEY",
     "ARCUS_ACCOUNT_ADDRESS", "ARCUS_ACCOUNT_INDEX", "ARCUS_API_SIGNING_KEY",
+    "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID",
 )
-CREDENTIAL_NAMES = set(CREDENTIAL_BASES) | {"PRIMARY_" + name for name in CREDENTIAL_BASES}
+CREDENTIAL_NAMES = set(CREDENTIAL_BASES) | {
+    "PRIMARY_" + name for name in CREDENTIAL_BASES if not name.startswith("TELEGRAM_")
+}
 EDITABLE_CREDENTIALS = tuple(CREDENTIAL_BASES) + tuple(
-    "PRIMARY_" + name for name in CREDENTIAL_BASES if not name.endswith("_XYZ"))
+    "PRIMARY_" + name for name in CREDENTIAL_BASES
+    if not name.endswith("_XYZ") and not name.startswith("TELEGRAM_"))
 ACTIVE = {"running", "stopping"}
 SYMBOL_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,39}\Z")
 PROFILE_RE = re.compile(r"[A-Za-z0-9_-]{1,40}\Z")
 SESSION_SECONDS = 12 * 3600
 LOG_LIMIT = 10 * 1024 * 1024
+AUTO_THRESHOLD_TZ = ZoneInfo("Asia/Shanghai")
+AUTO_THRESHOLD_MIN_ROWS = 30
+AUTO_THRESHOLD_MIN_SAMPLES = 10
+log = logging.getLogger("web")
 
 
 class ConsoleError(ValueError):
@@ -169,6 +185,8 @@ class TaskManager:
         self.running = {}
         self.tasks = {}
         self.closing = False
+        self.market_monitor = None
+        self.auto_threshold_task = None
         manifest = self.data / "tasks.json"
         if manifest.exists():
             records = json.loads(manifest.read_text(encoding="utf-8"))
@@ -180,8 +198,241 @@ class TaskManager:
                 self.tasks[task["id"]] = task
         self.save()
 
+    async def monitor_instance(self, profile="default"):
+        if self.market_monitor is None:
+            values = self.environment(profile) if profile in self.profiles() else {}
+            self.market_monitor = TripleVenueMonitor(
+                TelegramNotifier(token=values.get("TELEGRAM_BOT_TOKEN"),
+                                 chat_id=values.get("TELEGRAM_CHAT_ID")))
+        elif profile in self.profiles():
+            values = self.environment(profile)
+            self.market_monitor.notifier.token = (values.get("TELEGRAM_BOT_TOKEN") or "").strip()
+            self.market_monitor.notifier.chat_id = (values.get("TELEGRAM_CHAT_ID") or "").strip()
+        return self.market_monitor
+
+    async def monitor_rules(self, strategy_file, hedge_venue=None):
+        if not strategy_file:
+            raise ConsoleError("三市场监控需要选择策略 YAML，以使用同一套阈值和费率")
+        text = self.strategy(strategy_file)
+        raw = self.check_strategy(text)
+        primary = raw.get("primary") or raw.get("entropy") or {}
+        hedge = raw.get("hedge") or {}
+        def number(section, key, default=0.0):
+            value = section.get(key, default)
+            return float(value)
+        thresholds = raw.get("thresholds") or {}
+        primary_venue = (primary.get("venue") or
+                         ("entropy" if "entropy" in raw and "primary" not in raw
+                          else "lighter-rh"))
+        primary_fee = number(primary, "taker_fee_bps")
+        hedge_fee = number(hedge, "taker_fee_bps")
+        # A strategy describes one pair, while this page displays both
+        # possible hedges. The page tells us which configured hedge fee to use.
+        hedge_venue = hedge_venue or ("arcus" if "arcus" in str(strategy_file).lower() else "entropy")
+        entropy_fee = primary_fee if primary_venue == "entropy" else 0.0
+        rh_fee = primary_fee if primary_venue == "lighter-rh" else 0.0
+        arcus_fee = primary_fee if primary_venue == "arcus" else 0.0
+        if primary_venue == "entropy":
+            if hedge_venue == "arcus":
+                arcus_fee = hedge_fee
+            else:
+                rh_fee = hedge_fee
+        elif primary_venue == "lighter-rh":
+            if hedge_venue == "arcus":
+                arcus_fee = hedge_fee
+            else:
+                entropy_fee = hedge_fee
+        elif primary_venue == "arcus":
+            if hedge_venue == "lighter-rh":
+                rh_fee = hedge_fee
+            else:
+                entropy_fee = hedge_fee
+        primary_key = {"entropy": "entropy", "lighter-rh": "rh", "arcus": "arcus"}.get(primary_venue, "rh")
+        return MonitorRules(
+            midline_bps=number(thresholds, "midline_bps"),
+            upper_bps=number(thresholds, "upper_bps"),
+            lower_bps=number(thresholds, "lower_bps"),
+            entropy_fee_bps=entropy_fee,
+            rh_fee_bps=rh_fee,
+            arcus_fee_bps=arcus_fee,
+            source=str(strategy_file),
+            primary_key=primary_key,
+        )
+
     def save(self):
         write_json(self.data / "tasks.json", list(self.tasks.values()))
+
+    def start_auto_threshold_scheduler(self):
+        """Start the daily 08:00 Shanghai threshold job once the app loop runs."""
+        if self.auto_threshold_task is None:
+            self.auto_threshold_task = asyncio.create_task(
+                self._auto_threshold_loop(), name="daily-thresholds")
+
+    def _auto_status_path(self, task_id):
+        return self.directory(task_id) / "auto_threshold.json"
+
+    def _read_auto_status(self, task_id):
+        path = self._auto_status_path(task_id)
+        if not path.exists():
+            return {"status": "pending"}
+        try:
+            value = json.loads(path.read_text(encoding="utf-8"))
+            return value if isinstance(value, dict) else {"status": "pending"}
+        except (OSError, ValueError, TypeError):
+            return {"status": "failed", "reason": "自动阈值状态文件损坏"}
+
+    def _write_auto_status(self, task_id, value):
+        write_json(self._auto_status_path(task_id), value)
+
+    @staticmethod
+    def _dated_log_time():
+        return datetime.now(AUTO_THRESHOLD_TZ).strftime("%Y-%m-%d %H:%M:%S")
+
+    async def _auto_threshold_loop(self):
+        """Run once for each completed Shanghai 08:00 window."""
+        while not self.closing:
+            now = datetime.now(AUTO_THRESHOLD_TZ)
+            target = now.replace(hour=8, minute=0, second=0, microsecond=0)
+            if now >= target:
+                window = daily_window(now)
+                await self.auto_update_all(window)
+                target = target + timedelta(days=1)
+            delay = max(1.0, (target - now).total_seconds())
+            try:
+                await asyncio.sleep(delay)
+            except asyncio.CancelledError:
+                raise
+
+    async def auto_update_all(self, window=None):
+        """Apply the completed daily window to every live task once."""
+        window = window or daily_window()
+        for task_id, task in list(self.tasks.items()):
+            if task.get("mode") != "live":
+                continue
+            current = self._read_auto_status(task_id)
+            if current.get("window_end") == window.end_ts and current.get("status") in (
+                    "applied", "unchanged", "skipped"):
+                continue
+            try:
+                await self.auto_update_task(task_id, window)
+            except ThresholdDataError as error:
+                self.audit(task_id, "AUTO-THRESHOLD skipped %s" % error)
+                self._write_auto_status(task_id, {
+                    "status": "skipped", "window": window.label,
+                    "window_start": window.start_ts, "window_end": window.end_ts,
+                    "checked_at": time.time(), "reason": str(error),
+                })
+            except Exception as error:
+                log.exception("daily threshold update failed for %s", task_id)
+                self.audit(task_id, "AUTO-THRESHOLD FAILED %s" % error)
+                self._write_auto_status(task_id, {
+                    "status": "failed", "window": window.label,
+                    "window_start": window.start_ts, "window_end": window.end_ts,
+                    "checked_at": time.time(), "reason": str(error),
+                })
+
+    def _render_threshold_config(self, text, suggestion):
+        raw = self.check_strategy(text)
+        thresholds = raw.setdefault("thresholds", {})
+        thresholds.update({
+            "midline_bps": suggestion.midline_bps,
+            "upper_bps": suggestion.upper_bps,
+            "lower_bps": suggestion.lower_bps,
+        })
+        return yaml.safe_dump(raw, allow_unicode=True, sort_keys=False)
+
+    async def auto_update_task(self, task_id, window):
+        """Update one live task and restart it only after a valid calculation."""
+        task = self.get(task_id)
+        directory = self.directory(task_id)
+        config_path = directory / "config.yaml"
+        csv_path = directory / "minutes.csv"
+        cfg = load_config(str(config_path), symbol=task["symbol"],
+                          primary_venue=task["primary"], hedge_venue=task["hedge"],
+                          credential_env=self.environment(task["profile"]))
+        rows = load_window_rows(csv_path, window, AUTO_THRESHOLD_MIN_SAMPLES)
+        suggestion = suggest(rows, cfg.entropy.fee_bps + cfg.hedge.fee_bps,
+                             window, AUTO_THRESHOLD_MIN_ROWS)
+        current_raw = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        old_thresholds = dict(current_raw.get("thresholds", {}))
+        new_thresholds = {
+            "midline_bps": suggestion.midline_bps,
+            "upper_bps": suggestion.upper_bps,
+            "lower_bps": suggestion.lower_bps,
+        }
+        changed = any(float(old_thresholds.get(key)) != value
+                      for key, value in new_thresholds.items())
+        if not changed:
+            removed = prune_csv(csv_path, window)
+            self._write_auto_status(task_id, {
+                "status": "unchanged", "window": window.label,
+                "window_start": window.start_ts, "window_end": window.end_ts,
+                "rows": suggestion.rows, "span_hours": suggestion.span_hours,
+                "thresholds": new_thresholds, "removed_rows": removed,
+                "checked_at": time.time(),
+            })
+            self.audit(task_id, "AUTO-THRESHOLD unchanged %s rows=%d removed=%d" %
+                       (window.label, suggestion.rows, removed))
+            return
+
+        running = task_id in self.running
+        runtime = self.running.get(task_id)
+        if running:
+            await self.pause(task_id, True)
+            await self.stop(task_id)
+            try:
+                await asyncio.wait_for(asyncio.shield(runtime["watcher"]),
+                                       timeout=runtime["grace"])
+            except asyncio.TimeoutError:
+                raise ConsoleError("等待实盘优雅退出超时，未更新阈值；请核对持仓")
+
+        old_text = config_path.read_text(encoding="utf-8")
+        new_text = self._render_threshold_config(old_text, suggestion)
+        strategy_file = task.get("strategy_file")
+        strategy_path = None
+        old_strategy_text = None
+        source_written = False
+        if strategy_file:
+            users = [other for other in self.tasks.values()
+                     if other.get("strategy_file") == strategy_file and other["id"] != task_id]
+            if users:
+                raise ConsoleError("自动阈值不能更新被多个任务共用的策略文件")
+            strategy_path = self.strategy_path(strategy_file)
+            old_strategy_text = strategy_path.read_text(encoding="utf-8")
+            new_text = self._render_threshold_config(old_strategy_text, suggestion)
+            self.write_config(strategy_path, new_text)
+            source_written = True
+        try:
+            self.write_config(config_path, new_text)
+        except Exception:
+            if source_written and strategy_path is not None and old_strategy_text is not None:
+                self.write_config(strategy_path, old_strategy_text)
+            raise
+        task["config"] = new_text
+        self.save()
+        try:
+            if running:
+                await self.start(task_id, confirmed=True)
+        except Exception:
+            # Restore both copies before surfacing the failure.  The stopped
+            # task remains recoverable with the previous known-good thresholds.
+            self.write_config(config_path, old_text)
+            task["config"] = old_text
+            if strategy_path is not None and old_strategy_text is not None:
+                self.write_config(strategy_path, old_strategy_text)
+            self.save()
+            raise
+        removed = prune_csv(csv_path, window)
+        self._write_auto_status(task_id, {
+            "status": "applied", "window": window.label,
+            "window_start": window.start_ts, "window_end": window.end_ts,
+            "rows": suggestion.rows, "span_hours": suggestion.span_hours,
+            "old_thresholds": old_thresholds, "thresholds": new_thresholds,
+            "removed_rows": removed, "applied_at": time.time(),
+        })
+        self.audit(task_id, "AUTO-THRESHOLD applied %s old=%s new=%s rows=%d removed=%d" %
+                   (window.label, old_thresholds, new_thresholds,
+                    suggestion.rows, removed))
 
     def mutex(self):
         if self.guard is None:
@@ -482,6 +733,7 @@ class TaskManager:
                 pass
         result["status_stale"] = (result["status"] is None
                                   or time.time() - result["status"].get("updated_at", 0) > 10)
+        result["auto_threshold"] = self._read_auto_status(task["id"])
         return result
 
     async def start(self, task_id, confirmed=False):
@@ -563,7 +815,7 @@ class TaskManager:
         path = self.directory(task_id) / "events.log"
         self.rotate(path)
         with path.open("a", encoding="utf-8") as handle:
-            handle.write(time.strftime("%Y-%m-%d %H:%M:%S") + " " + message + "\n")
+            handle.write(self._dated_log_time() + " " + message + "\n")
 
     def rotate(self, path):
         if path.exists() and path.stat().st_size >= LOG_LIMIT:
@@ -649,6 +901,12 @@ class TaskManager:
     async def close(self):
         self.closing = True
         try:
+            if self.auto_threshold_task is not None:
+                self.auto_threshold_task.cancel()
+                await asyncio.gather(self.auto_threshold_task, return_exceptions=True)
+                self.auto_threshold_task = None
+            if self.market_monitor is not None:
+                await self.market_monitor.stop()
             for task_id in list(self.running):
                 await self.stop(task_id)
             runtimes = list(self.running.values())
@@ -748,8 +1006,8 @@ def create_app(manager: TaskManager, password: str, secure_cookie=False):
 
     async def meta(request):
         templates = {}
-        for name, path in (("rh-arcus", manager.root / "configs/rh-arcus.yaml"),
-                           ("entropy-rh", manager.root / "config.example.yaml")):
+        for name in ("rh-arcus", "entropy-rh"):
+            path = STATIC / "templates" / f"{name}.yaml"
             raw = yaml.safe_load(path.read_text(encoding="utf-8"))
             if "entropy" in raw:
                 raw["primary"] = {"venue": "entropy", **raw.pop("entropy")}
@@ -821,6 +1079,39 @@ def create_app(manager: TaskManager, password: str, secure_cookie=False):
         return web.json_response(dict(text=tail_text(directory / "engine.log"),
                                       events=tail_text(directory / "events.log", 16000)))
 
+    async def market_candidates(request):
+        async with aiohttp.ClientSession() as session:
+            return web.json_response(await discover_candidates(session))
+
+    async def market_monitor(request):
+        monitor = await manager.monitor_instance()
+        return web.json_response(monitor.snapshot())
+
+    async def market_monitor_start(request):
+        payload = await body(request)
+        symbol = str(payload.get("symbol", "")).strip().upper()
+        strategy_file = payload.get("strategy_file") or "@default"
+        hedge_venue = payload.get("hedge_venue") or "arcus"
+        if hedge_venue not in ("entropy", "lighter-rh", "arcus"):
+            raise ConsoleError("三市场监控的策略对冲腿必须是 Entropy、RH 或 Arcus")
+        profile = payload.get("profile") or "default"
+        candidates = None
+        async with aiohttp.ClientSession() as session:
+            candidates = await discover_candidates(session)
+        candidate = next((row for row in candidates["symbols"] if row["symbol"] == symbol), None)
+        if candidate is None:
+            raise ConsoleError("该币种没有同时出现在 RH、Arcus、Entropy 的活跃市场列表")
+        if not candidate["compatible"]:
+            raise ConsoleError("该币种的数量步长或最小下单规格无法验证，不能标记为可自动对冲")
+        rules = await manager.monitor_rules(strategy_file, hedge_venue)
+        monitor = await manager.monitor_instance(profile)
+        return web.json_response(await monitor.start(candidate, rules))
+
+    async def market_monitor_stop(request):
+        monitor = await manager.monitor_instance()
+        await monitor.stop()
+        return web.json_response(monitor.snapshot())
+
     async def download(request):
         manager.get(request.match_info["id"])
         kind = request.match_info["kind"]
@@ -844,6 +1135,9 @@ def create_app(manager: TaskManager, password: str, secure_cookie=False):
     async def cleanup(app):
         await manager.close()
 
+    async def startup(app):
+        manager.start_auto_threshold_scheduler()
+
     app.router.add_get("/", index)
     app.router.add_get("/dex-arbitrage", index)
     app.router.add_get("/monitor", index)
@@ -865,5 +1159,10 @@ def create_app(manager: TaskManager, password: str, secure_cookie=False):
     app.router.add_get("/api/tasks/{id}", detail)
     app.router.add_get("/api/tasks/{id}/logs", logs)
     app.router.add_get("/api/tasks/{id}/download/{kind}", download)
+    app.router.add_get("/api/market-monitor/candidates", market_candidates)
+    app.router.add_get("/api/market-monitor", market_monitor)
+    app.router.add_post("/api/market-monitor/start", market_monitor_start)
+    app.router.add_post("/api/market-monitor/stop", market_monitor_stop)
+    app.on_startup.append(startup)
     app.on_cleanup.append(cleanup)
     return app

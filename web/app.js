@@ -1,7 +1,7 @@
 "use strict";
 
 const element = (id) => document.getElementById(id);
-const state = {tasks: [], meta: null, selected: null, page: location.pathname === "/monitor" ? "monitor" : "dex", authenticated: false, editing: null, detail: null, logs: null, logTab: "logs", busy: new Set(), polling: false, detailTask: null, detailTab: "logs", detailLogs: null, libraryKind: "yaml", libraryOriginal: null};
+const state = {tasks: [], meta: null, selected: null, page: location.pathname === "/monitor" ? "monitor" : "dex", authenticated: false, editing: null, detail: null, logs: null, logTab: "logs", busy: new Set(), polling: false, detailTask: null, detailTab: "logs", detailLogs: null, libraryKind: "yaml", libraryOriginal: null, tri: {candidates: [], snapshot: null}};
 const venues = {entropy: "Entropy", lighter: "Lighter", "lighter-rh": "RH", tradexyz: "Trade.xyz", arcus: "Arcus"};
 const active = (task) => ["running", "stopping"].includes(task.state);
 const escapeHtml = (value) => String(value ?? "").replace(/[&<>"']/g, (character) => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"}[character]));
@@ -59,7 +59,7 @@ function navigate(page, push = true) {
   element("breadcrumb").textContent = `工作空间 / ${page === "dex" ? "DEX 套利" : "监控"}`;
   document.title = `${page === "dex" ? "DEX 套利" : "监控"} · Entropy Console`;
   if (push) history.pushState({}, "", page === "dex" ? "/dex-arbitrage" : "/monitor");
-  if (page === "monitor" && state.authenticated) refreshDetail().catch((error) => toast(error.message, true));
+  if (page === "monitor" && state.authenticated) {refreshDetail().catch((error) => toast(error.message, true)); loadTripleCandidates(); refreshTriple();}
 }
 
 document.addEventListener("click", (event) => {
@@ -82,6 +82,16 @@ function badge(task) {
     else if (task.status.venues.some((venue) => !venue.fresh || venue.down)) {label = "行情异常"; className = "stale";}
   }
   return `<span class="badge ${className}"><span class="mini-dot"></span>${escapeHtml(label)}</span>`;
+}
+
+function thresholdStatus(task) {
+  if (task.mode !== "live") return "";
+  const status = task.auto_threshold || {};
+  const labels = {applied: "今日阈值已更新", unchanged: "今日已检查，阈值未变", failed: "今日阈值更新失败", pending: "今日阈值待更新", skipped: "今日阈值已跳过"};
+  const label = labels[status.status] || labels.pending;
+  const extra = status.status === "failed" ? `：${status.reason || "请查看事件日志"}` : (status.window ? ` · ${status.window}` : "");
+  const cls = status.status === "failed" ? "failed" : status.status === "applied" || status.status === "unchanged" ? "ok" : "pending";
+  return `<small class="threshold-status ${cls}" title="${escapeHtml(status.reason || label)}">${escapeHtml(label + extra)}</small>`;
 }
 
 function stat(label, value, foot, icon, unit = "") {
@@ -107,7 +117,7 @@ function renderTasks() {
       ? task.state === "stopping" ? `<button class="text-button stop" data-action="stop" ${disabled}>强制结束</button>`
         : `<button class="text-button ${paused ? "resume" : "pause"}" data-action="${paused ? "resume" : "pause"}" ${disabled}>${paused ? "恢复" : "暂停"}</button><button class="text-button stop" data-action="stop" ${disabled}>停止</button>`
       : `<button class="text-button" data-action="start" ${disabled}>启动</button><button class="text-button" data-action="edit" ${disabled}>配置</button>`;
-    return `<tr data-id="${task.id}"><td><div class="coin-cell"><span class="coin-icon">${escapeHtml(task.symbol.slice(0, 1))}</span><div><button class="text-button task-title" data-action="detail" aria-label="查看 ${escapeHtml(task.symbol)} 任务详情">${escapeHtml(task.symbol)}</button><small title="${escapeHtml(task.name)}">${escapeHtml(task.name)}</small></div></div></td><td class="route-cell"><b>${escapeHtml(venues[task.primary])}</b><span>⇄</span><b>${escapeHtml(venues[task.hedge])}</b></td><td><span class="badge ${task.mode}">${task.mode === "live" ? "LIVE · 实盘" : "DATA · 采集"}</span></td><td>${badge(task)}</td><td class="number ${premium == null ? "" : premium >= 0 ? "positive" : "negative"}">${signed(premium)}</td><td class="number">${duration(task)}</td><td><div class="actions">${controls}<button class="text-button" data-action="detail">详情</button><button class="text-button" data-action="monitor">监控 ↗</button>${!active(task) ? `<button class="icon-button" data-action="delete" aria-label="删除 ${escapeHtml(task.name)}" title="删除任务">×</button>` : ""}</div></td></tr>`;
+    return `<tr data-id="${task.id}"><td><div class="coin-cell"><span class="coin-icon">${escapeHtml(task.symbol.slice(0, 1))}</span><div><button class="text-button task-title" data-action="detail" aria-label="查看 ${escapeHtml(task.symbol)} 任务详情">${escapeHtml(task.symbol)}</button><small title="${escapeHtml(task.name)}">${escapeHtml(task.name)}</small></div></div></td><td class="route-cell"><b>${escapeHtml(venues[task.primary])}</b><span>⇄</span><b>${escapeHtml(venues[task.hedge])}</b></td><td><span class="badge ${task.mode}">${task.mode === "live" ? "LIVE · 实盘" : "DATA · 采集"}</span></td><td>${badge(task)}${thresholdStatus(task)}</td><td class="number ${premium == null ? "" : premium >= 0 ? "positive" : "negative"}">${signed(premium)}</td><td class="number">${duration(task)}</td><td><div class="actions">${controls}<button class="text-button" data-action="detail">详情</button><button class="text-button" data-action="monitor">监控 ↗</button>${!active(task) ? `<button class="icon-button" data-action="delete" aria-label="删除 ${escapeHtml(task.name)}" title="删除任务">×</button>` : ""}</div></td></tr>`;
   }).join("");
   element("task-empty").hidden = tasks.length > 0;
   if (!tasks.length) {
@@ -134,7 +144,7 @@ async function refresh() {
     document.querySelector(".server-pill").classList.remove("bad-connection");
     document.querySelector(".server-pill").lastChild.textContent = " SERVER CONNECTED";
     renderTasks();
-    if (state.page === "monitor") await refreshDetail();
+    if (state.page === "monitor") {await refreshDetail(); await refreshTriple();}
     if (element("task-detail-dialog").open) await refreshTaskDetails();
   } catch (error) {
     element("connection-label").textContent = "连接中断";
@@ -143,6 +153,59 @@ async function refresh() {
     document.querySelector(".server-pill").lastChild.textContent = " SERVER DISCONNECTED";
   } finally {state.polling = false;}
 }
+
+function renderTriple() {
+  const candidates = state.tri.candidates || [];
+  const compatible = candidates.filter((row) => row.compatible);
+  const select = element("tri-symbol");
+  const current = select.value;
+  select.innerHTML = compatible.length
+    ? compatible.map((row) => `<option value="${escapeHtml(row.symbol)}">${escapeHtml(row.symbol)} · ${escapeHtml(row.label)}</option>`).join("")
+    : '<option value="">暂无三市场共同币种</option>';
+  if (candidates.some((row) => row.symbol === current)) select.value = current;
+  const snapshot = state.tri.snapshot;
+  const running = Boolean(snapshot?.running);
+  element("tri-monitor-status").textContent = running ? `运行中 · ${snapshot.symbol}` : "未启动";
+  element("tri-monitor-status").className = `badge ${running ? "running" : ""}`;
+  element("tri-start").disabled = !select.value;
+  element("tri-stop").disabled = !running;
+  element("tri-candidates").innerHTML = candidates.length ? `<div class="tri-candidate-grid">${candidates.map((row) => `<article class="tri-candidate ${row.compatible ? "compatible" : "incompatible"}"><b>${escapeHtml(row.symbol)}</b><span>${escapeHtml(row.label)}</span><small>${row.compatible ? "RH / Arcus / Entropy 均有活跃永续" : escapeHtml((row.warnings || []).join("；"))}</small></article>`).join("")}</div>` : '<div class="empty-state"><h3>没有共同活跃市场</h3><p>刷新后重试；共同币种为空时不会启动监控。</p></div>';
+  element("tri-venues").innerHTML = snapshot?.venues?.length ? snapshot.venues.map((venue) => `<article class="venue-card"><div class="venue-top"><div><b>${escapeHtml(venue.name)}</b><small>${escapeHtml(venue.symbol)}</small></div><span class="badge ${venue.fresh ? "" : "stale"}">${venue.fresh ? `正常 · ${number(venue.age_sec, 1)}s` : "等待行情"}</span></div><div class="venue-values"><div><span>买一 / 卖一</span><strong class="number">${number(venue.bid, 5)} / ${number(venue.ask, 5)}</strong></div><div><span>中间价</span><strong>${number(venue.mid, 5)}</strong></div></div></article>`).join("") : "";
+  element("tri-pairs").innerHTML = snapshot?.pairs?.length ? snapshot.pairs.map((pair) => `<article class="tri-pair"><div class="tri-pair-head"><b>${escapeHtml(pair.left)} ⇄ ${escapeHtml(pair.right)}</b><span class="badge ${pair.script_compatible ? "" : "stale"}">${pair.script_compatible ? "脚本可对冲" : "仅价差监控"}</span></div><div class="tri-pair-grid"><div><small>中间价差</small><strong>${signed(pair.mid_spread_bps)} bps</strong></div><div class="${pair.sell_signal ? "signal" : ""}"><small>卖左 / 买右</small><strong>${signed(pair.sell_left_buy_right_bps)} <em>门槛 ${signed(pair.sell_hurdle_bps)}</em></strong></div><div class="${pair.buy_signal ? "signal" : ""}"><small>买左 / 卖右</small><strong>${signed(pair.buy_left_sell_right_bps)} <em>门槛 ${signed(pair.buy_hurdle_bps)}</em></strong></div></div></article>`).join("") : "";
+}
+
+async function loadTripleCandidates() {
+  element("tri-monitor-error").textContent = "正在读取三边市场列表…";
+  try {
+    const result = await api("/api/market-monitor/candidates");
+    state.tri.candidates = result.symbols || [];
+    const configured = state.meta?.strategies || [];
+    element("tri-strategy").innerHTML = configured.length ? configured.map((name) => `<option value="${escapeHtml(name)}">${escapeHtml(strategyLabel(name))}</option>`).join("") : '<option value="">请先在配置库保存 YAML</option>';
+    element("tri-monitor-error").textContent = result.errors && Object.keys(result.errors).length ? `部分市场列表读取失败：${escapeHtml(Object.values(result.errors).join("；"))}` : "";
+    renderTriple();
+  } catch (error) {element("tri-monitor-error").textContent = error.message;}
+}
+
+async function refreshTriple() {
+  if (!state.authenticated) return;
+  try {state.tri.snapshot = await api("/api/market-monitor"); renderTriple();} catch (error) {element("tri-monitor-error").textContent = error.message;}
+}
+
+element("tri-refresh").addEventListener("click", () => loadTripleCandidates());
+element("tri-start").addEventListener("click", async () => {
+  const symbol = element("tri-symbol").value;
+  const strategy_file = element("tri-strategy").value;
+  const hedge_venue = element("tri-hedge-venue").value;
+  if (!symbol || !strategy_file) return;
+  element("tri-start").disabled = true;
+  element("tri-monitor-error").textContent = "正在连接三个公开盘口…";
+  try {state.tri.snapshot = await api("/api/market-monitor/start", "POST", {symbol, strategy_file, hedge_venue}); element("tri-monitor-error").textContent = ""; renderTriple();}
+  catch (error) {element("tri-monitor-error").textContent = error.message; renderTriple();}
+});
+element("tri-stop").addEventListener("click", async () => {
+  try {state.tri.snapshot = await api("/api/market-monitor/stop", "POST", {}); renderTriple();}
+  catch (error) {element("tri-monitor-error").textContent = error.message;}
+});
 
 function renderMonitor() {
   if (!state.detail || state.detail.task.id !== state.selected) return;
@@ -478,7 +541,7 @@ async function refreshTaskDetails() {
     if (request !== detailsRequest || state.detailTask !== taskId || !element("task-detail-dialog").open) return;
     const task = detail.task;
     state.detailLogs = logs;
-    element("task-detail-summary").innerHTML = `<span><b>${escapeHtml(task.name)}</b></span>${badge(task)}<span>${escapeHtml(venues[task.primary])} ⇄ ${escapeHtml(venues[task.hedge])} · ${task.mode === "live" ? "实盘" : "只采集"}</span><span>YAML：${escapeHtml(task.strategy_file ? strategyLabel(task.strategy_file) : "任务独立配置")} · ENV：${escapeHtml(task.profile)}</span><span>运行时长 ${duration(task)} · 退出码 ${escapeHtml(task.exit_code ?? "—")}</span>`;
+    element("task-detail-summary").innerHTML = `<span><b>${escapeHtml(task.name)}</b></span>${badge(task)}${thresholdStatus(task)}<span>${escapeHtml(venues[task.primary])} ⇄ ${escapeHtml(venues[task.hedge])} · ${task.mode === "live" ? "实盘" : "只采集"}</span><span>YAML：${escapeHtml(task.strategy_file ? strategyLabel(task.strategy_file) : "任务独立配置")} · ENV：${escapeHtml(task.profile)}</span><span>运行时长 ${duration(task)} · 退出码 ${escapeHtml(task.exit_code ?? "—")}</span>`;
     element("task-detail-error").textContent = "";
     element("detail-updated").textContent = `每 3 秒刷新 · 最近更新 ${new Date().toLocaleTimeString("zh-CN", {hour12: false})} · 日志末尾 192 KB`;
     renderDetailLogs();
@@ -500,6 +563,7 @@ function renderCredentials(fields) {
     ["Lighter / RH 与 Arcus", fields.filter((field) => /^(LIGHTER|ARCUS)_/.test(field.name))],
     ["Entropy / Trade.xyz", fields.filter((field) => /^HL_/.test(field.name))],
     ["主腿独立凭据（Lighter ↔ RH 时必填）", fields.filter((field) => /^PRIMARY_/.test(field.name))],
+    ["Telegram 通知", fields.filter((field) => /^TELEGRAM_/.test(field.name))],
   ];
   element("credential-fields").innerHTML = groups.map(([title, entries], index) => `<details class="credential-group" ${index === 0 ? "open" : ""}><summary>${title}</summary><div class="form-grid">${entries.map((field) => `<div class="credential-item"><label for="credential-${field.name}">${field.name}</label><input id="credential-${field.name}" type="password" data-credential="${field.name}" autocomplete="off" maxlength="2048" placeholder="${field.configured ? "已配置 · 留空保留" : "未配置 · 可留空"}"><small>${field.inherited ? "由服务环境变量覆盖，文件修改不会覆盖它" : field.configured ? "服务器已保存，不回传原值" : "未配置，按所用交易所填写"}</small><label class="clear-secret"><input type="checkbox" data-clear="${field.name}" ${field.inherited ? "disabled" : ""}> 清除此字段</label></div>`).join("")}</div></details>`).join("");
 }

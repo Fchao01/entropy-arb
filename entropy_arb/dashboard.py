@@ -112,7 +112,7 @@ class BufferLogHandler(logging.Handler):
         self.lines: deque = deque(maxlen=maxlen)
         self.setFormatter(logging.Formatter(
             "%(asctime)s %(levelname)-7s %(name)s: %(message)s",
-            datefmt="%H:%M:%S"))
+            datefmt="%Y-%m-%d %H:%M:%S"))
 
     def emit(self, record: logging.LogRecord) -> None:
         try:

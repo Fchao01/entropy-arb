@@ -266,6 +266,38 @@ def test_auth_origin_errors_downloads_and_logout(tmp_path):
     asyncio.run(scenario())
 
 
+@pytest.mark.parametrize("source_state", ["missing", "modified"])
+def test_login_templates_do_not_depend_on_user_strategy_files(tmp_path, source_state):
+    async def scenario():
+        manager = manager_at(tmp_path)
+        client = TestClient(TestServer(create_app(manager, "test-password-long")),
+                            cookie_jar=aiohttp.CookieJar(unsafe=True))
+        try:
+            for path in (manager.root / "configs/rh-arcus.yaml",
+                         manager.root / "config.example.yaml"):
+                if source_state == "missing":
+                    path.unlink()
+                else:
+                    path.write_text("invalid: [")
+            await client.start_server()
+            login = await client.post("/api/login", json={"password": "test-password-long"},
+                                      headers={"X-Web-Request": "1"})
+            assert login.status == 200
+            response = await client.get("/api/meta")
+            assert response.status == 200
+            templates = (await response.json())["templates"]
+            assert set(templates) == {"rh-arcus", "entropy-rh"}
+            for name, primary in (("rh-arcus", "lighter-rh"), ("entropy-rh", "entropy")):
+                raw = manager.check_strategy(templates[name])
+                assert raw["primary"]["venue"] == primary
+                assert "entropy" not in raw
+            if source_state == "modified":
+                assert (manager.root / "configs/rh-arcus.yaml").read_text() == "invalid: ["
+        finally:
+            await client.close()
+    asyncio.run(scenario())
+
+
 def test_csv_tail_is_bounded_and_handles_partial_rows(tmp_path):
     path = tmp_path / "minutes.csv"
     path.write_text("minute_ts,premium_close_bps\n" + "".join(f"{index},{index / 10}\n" for index in range(200)) + "partial\n")

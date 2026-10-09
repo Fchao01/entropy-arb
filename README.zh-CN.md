@@ -41,15 +41,15 @@ CSV 数据**，配套的分析工具可以直接把这些数据变成策略所�
 整个信号就是 `config.yaml` 里三个数字，由你根据采集的数据自己设定：
 
 ```
-premium_bps =（Entropy 价格 / 对冲腿价格 − 1）× 10 000
+premium_bps =（主腿价格 / 对冲腿价格 − 1）× 10 000
 
-                          ┌──────────────  卖出 Entropy + 买入对冲腿
+                          ┌──────────────  卖出主腿 + 买入对冲腿
 midline + upper  ───────────────────────────────────────────────────
                                        ▲
 midline          ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ┼ ─ ─   溢价的长期中枢
                                        ▼
 midline − lower  ───────────────────────────────────────────────────
-                          └──────────────  买入 Entropy + 卖出对冲腿
+                          └──────────────  买入主腿 + 卖出对冲腿
 ```
 
 - `midline_bps` —— 溢价的常态水平。跨所溢价几乎从不以零为中心（预言机不同、
@@ -62,11 +62,11 @@ midline − lower  ────────────────────�
 另行叠加手续费。因此一次完整往返扣费后**净赚 ≥ upper + lower bps**，这是
 结构上保证的。
 
-有一点必须理解：当 `midline_bps: 5` 时，买入 Entropy 的门槛是
+有一点必须理解：当 `midline_bps: 5` 时，买入主腿的门槛是
 `lower − midline`，可能为**负数**。这是有意为之——如果 Entropy 长期贵 5 bps，
 那么在溢价为 0 时买入它，相对其自身均衡水平就是便宜了 5 bps，这笔交易正是
 此前在 `midline + upper` 处卖出的获利平仓。这同时意味着**中枢填错就是亏钱
-策略**：若真实溢价中枢是 0 而你填了 5，机器人会整天以公允价买入 Entropy。
+策略**：若真实溢价中枢是 0 而你填了 5，机器人会整天以公允价买入主腿。
 先测量、再交易——数据采集器和分析工具就是为此而生。
 
 ## 快速开始
@@ -135,8 +135,8 @@ python3 main.py --symbol SNDK --hedge lighter
 | `minute_ts`, `time_utc` | 分钟起点（epoch 秒 / ISO UTC） |
 | `entropy_bid/ask`, `hedge_bid/ask` | 该分钟最后一次有效盘口 |
 | `premium_open/high/low/close/mean/std_bps` | Entropy 相对对冲腿的中间价溢价 |
-| `sell_edge_mean/max_bps` | 卖出 Entropy 方向的可成交溢价（Entropy 买一 / 对冲腿卖一 − 1） |
-| `buy_edge_mean/max_bps` | 买入 Entropy 方向的可成交溢价（对冲腿买一 / Entropy 卖一 − 1） |
+| `sell_edge_mean/max_bps` | 卖出主腿方向的可成交溢价（主腿买一 / 对冲腿卖一 − 1） |
+| `buy_edge_mean/max_bps` | 买入主腿方向的可成交溢价（对冲腿买一 / 主腿卖一 − 1） |
 | `samples` | 该分钟约 60 秒中两边盘口同时有效的秒数 |
 
 采集的 edge 为费前口径；分析工具在统计触发频率前会先扣除 `--fees-bps`
@@ -164,7 +164,7 @@ python3 main.py --symbol SNDK --hedge lighter
 | `thresholds.midline_bps` | 溢价中枢（必须实测！） | — |
 | `thresholds.upper_bps` / `lower_bps` | 入场带宽（必须是有限数，可为负数） | — |
 | `entropy.symbol` / `hedge.symbol` | 各交易所的实际市场名称 | 同 `--symbol` |
-| `primary.venue` / `--primary` | 主腿交易所；使用时把旧 `entropy` 段替换成 `primary` | `entropy` |
+| `primary.venue` / `--primary` | 主腿交易所；使用时把旧 `entropy` 段替换成 `primary` | `lighter-rh` |
 | `primary.symbol` | 使用 `primary` 段时的主腿市场名 | `--symbol` |
 | `entropy.dex` | Hyperliquid 上第一条腿的 dex；Entropy 用 `io`，核心市场（如 ETH）用空字符串 `""` | `io` |
 | `*.taker_fee_bps` | 各所吃单费 | 0.0（tradexyz：1.0）；Arcus 必须显式填写已确认费率 |
