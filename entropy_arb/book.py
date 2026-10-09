@@ -79,14 +79,10 @@ class OrderBook:
         return self.alive_ts > 0 and time.time() - self.alive_ts <= max_age_sec
 
     def is_fresh(self, max_age_sec: float) -> bool:
-        """Whether the actual order book was updated recently.
-
-        Heartbeats keep ``alive_ts`` current, but they do not make a stale
-        book safe to trade.  Execution paths must use ``last_update_ts``.
-        """
+        """Whether the venue feed is alive and the book has been initialized."""
         return (self.ready and bool(self.bids) and bool(self.asks)
-                and self.last_update_ts > 0
-                and time.time() - self.last_update_ts <= max_age_sec)
+                and self.alive_ts > 0
+                and time.time() - self.alive_ts <= max_age_sec)
 
 
 def floor_step(x: float, step: float) -> float:

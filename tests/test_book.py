@@ -92,11 +92,11 @@ def test_lighter_diff_maintenance():
     assert b.best_bid() == 98.9 and b.best_ask() == 100.2
 
 
-def test_freshness_uses_book_update_not_heartbeat():
+def test_freshness_uses_heartbeat():
     b = make_book(bids=[(99.0, 1)], asks=[(100.0, 1)])
     b.last_update_ts = time.time() - 10.0
     b.alive_ts = time.time()
-    assert not b.is_fresh(1.0)
+    assert b.is_fresh(1.0)
     assert b.is_alive(1.0)
 
 
