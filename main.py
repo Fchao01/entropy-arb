@@ -22,6 +22,7 @@ README.zh-CN.md (中文).
 import argparse
 import asyncio
 import contextlib
+import fcntl
 import logging
 import os
 import signal
@@ -53,27 +54,46 @@ def setup_logging(level: str, log_file: str = None,
 
 
 async def amain(cfg, record_only: bool, use_dashboard: bool, force_tty: bool,
-                log_buffer, lang: str) -> None:
-    eng = Engine(cfg, record_only=record_only)
+                log_buffer, lang: str, status_file: str = None,
+                parent_pid: int = None, control_file: str = None) -> None:
+    eng = Engine(cfg, record_only=record_only, control_file=control_file)
     eng.ensure_async_state()
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(sig, eng.request_stop)
-    if not use_dashboard:
-        await eng.run()
-        return
-    from entropy_arb.dashboard import Dashboard
-    dash = Dashboard(eng, log_buffer, cfg.log_file, force_terminal=force_tty,
-                     lang=lang)
-    dash_task = asyncio.create_task(dash.run(), name="dashboard")
+    status_task = None
+    dash_task = None
+    parent_task = None
+    if parent_pid:
+        async def monitor_parent():
+            while not eng.stop.is_set():
+                if os.getppid() != parent_pid:
+                    logging.getLogger("engine").warning("web manager disconnected; stopping task (positions remain)")
+                    eng.request_stop()
+                    return
+                await asyncio.sleep(1)
+        parent_task = asyncio.create_task(monitor_parent(), name="web-parent")
+    if status_file:
+        from entropy_arb.status import publish_status
+        status_task = asyncio.create_task(publish_status(eng, status_file), name="web-status")
+    if use_dashboard:
+        from entropy_arb.dashboard import Dashboard
+        dash = Dashboard(eng, log_buffer, cfg.log_file, force_terminal=force_tty,
+                         lang=lang)
+        dash_task = asyncio.create_task(dash.run(), name="dashboard")
     try:
         await eng.run()
     finally:
         eng.request_stop()
-        with contextlib.suppress(Exception):
-            await asyncio.wait_for(dash_task, timeout=5)
-        if not dash_task.done():
-            dash_task.cancel()
+        for task in (dash_task, status_task, parent_task):
+            if task is not None:
+                with contextlib.suppress(Exception):
+                    await asyncio.wait_for(task, timeout=5)
+                if not task.done():
+                    task.cancel()
+        if status_file:
+            from entropy_arb.status import write_status
+            write_status(eng, status_file)
 
 
 def main() -> None:
@@ -100,12 +120,31 @@ def main() -> None:
                         "orders (needs no credentials)")
     p.add_argument("--cn", action="store_true",
                    help="display the dashboard in Chinese / 仪表盘使用中文")
+    p.add_argument("--status-file", default=None,
+                   help="write credential-free JSON snapshots for the web console")
+    p.add_argument("--parent-pid", type=int, default=None,
+                   help=argparse.SUPPRESS)
+    p.add_argument("--instance-lock", default=None,
+                   help=argparse.SUPPRESS)
+    p.add_argument("--control-file", default=None,
+                   help=argparse.SUPPRESS)
     disp = p.add_mutually_exclusive_group()
     disp.add_argument("--dashboard", action="store_true",
                       help="force the Rich dashboard even without a tty")
     disp.add_argument("--no-dashboard", action="store_true",
                       help="plain console logs instead of the dashboard")
     args = p.parse_args()
+    if args.parent_pid and os.getppid() != args.parent_pid:
+        print("startup error: web manager already exited", file=sys.stderr)
+        sys.exit(1)
+    instance_lock = None
+    if args.instance_lock:
+        instance_lock = open(args.instance_lock, "a")
+        try:
+            fcntl.flock(instance_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            print("startup error: task instance already running", file=sys.stderr)
+            sys.exit(1)
 
     try:
         cfg = load_config(args.config, args.env_file,
@@ -139,7 +178,10 @@ def main() -> None:
         asyncio.run(amain(cfg, record_only=args.record_only,
                           use_dashboard=use_dashboard, force_tty=force_tty,
                           log_buffer=log_buffer,
-                          lang="zh" if args.cn else "en"))
+                          lang="zh" if args.cn else "en",
+                          status_file=args.status_file,
+                          parent_pid=args.parent_pid,
+                          control_file=args.control_file))
     except RuntimeError as e:
         # startup failures (missing credentials, market not found, venue
         # unreachable) — a clean message, not a traceback

@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import csv
+import json
 import logging
 import os
 import time
@@ -45,9 +46,10 @@ BALANCE_POLL_SEC = 30.0
 
 
 class Engine:
-    def __init__(self, cfg: Config, record_only: bool = False) -> None:
+    def __init__(self, cfg: Config, record_only: bool = False, control_file: str = None) -> None:
         self.cfg = cfg
         self.record_only = record_only
+        self.control_file = control_file
         self.session: Optional[aiohttp.ClientSession] = None
         self.entropy = None
         self.hedge = None
@@ -66,6 +68,8 @@ class Engine:
         self._venue_locks: Dict[str, asyncio.Lock] = {}
         self._exec_tasks: set = set()
         self.halted = False
+        self.manual_paused = False
+        self._control_state = None
         self._unresolved_execution = False
         self.consec_errors = 0
         self.last_trade_ts = 0.0
@@ -225,6 +229,8 @@ class Engine:
             tasks.append(asyncio.create_task(self._http_keepalive_loop(),
                                              name="keepalive"))
         tasks.append(asyncio.create_task(self._status_loop(), name="status"))
+        if self.control_file and not self.record_only:
+            tasks.append(asyncio.create_task(self._control_loop(), name="control"))
         if live:
             tasks.append(asyncio.create_task(self._reconcile_loop(),
                                              name="reconcile"))
@@ -341,6 +347,27 @@ class Engine:
             except Exception:
                 log.exception("evaluate failed")
 
+    async def _control_loop(self) -> None:
+        while not self.stop.is_set():
+            paused = False
+            try:
+                with open(self.control_file, encoding="utf-8") as handle:
+                    value = json.load(handle)
+                paused = bool(value.get("paused", False)) if isinstance(value, dict) else False
+            except FileNotFoundError:
+                pass
+            except (OSError, ValueError, TypeError):
+                log.warning("invalid pause control file; keeping current state")
+                paused = self.manual_paused
+            if paused != self.manual_paused:
+                self.manual_paused = paused
+                log.warning("manual strategy pause %s", "enabled" if paused else "disabled")
+                self._update_evt.set()
+            try:
+                await asyncio.wait_for(self.stop.wait(), timeout=0.25)
+            except asyncio.TimeoutError:
+                pass
+
     def _schedule_poke(self, delay: float) -> None:
         loop = asyncio.get_running_loop()
         due = loop.time() + max(delay, 0.01)
@@ -362,7 +389,7 @@ class Engine:
 
     async def _evaluate(self) -> None:
         cfg = self.cfg
-        if self.halted:
+        if self.halted or self.manual_paused:
             return
         now = time.time()
         if now - self.last_trade_ts < cfg.cooldown_sec:

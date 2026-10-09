@@ -2,6 +2,8 @@
 
 **[中文文档 / Chinese documentation → README.zh-CN.md](README.zh-CN.md)**
 
+**Web console:** `python3 web_main.py` serves two pages for configuring and managing multiple symbol processes and monitoring books, positions, minute charts, trades, and logs. Set a login password in `.env.web` first; tasks default to record-only. See the [console deployment guide](docs/web-console.md) for Linux/systemd, separate credentials, and HTTPS. Stopping a process does not close positions.
+
 Open-source two-venue perp arbitrage bot. The primary defaults to **Entropy**
 (the `io` builder dex on Hyperliquid), and can be selected with `primary.venue`
 or `--primary`. The other leg — the hedge — is one of:

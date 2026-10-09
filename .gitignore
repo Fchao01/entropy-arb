@@ -1,6 +1,11 @@
 # secrets & local config / 密钥与本地配置
 .env
 config.yaml
+.env.web
+credentials/
+web-data/
+configs/*.yaml
+configs/*.yml
 
 # runtime output / 运行时输出
 logs/

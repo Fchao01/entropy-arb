@@ -26,7 +26,7 @@ from __future__ import annotations
 import os
 import math
 from dataclasses import dataclass
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Mapping, Optional
 
 import yaml
 from dotenv import load_dotenv
@@ -311,16 +311,22 @@ def _env_s(name: str) -> Optional[str]:
 
 
 def _build_venue(raw: dict, section: str, venue: str, key: str, symbol: str,
-                 separate_lighter_keys: bool = False) -> VenueConf:
+                 separate_lighter_keys: bool = False,
+                 credential_env: Optional[Mapping[str, str]] = None) -> VenueConf:
     params = raw.get(section) or {}
     is_primary = key == "entropy"
 
+    def get_env(name):
+        if credential_env is not None:
+            return credential_env.get(name) or None
+        return _env_s(name)
+
     def env_s(name, fallback=None):
         if is_primary:
-            value = _env_s("PRIMARY_" + name)
+            value = get_env("PRIMARY_" + name)
             if value or separate_lighter_keys:
                 return value
-        return _env_s(fallback or name)
+        return get_env(fallback or name)
 
     def env_i(name):
         value = env_s(name)
@@ -343,9 +349,9 @@ def _build_venue(raw: dict, section: str, venue: str, key: str, symbol: str,
             raise ConfigError(f"{section}.dex must be xyz for tradexyz")
         label = "XYZ" if venue == "tradexyz" else ("ENTROPY" if dex == "io" else "HL:" + (dex or "core"))
         private_fallback = ("HL_PRIVATE_KEY_XYZ" if venue == "tradexyz"
-                            and _env_s("HL_PRIVATE_KEY_XYZ") else "HL_PRIVATE_KEY")
+                            and get_env("HL_PRIVATE_KEY_XYZ") else "HL_PRIVATE_KEY")
         address_fallback = ("HL_ACCOUNT_ADDRESS_XYZ" if venue == "tradexyz"
-                            and _env_s("HL_ACCOUNT_ADDRESS_XYZ") else "HL_ACCOUNT_ADDRESS")
+                            and get_env("HL_ACCOUNT_ADDRESS_XYZ") else "HL_ACCOUNT_ADDRESS")
         return VenueConf(**common, kind="hl", label=label, hl_dex=dex,
                          hl_creds=HLCreds(env_s("HL_PRIVATE_KEY", private_fallback),
                                           env_s("HL_ACCOUNT_ADDRESS", address_fallback)))
@@ -374,8 +380,10 @@ def _build_venue(raw: dict, section: str, venue: str, key: str, symbol: str,
 # -------------------------------------------------------------------- loading
 
 def load_config(config_file: str = "config.yaml", env_file: str = ".env", *,
-                symbol: str, hedge_venue: str, primary_venue: Optional[str] = None) -> Config:
-    load_dotenv(env_file)
+                symbol: str, hedge_venue: str, primary_venue: Optional[str] = None,
+                credential_env: Optional[Mapping[str, str]] = None) -> Config:
+    if credential_env is None:
+        load_dotenv(env_file)
     try:
         with open(config_file) as fh:
             raw = yaml.safe_load(fh) or {}
@@ -435,8 +443,10 @@ def load_config(config_file: str = "config.yaml", env_file: str = ".env", *,
 
     entropy = _build_venue(raw, primary_section, primary_venue, "entropy", entropy_symbol,
                            separate_lighter_keys=(primary_venue in LIGHTER_PROFILES
-                                                  and hedge_venue in LIGHTER_PROFILES))
-    hedge = _build_venue(raw, "hedge", hedge_venue, "hedge", hedge_symbol)
+                                                  and hedge_venue in LIGHTER_PROFILES),
+                           credential_env=credential_env)
+    hedge = _build_venue(raw, "hedge", hedge_venue, "hedge", hedge_symbol,
+                         credential_env=credential_env)
     if (primary_venue == hedge_venue
             or (entropy.kind == hedge.kind == "hl" and entropy.hl_dex == hedge.hl_dex)):
         raise ConfigError("primary and hedge resolve to the same venue / 主腿与对冲腿不能是同一个交易所")

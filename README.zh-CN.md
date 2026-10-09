@@ -2,6 +2,8 @@
 
 **[English documentation / 英文文档 → README.md](README.md)**
 
+**网页控制台**：运行 `python3 web_main.py`，在「DEX 套利」页面配置并启停多个币种任务，在「监控」页面查看盘口、持仓、图表与日志。首次启动需设置 `.env.web` 登录密码，默认任务为只采集。一次性 Linux 常驻部署、独立凭据及 HTTPS 配置见 [网页控制台说明](docs/web-console.md)。停止程序不会自动平仓。
+
 开源双交易所永续合约套利机器人。主腿默认是 **Entropy**（Hyperliquid 上的
 `io` builder dex），也可通过 `primary.venue` 或 `--primary` 选择其他已接入场所。
 另一条腿（对冲腿）可选择：
