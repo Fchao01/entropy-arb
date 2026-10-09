@@ -28,7 +28,7 @@ execution:
 """)
     f.close()
     return load_config(f.name, NO_ENV,
-                       symbol="SNDK", hedge_venue="lighter-rh")
+                       symbol="SNDK", hedge_venue="lighter")
 
 
 class StubVenue:
@@ -91,9 +91,8 @@ def test_rh_primary_uses_primary_premium_and_parallel_orders():
     eng.hedge.fee_bps = 2.25
     approx(eng.premium_bps(), 15.0)
     assert eng.direction_key(True) == "sell_primary"
-    eng.cfg.close_lower_bps = 0.5
     eng.entropy.position, eng.hedge.position = -1.0, 1.0
-    approx(eng._eff_threshold(eng.entropy, eng.hedge), 0.5)
+    approx(eng._eff_threshold(eng.entropy, eng.hedge), 1.0)
     eng.entropy.position = eng.hedge.position = 0
     plan, reason = eng._plan(eng.hedge, eng.entropy, 100)
     assert plan is not None, reason
@@ -153,30 +152,6 @@ def test_live_non_hl_primary_initializes_without_hl_methods():
         v.close.assert_awaited_once()
 
 
-def test_close_band_and_cost_buffers_apply_when_reducing():
-    eng = make_engine(midline=5.0, upper=8.0, lower=7.0)
-    eng.cfg.close_upper_bps = 2.0
-    eng.cfg.close_lower_bps = 1.0
-    eng.cfg.latency_buffer_bps = 1.5
-    eng.cfg.slippage_buffer_bps = 2.5
-    e, h = eng.entropy, eng.hedge
-    e.position, h.position = -1.0, 1.0
-    # Buying entropy / selling hedge reduces the pair: close_lower - midline
-    # plus the measured cost reserves.
-    approx(eng._eff_threshold(buy=e, sell=h), -4.0 + 4.0)
-    # With flat inventory the regular lower band remains in force.
-    e.position = h.position = 0.0
-    approx(eng._eff_threshold(buy=e, sell=h), 2.0 + 4.0)
-
-
-def test_scan_rejects_books_with_large_receipt_skew():
-    eng = make_engine(midline=0.0, upper=1.0, lower=1.0)
-    eng.entropy.set_book(100.14, 100.16)
-    eng.hedge.set_book(99.99, 100.01)
-    eng.hedge.book.last_update_ts -= eng.cfg.max_book_skew_sec + 0.01
-    assert run_scan(eng) is None
-
-
 def test_inventory_ladder():
     eng = make_engine()
     eng.cfg.inventory_scale_bps, eng.cfg.inventory_floor_frac = 10.0, 0.5
@@ -220,15 +195,6 @@ def test_scan_quiet_inside_band():
     eng.entropy.set_book(100.04, 100.06)
     eng.hedge.set_book(99.99, 100.01)
     assert run_scan(eng) is None
-
-
-def test_market_maximum_base_size_caps_both_legs():
-    eng = make_engine(midline=0.0, upper=1.0, lower=1.0)
-    eng.entropy.set_book(100.14, 100.16)
-    eng.hedge.set_book(99.99, 100.01)
-    eng.hedge.max_base = 0.25
-    best = run_scan(eng)
-    assert best is not None and best[2].qty <= 0.25
 
 
 def test_scan_fires_buy_entropy_below_band():

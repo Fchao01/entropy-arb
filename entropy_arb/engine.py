@@ -31,6 +31,7 @@ from .recorder import MinuteRecorder
 from .venue_hl import HLVenue
 from .venue_lighter import LighterVenue
 from .venue_arcus import ArcusVenue
+from .telegram import TelegramNotifier, trade_message
 
 log = logging.getLogger("engine")
 
@@ -70,7 +71,6 @@ class Engine:
         self.halted = False
         self.manual_paused = False
         self._control_state = None
-        self._unresolved_execution = False
         self.consec_errors = 0
         self.last_trade_ts = 0.0
         self.trades = 0
@@ -98,6 +98,8 @@ class Engine:
         self._venue_fetch_fails: Dict[str, int] = {}
         # per-execution records for the dashboard (newest last)
         self.recent_trades: deque = deque(maxlen=50)
+        self.telegram = TelegramNotifier()
+        self._telegram_tasks: set = set()
 
     def ensure_async_state(self) -> None:
         """Create loop-bound events once the application loop is running."""
@@ -150,6 +152,7 @@ class Engine:
         # keepalive loop pings inside this window to hold them open.
         self.session = aiohttp.ClientSession(connector=aiohttp.TCPConnector(
             keepalive_timeout=75.0, ttl_dns_cache=300))
+        self.telegram.session = self.session
         try:
             await self._run_inner()
         finally:
@@ -246,6 +249,9 @@ class Engine:
         await asyncio.gather(*tasks, return_exceptions=True)
         for v in self.venues.values():
             await v.close()
+        if self._telegram_tasks:
+            await asyncio.gather(*self._telegram_tasks, return_exceptions=True)
+        await self.telegram.close()
         log.info("shutdown — %d trades, %d hedges, exp edge $%.4f, "
                  "fill edge $%.4f", self.trades, self.hedges,
                  self.total_exp_edge, self.total_fill_edge)
@@ -280,28 +286,11 @@ class Engine:
 
         selling entropy: executable premium must clear midline + upper;
         buying entropy: the reverse premium must clear lower - midline."""
-        # A pair opened in one direction is closed by the opposite direction.
-        # Give the closing direction its own hysteresis band so the strategy
-        # can reduce inventory before requiring a fresh full-width entry.
-        closing = buy.position < 0 and sell.position > 0
         if sell.key == "entropy":
-            band = self.cfg.close_upper_bps if closing else self.cfg.upper_bps
-            base = self.cfg.midline_bps + band
+            base = self.cfg.midline_bps + self.cfg.upper_bps
         else:
-            band = self.cfg.close_lower_bps if closing else self.cfg.lower_bps
-            base = band - self.cfg.midline_bps
-        return (base + self._inv_add_bps(buy, sell)
-                + self.cfg.latency_buffer_bps
-                + self.cfg.slippage_buffer_bps)
-
-    def _books_tradeable(self) -> bool:
-        """Require fresh books whose local receipt times are close together."""
-        eb, hb = self.entropy.book, self.hedge.book
-        if not (eb.is_fresh(self.cfg.staleness_sec)
-                and hb.is_fresh(self.cfg.staleness_sec)):
-            return False
-        skew = abs(eb.last_update_ts - hb.last_update_ts)
-        return skew <= self.cfg.max_book_skew_sec
+            base = self.cfg.lower_bps - self.cfg.midline_bps
+        return base + self._inv_add_bps(buy, sell)
 
     def _headroom(self, buy, sell, ref_px: float) -> float:
         hb = buy.cap_usd - buy.position * ref_px
@@ -309,13 +298,6 @@ class Engine:
         return min(hb, hs)
 
     def _plan(self, buy, sell, cap_notional: float):
-        max_base = min(getattr(buy, "max_base", float("inf")),
-                       getattr(sell, "max_base", float("inf")))
-        ask = buy.book.best_ask()
-        if ask is not None:
-            # A base-size cap must apply to BOTH legs before either order is
-            # sent. Lowest ask is conservative when walking more depth.
-            cap_notional = min(cap_notional, max_base * ask)
         return plan_arb(
             buy.book, sell.book,
             threshold_bps=self._eff_threshold(buy, sell),
@@ -422,15 +404,10 @@ class Engine:
             raise
         except Exception:
             log.exception("execute failed")
-            unresolved = True
         finally:
             self._vlock(buy.key).release()
             self._vlock(sell.key).release()
         if unresolved:
-            # Do not resume scanning while either leg has an unknown outcome.
-            # The reconcile loop will fetch chain positions and hedge before
-            # clearing this gate.
-            self._unresolved_execution = True
             self._reconcile_evt.set()
         else:
             await self._maybe_hedge()
@@ -441,11 +418,10 @@ class Engine:
         (buy, sell, plan), or None."""
         cfg = self.cfg
         best = None
-        if self._unresolved_execution:
-            return None
         for buy, sell, dkey in ((self.hedge, self.entropy, self.direction_key(True)),
                                 (self.entropy, self.hedge, self.direction_key(False))):
-            if not self._books_tradeable():
+            if not (buy.book.is_fresh(cfg.staleness_sec)
+                    and sell.book.is_fresh(cfg.staleness_sec)):
                 continue
             if not (buy.ready_to_trade() and sell.ready_to_trade()):
                 continue
@@ -528,21 +504,9 @@ class Engine:
                  direction, buy.name, plan.qty, plan.buy_limit, sell.name,
                  plan.sell_limit, plan.buy_notional, plan.q_max_notional,
                  plan.marginal_premium_bps, plan.exp_edge_usd)
-        # The configured leg protection is a hard ceiling, not a free source
-        # of extra risk.  Split the edge headroom across both legs so a fill
-        # at the protection limits cannot consume the entire expected edge.
-        hurdle = self._eff_threshold(buy, sell)
-        fee_bps = buy.fee_bps + sell.fee_bps
-        edge_headroom_bps = max(
-            0.0, plan.marginal_premium_bps - hurdle - fee_bps)
-        effective_slip_bps = min(cfg.leg_slippage_bps,
-                                 edge_headroom_bps / 2.0)
-        slip = effective_slip_bps / 1e4
+        slip = cfg.leg_slippage_bps / 1e4
         buy_bound = buy.px_round(plan.buy_limit * (1 + slip), round_up=False)
         sell_bound = sell.px_round(plan.sell_limit * (1 - slip), round_up=True)
-        log.info("[PROTECTION] %s: configured_slip=%.2fbps effective_slip=%.2fbps "
-                 "edge_headroom=%.2fbps", direction, cfg.leg_slippage_bps,
-                 effective_slip_bps, edge_headroom_bps)
         self._record_send(buy)
         self._record_send(sell)
         send_started = time.perf_counter()
@@ -629,8 +593,24 @@ class Engine:
                       sell_avg_px=sinfo.get("avg_px"),
                       realized_edge_bps=realized_edge_bps,
                       edge_shortfall_bps=shortfall_bps)
+        self._notify_trade(direction, buy, sell, plan, sent_ok, bfill, sfill,
+                           binfo["status"], sinfo["status"],
+                           None if unresolved else fill_edge)
         self.last_trade_ts = time.time()
         return bool(unresolved)
+
+    def _notify_trade(self, direction, buy, sell, plan, ok, bfill, sfill,
+                      buy_status, sell_status, fill_edge) -> None:
+        if not self.telegram.enabled:
+            return
+        message = trade_message(
+            symbol=self.cfg.symbol, direction=direction,
+            buy_venue=buy.name, sell_venue=sell.name, qty=plan.qty,
+            buy_status=buy_status, sell_status=sell_status,
+            buy_fill=bfill, sell_fill=sfill, fill_edge=fill_edge, ok=ok)
+        task = asyncio.create_task(self.telegram.send(message), name="telegram-trade")
+        self._telegram_tasks.add(task)
+        task.add_done_callback(self._telegram_tasks.discard)
 
     def _record_trade(self, direction: str, plan: ArbPlan, fill_edge,
                       status: str, ok: bool) -> None:
@@ -663,8 +643,7 @@ class Engine:
             lk = self._vlock(v.key)
             if lk.locked():
                 continue
-            qty = floor_step(min(abs(net), abs(v.position),
-                                 getattr(v, "max_base", float("inf"))), self._step)
+            qty = floor_step(min(abs(net), abs(v.position)), self._step)
             if qty < v.min_base:
                 continue
             ref = v.book.best_bid() if is_sell else v.book.best_ask()
@@ -685,7 +664,6 @@ class Engine:
                 if info.get("err") or info.get("unresolved"):
                     log.error("[HEDGE] %s: %s", v.name,
                               info.get("err") or "unresolved")
-                    self._unresolved_execution = True
                     if str(info.get("err", "")).startswith("RATE_LIMITED"):
                         self._mark_limited(v)
                     self._reconcile_evt.set()
@@ -715,36 +693,31 @@ class Engine:
     RECONCILE_GRACE_SEC = 5.0
 
     async def _reconcile_positions(self, hedge: bool,
-                                   strict: bool = False,
-                                   force_recent: bool = False) -> None:
+                                   strict: bool = False) -> None:
         now = time.time()
         vs = []
         for v in self.venues.values():
-            if (not force_recent
-                    and now - v.last_traded_ts <= self.RECONCILE_GRACE_SEC):
+            if now - v.last_traded_ts <= self.RECONCILE_GRACE_SEC:
                 continue  # just traded: chain read would be stale
             if v.key in self._venue_down \
                     and now < self._venue_probe_at.get(v.key, 0.0):
                 continue  # down venue: probe only every venue_probe_sec
             vs.append(v)
         if not vs:
-            return False
+            return
         got = await asyncio.gather(
-            *(self._reconcile_venue(v, strict, force_recent) for v in vs),
+            *(self._reconcile_venue(v, strict) for v in vs),
             return_exceptions=True)
         for r in got:
             if isinstance(r, BaseException):
                 raise r  # strict startup: fail loudly
         if hedge:
             await self._maybe_hedge()
-        return True
 
-    async def _reconcile_venue(self, v, strict: bool,
-                               force_recent: bool = False) -> None:
+    async def _reconcile_venue(self, v, strict: bool) -> None:
         async with self._vlock(v.key):
             now = time.time()
-            if (not force_recent
-                    and now - v.last_traded_ts <= self.RECONCILE_GRACE_SEC):
+            if now - v.last_traded_ts <= self.RECONCILE_GRACE_SEC:
                 return  # traded while waiting for the lock
             try:
                 r = await v.fetch_position()
@@ -787,31 +760,17 @@ class Engine:
 
     async def _reconcile_loop(self) -> None:
         while not self.stop.is_set():
-            force_recent = self._unresolved_execution
             try:
                 await asyncio.wait_for(self._reconcile_evt.wait(),
                                        timeout=self.cfg.reconcile_sec)
                 self._reconcile_evt.clear()
-                if self._unresolved_execution:
-                    # Give the venue's asynchronous settlement stream a short
-                    # chance to publish the final fill before querying chain
-                    # state.  Trading remains paused during this interval.
-                    await asyncio.sleep(self.RECONCILE_GRACE_SEC)
-                    force_recent = True
-                else:
-                    await asyncio.sleep(1.0)
+                await asyncio.sleep(1.0)
             except asyncio.TimeoutError:
                 pass
             if self.stop.is_set():
                 break
             try:
-                reconciled = await self._reconcile_positions(
-                    hedge=True, force_recent=force_recent)
-                net = sum(v.position for v in self.venues.values())
-                if (force_recent and reconciled
-                        and abs(net) <= self.cfg.net_tolerance_base
-                        and not self._venue_down):
-                    self._unresolved_execution = False
+                await self._reconcile_positions(hedge=True)
             except asyncio.CancelledError:
                 raise
             except Exception:

@@ -1,7 +1,7 @@
 # Arcus 永续合约接入
 
 启动参数 `--hedge arcus` 将对冲腿切换到 Arcus。引擎仍然只交易两条腿：
-配置的主腿 + Arcus，不会同时在多个对冲交易所下单。主腿默认 Entropy，
+配置的主腿 + Arcus，不会同时在多个对冲交易所下单。主腿默认 RH，
 RH 主腿可使用 [configs/rh-arcus.yaml](../configs/rh-arcus.yaml)，见
 [主腿配置说明](primary.md)。
 

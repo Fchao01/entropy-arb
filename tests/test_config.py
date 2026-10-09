@@ -30,19 +30,20 @@ thresholds:
 """
 
 
-def load(yaml_text: str, symbol="SNDK", hedge="lighter-rh"):
+def load(yaml_text: str, symbol="SNDK", hedge="lighter"):
     return load_config(write_tmp(yaml_text), NO_ENV,
                        symbol=symbol, hedge_venue=hedge)
 
 
 def test_example_config_loads():
     cfg = load_config(EXAMPLE, NO_ENV,
-                      symbol="SNDK", hedge_venue="lighter-rh")
+                      symbol="SNDK", hedge_venue="lighter")
     assert cfg.symbol == "SNDK"
-    assert cfg.entropy.kind == "hl" and cfg.entropy.hl_dex == "io"
-    assert cfg.hedge_venue == "lighter-rh"
+    assert cfg.primary_venue == "lighter-rh"
+    assert cfg.entropy.kind == "lighter" and cfg.entropy.label == "RH"
+    assert cfg.hedge_venue == "lighter"
     assert cfg.hedge.kind == "lighter"
-    assert cfg.hedge.lighter_profile.chain_id == 466324
+    assert cfg.hedge.lighter_profile.chain_id == 304
     assert cfg.entropy.symbol == "SNDK" and cfg.hedge.symbol == "SNDK"
     assert cfg.recorder_enabled
     assert cfg.recorder_csv == "logs/SNDK/minutes.csv"
@@ -54,8 +55,9 @@ def test_example_config_loads():
 def test_minimal_defaults():
     cfg = load(MINIMAL, hedge="lighter")
     assert cfg.midline_bps == 5.0 and cfg.upper_bps == 4.0 and cfg.lower_bps == 3.0
-    assert cfg.close_upper_bps == 4.0 and cfg.close_lower_bps == 3.0
     assert cfg.hedge.label == "LIGHTER"
+    assert cfg.primary_venue == "lighter-rh"
+    assert cfg.entropy.label == "RH"
     assert cfg.hedge.lighter_profile.chain_id == 304
     assert cfg.take_fraction == 0.5          # defaults kick in
     assert cfg.recorder_enabled is True
@@ -88,32 +90,6 @@ def test_empty_market_symbol_rejected():
     for section in ("entropy", "hedge"):
         expect_error(MINIMAL + f'\n{section}:\n  symbol: " "\n',
                      f"{section}.symbol")
-
-
-def test_execution_buffers_and_close_bands():
-    cfg = load("""
-thresholds:
-  midline_bps: 5.0
-  upper_bps: 8.0
-  lower_bps: 7.0
-  close_upper_bps: 2.0
-  close_lower_bps: 3.0
-execution:
-  latency_buffer_bps: 1.5
-  slippage_buffer_bps: 2.5
-  max_book_skew_sec: 0.2
-""")
-    assert (cfg.close_upper_bps, cfg.close_lower_bps) == (2.0, 3.0)
-    assert (cfg.latency_buffer_bps, cfg.slippage_buffer_bps) == (1.5, 2.5)
-    assert cfg.max_book_skew_sec == 0.2
-
-
-def test_negative_close_bands_are_allowed():
-    cfg = load("thresholds:\n"
-               "  midline_bps: -5\n  upper_bps: -4\n  lower_bps: -3\n"
-               "  close_upper_bps: -2\n  close_lower_bps: -3\n")
-    assert (cfg.midline_bps, cfg.upper_bps, cfg.lower_bps,
-            cfg.close_upper_bps, cfg.close_lower_bps) == (-5.0, -4.0, -3.0, -2.0, -3.0)
 
 
 def test_tradexyz_hedge():
@@ -176,7 +152,8 @@ logging:
 
 def test_primary_venue_validation_and_legacy_conflicts():
     expect_error(MINIMAL + '\nprimary:\n  venue: binance\n', "primary.venue")
-    expect_error(MINIMAL + '\nprimary:\n  venue: lighter-rh\n', "same venue")
+    expect_error(MINIMAL + '\nprimary:\n  venue: lighter-rh\n', "same venue",
+                 hedge="lighter-rh")
     expect_error(MINIMAL + '\nprimary:\n  venue: lighter\nentropy:\n  dex: io\n', "not both")
     expect_error(MINIMAL + '\nprimary:\n  venue: lighter\n  dex: io\n', "only to Hyperliquid")
     expect_error(MINIMAL + '\nprimary:\n  venue: arcus\n', "primary.taker_fee_bps")
@@ -252,9 +229,8 @@ def test_missing_thresholds():
 def test_negative_thresholds_are_allowed():
     cfg = load("thresholds:\n"
                "  midline_bps: -5\n  upper_bps: -4\n  lower_bps: -3\n"
-               "  close_upper_bps: -2\n  close_lower_bps: -1\n")
-    assert (cfg.midline_bps, cfg.upper_bps, cfg.lower_bps,
-            cfg.close_upper_bps, cfg.close_lower_bps) == (-5.0, -4.0, -3.0, -2.0, -1.0)
+               "sizing:\n  max_order_notional_usd: 10\n")
+    assert (cfg.midline_bps, cfg.upper_bps, cfg.lower_bps) == (-5.0, -4.0, -3.0)
 
 
 def test_negative_slippage_is_rejected():

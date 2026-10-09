@@ -4,8 +4,8 @@
 
 **网页控制台**：运行 `python3 web_main.py`，在「DEX 套利」页面配置并启停多个币种任务，在「监控」页面查看盘口、持仓、图表与日志。首次启动需设置 `.env.web` 登录密码，默认任务为只采集。一次性 Linux 常驻部署、独立凭据及 HTTPS 配置见 [网页控制台说明](docs/web-console.md)。停止程序不会自动平仓。
 
-开源双交易所永续合约套利机器人。主腿默认是 **Entropy**（Hyperliquid 上的
-`io` builder dex），也可通过 `primary.venue` 或 `--primary` 选择其他已接入场所。
+开源双交易所永续合约套利机器人。主腿默认是 **RH**（`lighter-rh`），也可通过
+`primary.venue` 或 `--primary` 选择其他已接入场所。
 另一条腿（对冲腿）可选择：
 
 | `--hedge` | 交易所 | 计价货币 | 吃单费 | 协议 |
@@ -19,8 +19,8 @@
 **RH 主腿 + Arcus 对冲** 可直接使用 [configs/rh-arcus.yaml](configs/rh-arcus.yaml)，
 其中 Arcus 手续费按你提供的 0.0225% 填为 2.25 bps。先采集：
 `python3 main.py --record-only --symbol ETH --hedge arcus --config configs/rh-arcus.yaml`。
-凭据、阈值方向和日志说明见 [主腿配置说明](docs/primary.md)。下面的策略说明
-以默认 Entropy 主腿为例；其他主腿的溢价为 `(主腿价格 / 对冲腿价格 - 1) × 10000`。
+凭据、阈值方向和日志说明见 [主腿配置说明](docs/primary.md)。策略溢价为
+`(主腿价格 / 对冲腿价格 - 1) × 10000`。
 
 > **推荐链接** —— 通过以下链接注册即可支持本项目：
 > - Entropy — Tier 4 推荐，100% 返佣：<https://entropy.io/?r=yourquantguy>
@@ -56,8 +56,6 @@ midline − lower  ────────────────────�
   计价货币不同、新上市溢价等），零中心的带只会朝一个方向开仓、打满仓位上限、
   永远无法平仓。请实际测量溢价所在的位置，然后填入。
 - `upper_bps` / `lower_bps` —— 中枢上下两侧的入场带宽。
-- `close_upper_bps` / `close_lower_bps` —— 已有一组相反仓位时的平仓带宽；
-  默认等于入场带宽，调小后可以形成滞回区，减少阈值附近反复开平仓。
 
 两个方向的门槛都作用于**可实际成交的价格**（Entropy 买一 对 对冲腿卖一，
 反之亦然），并且是**扣除双边吃单手续费之后的净门槛**——引擎会在阈值之上
@@ -93,7 +91,7 @@ cp .env.example .env                     # 密钥——交易必填
 **第一步：先采集数据**（不需要任何密钥）：
 
 ```bash
-python3 main.py --record-only --symbol SNDK --hedge lighter-rh
+python3 main.py --record-only --symbol SNDK --hedge lighter
 ```
 
 至少运行几个小时（最好一整天——溢价存在日内规律），数据写入
@@ -113,7 +111,7 @@ python3 tools/analyze.py --symbol SNDK
 
 ```bash
 pip install -r requirements-live.txt
-python3 main.py --symbol SNDK --hedge lighter-rh
+python3 main.py --symbol SNDK --hedge lighter
 ```
 
 不带 `--record-only` 运行时，只要两边行情就绪且溢价越过带宽，就会立即
@@ -146,21 +144,25 @@ python3 main.py --symbol SNDK --hedge lighter-rh
 约为 1.0），因此其表格与建议值可直接填入配置。`--hours 24`
 可只分析最近数据；溢价中枢会漂移，请定期重新分析并更新 `config.yaml`。
 
+网页控制台中的实盘任务支持每日自动更新：按上海时区每天 08:00 使用前一天
+08:00 到当天 08:00 的分钟数据计算三个阈值。数据不足或校验失败时会跳过更新；
+成功更新后才清理窗口外的旧分钟点。任务列表和详情会显示“今日阈值已更新”、
+“待更新”或“更新失败”，事件日志记录完整日期、旧值、新值和清理行数。
+
 ## 配置说明
 
 策略在 `config.yaml`（严格校验——未知键名直接报错），密钥在 `.env`。
 交易市场由命令行指定（`--symbol`、`--hedge`）。完整的双语注释参考：
 [config.example.yaml](config.example.yaml)。核心项：
 
-默认第一条腿是 Entropy 的 `io` dex；如果交易 ETH 这类 Hyperliquid 核心市场，
-请把 `entropy.dex` 写成空字符串 `""`。这时第一条腿是 Hyperliquid core，
-不再是 Entropy 市场，且仍需确认对冲腿有同名的 active 市场。
+默认第一条腿是 RH（`lighter-rh`）。Hyperliquid 场所需要通过
+`primary.venue` 或 `--primary` 显式选择；如果交易 ETH 这类核心市场，
+请把所选主腿的 `dex` 写成空字符串 `""`。
 
 | 键 | 含义 | 默认值 |
 |---|---|---|
 | `thresholds.midline_bps` | 溢价中枢（必须实测！） | — |
 | `thresholds.upper_bps` / `lower_bps` | 入场带宽（必须是有限数，可为负数） | — |
-| `thresholds.close_upper_bps` / `close_lower_bps` | 平仓带宽（必须是有限数，可为负数） | 同入场带宽 |
 | `entropy.symbol` / `hedge.symbol` | 各交易所的实际市场名称 | 同 `--symbol` |
 | `primary.venue` / `--primary` | 主腿交易所；使用时把旧 `entropy` 段替换成 `primary` | `entropy` |
 | `primary.symbol` | 使用 `primary` 段时的主腿市场名 | `--symbol` |
@@ -174,8 +176,6 @@ python3 main.py --symbol SNDK --hedge lighter-rh
 | `inventory.scale_bps` / `floor_frac` | 库存阶梯（仓位超过上限的 `floor_frac` 后额外加价） | 10 / 0.5 |
 | `execution.premium_persist_sec` | 信号需持续多久才触发 | 0.3 |
 | `execution.*` | 滑点保护、超时、对账周期等 | 见配置文件 |
-| `execution.latency_buffer_bps` / `slippage_buffer_bps` | 在信号门槛上预留实测延迟和成交滑点 | 0 |
-| `execution.max_book_skew_sec` | 两边盘口本地更新时间允许的最大差值 | 0.5 |
 | `recorder.*` | 分钟数据采集器 | 开启，`logs/{symbol}/minutes.csv` |
 | `logging.dashboard` / `logging.file` | 终端仪表盘；开启时日志写入文件 | 开启，`logs/{symbol}/engine.log` |
 
@@ -207,8 +207,7 @@ python3 main.py --record-only --symbol ANTH --hedge lighter-rh --config configs/
 
 `logging.trades_csv` 现在还会记录盘口年龄、两边盘口更新时间差、两条腿发送耗时、
 实际成交价、成交后的实际 edge，以及相对计划 edge 的损失。运行一段时间后，可以用
-这些字段估计 p95 延迟和滑点，再回填 `latency_buffer_bps` 与
-`slippage_buffer_bps`，不要直接猜一个固定值。
+成交记录会保留实际成交价和执行结果，便于复盘实际滑点。
 
 ## 密钥配置（`.env`，仅实盘需要）
 

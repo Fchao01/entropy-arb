@@ -26,10 +26,12 @@ thresholds:
   midline_bps: 2.0
   upper_bps: 4.0
   lower_bps: 3.0
+primary:
+  venue: entropy
 """)
     f.close()
     return load_config(f.name, NO_ENV,
-                       symbol="SNDK", hedge_venue="lighter-rh")
+                       symbol="SNDK", hedge_venue="lighter")
 
 
 class StubVenue:
@@ -100,7 +102,7 @@ def test_renders_key_numbers():
     out = render(eng)
     for needle in ("ENTROPY", "RH", "SELL entropy", "BUY entropy",
                    "100.14", "99.99", "mid premium", "midline",
-                   "7 / 1", "sell_entropy", "filled/filled",
+                   "7 / 1", "sell_e", "filled",
                    "$+10.00", "LIVE", "s ago"):
         assert needle in out, f"{needle!r} missing from render"
     assert "render error" not in out

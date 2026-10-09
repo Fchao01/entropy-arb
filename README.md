@@ -4,9 +4,9 @@
 
 **Web console:** `python3 web_main.py` serves two pages for configuring and managing multiple symbol processes and monitoring books, positions, minute charts, trades, and logs. Set a login password in `.env.web` first; tasks default to record-only. See the [console deployment guide](docs/web-console.md) for Linux/systemd, separate credentials, and HTTPS. Stopping a process does not close positions.
 
-Open-source two-venue perp arbitrage bot. The primary defaults to **Entropy**
-(the `io` builder dex on Hyperliquid), and can be selected with `primary.venue`
-or `--primary`. The other leg — the hedge — is one of:
+Open-source two-venue perp arbitrage bot. The primary defaults to **RH**
+(`lighter-rh`) and can be selected with `primary.venue` or `--primary`.
+The other leg — the hedge — is one of:
 
 | `--hedge` | venue | quote | taker fee | protocol |
 |---|---|---|---|---|
@@ -20,8 +20,7 @@ For RH primary + Arcus hedge, use [configs/rh-arcus.yaml](configs/rh-arcus.yaml)
 It sets Arcus to the user-provided fee of 2.25 bps (0.0225%). Start with
 `python3 main.py --record-only --symbol ETH --hedge arcus --config configs/rh-arcus.yaml`.
 See [primary-leg configuration](docs/primary.md) for credentials and threshold
-semantics. The strategy explanation below uses the default Entropy primary;
-for other primaries, premium is `(primary price / hedge price - 1) * 10000`.
+semantics. Premium is `(primary price / hedge price - 1) * 10000`.
 
 > **Referral links** — signing up through these supports this project:
 > - Entropy — Tier 4 referral, 100% rebates: <https://entropy.io/?r=yourquantguy>
@@ -62,8 +61,6 @@ midline − lower  ────────────────────�
   premia), so a zero-centered band would fire one direction only, cap out and
   never unwind. Measure where the premium actually sits and type it in.
 - `upper_bps` / `lower_bps` — the entry bands on each side of the midline.
-- `close_upper_bps` / `close_lower_bps` — narrower bands used when the
-  opposite pair position is already open; they default to the entry bands.
 
 Both hurdles are applied to **executable** prices (entropy bid vs hedge ask,
 and vice versa) and are **net of both venues' taker fees** — the engine adds
@@ -102,7 +99,7 @@ simulated fills.
 **1. Collect data first** (no credentials needed):
 
 ```bash
-python3 main.py --record-only --symbol SNDK --hedge lighter-rh
+python3 main.py --record-only --symbol SNDK --hedge lighter
 ```
 
 Let it run for at least a few hours (a day is better — premiums have
@@ -123,7 +120,7 @@ the smallest position caps that clear the venue minimums:
 
 ```bash
 pip install -r requirements-live.txt
-python3 main.py --symbol SNDK --hedge lighter-rh
+python3 main.py --symbol SNDK --hedge lighter
 ```
 
 Running without `--record-only` sends real orders immediately once both
@@ -167,16 +164,14 @@ errors), credentials in `.env`, and the markets on the command line
 (`--symbol`, `--hedge`). Full commented reference:
 [config.example.yaml](config.example.yaml). The essentials:
 
-The default first leg is Entropy's `io` dex. For a Hyperliquid core market
-such as ETH, set `entropy.dex: ""`; that makes the first leg Hyperliquid core,
-not an Entropy market, and the hedge venue must still list the same active
-symbol.
+The default first leg is RH (`lighter-rh`). Hyperliquid venues remain
+available through an explicit `primary.venue` or `--primary` selection; for a
+Hyperliquid core market such as ETH, set the selected primary's `dex: ""`.
 
 | key | meaning | default |
 |---|---|---|
 | `thresholds.midline_bps` | premium center (measure it!) | — |
 | `thresholds.upper_bps` / `lower_bps` | entry bands (finite values; negative values allowed) | — |
-| `thresholds.close_upper_bps` / `close_lower_bps` | closing bands (finite; negative values allowed) | entry bands |
 | `entropy.symbol` / `hedge.symbol` | exact market name on each venue | `--symbol` |
 | `primary.venue` / `--primary` | select primary; replace legacy `entropy` section with `primary` | `entropy` |
 | `primary.symbol` | exact symbol when using the `primary` section | `--symbol` |
@@ -190,8 +185,6 @@ symbol.
 | `inventory.scale_bps` / `floor_frac` | inventory ladder (extra bps past `floor_frac` of the cap) | 10 / 0.5 |
 | `execution.premium_persist_sec` | edge must persist before firing | 0.3 |
 | `execution.*` | slippage bounds, timeouts, reconcile cadence… | see file |
-| `execution.latency_buffer_bps` / `slippage_buffer_bps` | measured p95 cost reserves added to the hurdle | 0 |
-| `execution.max_book_skew_sec` | maximum local receipt-time gap between books | 0.5 |
 | `recorder.*` | minute-data recorder | on, `logs/{symbol}/minutes.csv` |
 | `logging.dashboard` / `logging.file` | Rich dashboard on a tty; log file while it runs | on, `logs/{symbol}/engine.log` |
 

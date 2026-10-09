@@ -28,7 +28,8 @@ import os
 import signal
 import sys
 
-from entropy_arb.config import HEDGE_VENUES, PRIMARY_VENUES, ConfigError, load_config
+from entropy_arb.config import (DEFAULT_PRIMARY_VENUE, HEDGE_VENUES,
+                                PRIMARY_VENUES, ConfigError, load_config)
 from entropy_arb.engine import Engine
 
 
@@ -38,7 +39,7 @@ def setup_logging(level: str, log_file: str = None,
     root.setLevel(getattr(logging, level, logging.INFO))
     fmt = logging.Formatter(
         "%(asctime)s.%(msecs)03d %(levelname)-7s %(name)s: %(message)s",
-        datefmt="%H:%M:%S")
+        datefmt="%Y-%m-%d %H:%M:%S")
     if log_file:
         d = os.path.dirname(log_file)
         if d:
@@ -110,7 +111,7 @@ def main() -> None:
                    help=f"hedge venue, one of: {', '.join(HEDGE_VENUES)} / "
                         f"对冲腿，选择一个交易所")
     p.add_argument("--primary", choices=PRIMARY_VENUES, default=None,
-                   help="primary venue; overrides YAML primary.venue (default: entropy) / 主腿交易所")
+                   help=f"primary venue; overrides YAML primary.venue (default: {DEFAULT_PRIMARY_VENUE}) / 主腿交易所")
     p.add_argument("--config", default="config.yaml",
                    help="strategy config (default: config.yaml)")
     p.add_argument("--env-file", default=".env",

@@ -11,11 +11,11 @@ is an error rather than a setting that silently does nothing.
 
 Threshold model (fixed numbers the user derives from recorded minute data):
 
-    premium_bps = (entropy_price / hedge_price - 1) * 10_000
+    premium_bps = (primary_price / hedge_price - 1) * 10_000
 
-    SELL entropy / BUY hedge  fires when the executable premium
+    SELL primary / BUY hedge  fires when the executable premium
         (entropy bid over hedge ask) >= midline_bps + upper_bps
-    BUY entropy / SELL hedge  fires when the executable premium
+    BUY primary / SELL hedge  fires when the executable premium
         (entropy ask under hedge bid) <= midline_bps - lower_bps
 
     Both hurdles are net of both venues' taker fees, so a full round trip
@@ -36,6 +36,7 @@ HL_WS_URL = "wss://api.hyperliquid.xyz/ws"   # official ws — the only HL feed 
 
 HEDGE_VENUES = ("lighter", "lighter-rh", "tradexyz", "arcus", "entropy")
 PRIMARY_VENUES = ("entropy", "lighter", "lighter-rh", "tradexyz", "arcus")
+DEFAULT_PRIMARY_VENUE = "lighter-rh"
 
 ARCUS_ENDPOINTS = {
     "mainnet": ("https://api.arcus.xyz", "wss://api.arcus.xyz/v1/ws"),
@@ -127,8 +128,6 @@ class Config:
     midline_bps: float
     upper_bps: float
     lower_bps: float
-    close_upper_bps: float
-    close_lower_bps: float
     # sizing
     take_fraction: float
     max_order_notional: float
@@ -149,9 +148,6 @@ class Config:
     reconcile_sec: float
     venue_probe_sec: float
     http_keepalive_sec: float
-    latency_buffer_bps: float
-    slippage_buffer_bps: float
-    max_book_skew_sec: float
     # recorder
     recorder_enabled: bool
     recorder_csv: str
@@ -164,7 +160,7 @@ class Config:
     # runtime
     hl_api_url: str = HL_API_URL
     hl_ws_url: str = HL_WS_URL
-    primary_venue: str = "entropy"
+    primary_venue: str = DEFAULT_PRIMARY_VENUE
 
     @property
     def primary(self) -> VenueConf:
@@ -199,8 +195,6 @@ _SCHEMA: Dict[str, Any] = {
         "midline_bps": float,
         "upper_bps": float,
         "lower_bps": float,
-        "close_upper_bps": float,
-        "close_lower_bps": float,
     },
     "entropy": {
         "symbol": str,
@@ -241,9 +235,6 @@ _SCHEMA: Dict[str, Any] = {
         "reconcile_sec": float,
         "venue_probe_sec": float,
         "http_keepalive_sec": float,
-        "latency_buffer_bps": float,
-        "slippage_buffer_bps": float,
-        "max_book_skew_sec": float,
     },
     "recorder": {
         "enabled": bool,
@@ -293,7 +284,7 @@ def _get(d: dict, section: str, key: str, default):
 
 
 def _path_for_market(template: str, symbol: str, hedge_venue: str,
-                     primary_venue: str = "entropy") -> str:
+                     primary_venue: str = DEFAULT_PRIMARY_VENUE) -> str:
     """Expand per-market output paths while allowing fixed custom paths."""
     try:
         return template.format(symbol=symbol, hedge=hedge_venue, primary=primary_venue)
@@ -403,7 +394,10 @@ def load_config(config_file: str = "config.yaml", env_file: str = ".env", *,
             f"--hedge must be one of {list(HEDGE_VENUES)}, got "
             f"{hedge_venue!r} / --hedge 必须是 {list(HEDGE_VENUES)} 之一")
 
-    primary_venue = primary_venue or _get(raw, "primary", "venue", "entropy")
+    legacy_entropy_config = "entropy" in raw and "primary" not in raw
+    primary_venue = (primary_venue
+                     or _get(raw, "primary", "venue",
+                             "entropy" if legacy_entropy_config else DEFAULT_PRIMARY_VENUE))
     if primary_venue not in PRIMARY_VENUES:
         raise ConfigError(f"primary.venue / --primary must be one of {list(PRIMARY_VENUES)}")
     if "primary" in raw and "entropy" in raw:
@@ -427,9 +421,7 @@ def load_config(config_file: str = "config.yaml", env_file: str = ".env", *,
                               f"数据计算后填入")
     midline = float(thr["midline_bps"])
     upper, lower = float(thr["upper_bps"]), float(thr["lower_bps"])
-    close_upper = float(_get(raw, "thresholds", "close_upper_bps", upper))
-    close_lower = float(_get(raw, "thresholds", "close_lower_bps", lower))
-    if not all(math.isfinite(value) for value in (midline, upper, lower, close_upper, close_lower)):
+    if not all(math.isfinite(value) for value in (midline, upper, lower)):
         raise ConfigError("threshold values must be finite numbers")
 
     take_fraction = float(_get(raw, "sizing", "take_fraction", 0.5))
@@ -448,17 +440,10 @@ def load_config(config_file: str = "config.yaml", env_file: str = ".env", *,
             or (entropy.kind == hedge.kind == "hl" and entropy.hl_dex == hedge.hl_dex)):
         raise ConfigError("primary and hedge resolve to the same venue / 主腿与对冲腿不能是同一个交易所")
 
-    latency_buffer_bps = float(_get(raw, "execution", "latency_buffer_bps", 0.0))
-    slippage_buffer_bps = float(_get(raw, "execution", "slippage_buffer_bps", 0.0))
-    max_book_skew_sec = float(_get(raw, "execution", "max_book_skew_sec", 0.5))
     leg_slippage_bps = float(_get(raw, "execution", "leg_slippage_bps", 50.0))
     hedge_slippage_bps = float(_get(raw, "execution", "hedge_slippage_bps", 20.0))
-    if latency_buffer_bps < 0 or slippage_buffer_bps < 0:
-        raise ConfigError("execution latency/slippage buffers must be >= 0")
     if leg_slippage_bps < 0 or hedge_slippage_bps < 0:
         raise ConfigError("execution slippage limits must be >= 0")
-    if max_book_skew_sec <= 0:
-        raise ConfigError("execution.max_book_skew_sec must be > 0")
 
     return Config(
         symbol=symbol,
@@ -469,8 +454,6 @@ def load_config(config_file: str = "config.yaml", env_file: str = ".env", *,
         midline_bps=midline,
         upper_bps=upper,
         lower_bps=lower,
-        close_upper_bps=close_upper,
-        close_lower_bps=close_lower,
         take_fraction=take_fraction,
         max_order_notional=float(_get(raw, "sizing", "max_order_notional_usd", 500.0)),
         min_order_notional=float(_get(raw, "sizing", "min_order_notional_usd", 10.0)),
@@ -488,9 +471,6 @@ def load_config(config_file: str = "config.yaml", env_file: str = ".env", *,
         reconcile_sec=float(_get(raw, "execution", "reconcile_sec", 15.0)),
         venue_probe_sec=float(_get(raw, "execution", "venue_probe_sec", 30.0)),
         http_keepalive_sec=float(_get(raw, "execution", "http_keepalive_sec", 10.0)),
-        latency_buffer_bps=latency_buffer_bps,
-        slippage_buffer_bps=slippage_buffer_bps,
-        max_book_skew_sec=max_book_skew_sec,
         recorder_enabled=bool(_get(raw, "recorder", "enabled", True)),
         recorder_csv=_path_for_market(
             _get(raw, "recorder", "csv", "logs/{symbol}/minutes.csv"),

@@ -10,24 +10,23 @@
 #
 # WHICH MARKETS to trade is NOT in this file — you state it explicitly on
 # every start with command-line flags:
-#     python3 main.py --symbol SNDK --hedge lighter-rh
-# By default one leg is Entropy (the `io` builder dex); for a core market such
-# as ETH, set `entropy.dex: ""` in the strategy file. --hedge picks the other:
+#     python3 main.py --symbol SNDK --hedge lighter
+# By default the primary leg is RH (`lighter-rh`); `--hedge` picks the other:
 #   lighter      Lighter mainnet            (USDC, 0 bps taker)
 #   lighter-rh   Lighter Robinhood chain    (USDG, 0 bps taker)
 #   tradexyz     Hyperliquid trade.xyz dex  (USDC, ~1 bps taker)
 #   arcus        Arcus perpetuals          (USD, set verified account fee)
 # 交易哪个市场不在本文件中配置——每次启动时用命令行参数显式指定：
-#     python3 main.py --symbol SNDK --hedge lighter-rh
-# 默认主腿是 Entropy。其他主腿使用 primary.venue 或 --primary；
-# 将下面 entropy 段替换为 primary 段，不要同时保留。详见 docs/primary.md。
+#     python3 main.py --symbol SNDK --hedge lighter
+# 默认主腿是 RH（`lighter-rh`）。其他主腿使用 primary.venue 或 --primary；
+# 下面已经使用 primary 段。详见 docs/primary.md。
 # RH + Arcus 的完整示例见 configs/rh-arcus.yaml，Arcus 费率填 2.25 bps。
 
 # ============================ THE SIGNAL / 信号 ============================
-# premium_bps = (Entropy price / hedge price - 1) * 10000
+# premium_bps = (primary price / hedge price - 1) * 10000
 #
-#   SELL entropy + BUY hedge   when executable premium >= midline + upper
-#   BUY entropy + SELL hedge   when executable premium <= midline - lower
+#   SELL primary + BUY hedge   when executable premium >= midline + upper
+#   BUY primary + SELL hedge   when executable premium <= midline - lower
 #
 # Both hurdles are net of taker fees (the engine adds fees on top), so one
 # full round trip nets >= upper + lower bps after fees by construction.
@@ -42,27 +41,21 @@
 # 扣费后净赚 >= upper + lower bps。
 thresholds:
   midline_bps: 0.0     # persistent premium center / 溢价长期中枢
-  upper_bps: 4.0       # entry above midline: sell entropy / 中枢上方入场带宽
-  lower_bps: 4.0       # entry below midline: buy entropy / 中枢下方入场带宽
-  # Closing bands are used when the opposite pair position is already open.
-  # Keep them equal to the entry bands to preserve the old behavior, or make
-  # them smaller to unwind inventory sooner and reduce threshold churn.
-  # 已有相反仓位时使用平仓带宽；与入场带宽相同可保持原有行为，调小后可更早平仓。
-  close_upper_bps: 4.0
-  close_lower_bps: 4.0
+  upper_bps: 4.0       # entry above midline: sell primary / 中枢上方入场带宽
+  lower_bps: 4.0       # entry below midline: buy primary / 中枢下方入场带宽
 
 # ======================== VENUES / 交易所参数 ==============================
-entropy:
+primary:
+  venue: lighter-rh
   # Optional venue-specific symbol; otherwise uses --symbol.
   # 名称不同时可指定本交易所名称；不填则使用 --symbol。
   # symbol: ANTH
-  dex: io                    # Entropy's dex; use "" for Hyperliquid core (e.g. ETH) / Entropy 的 dex 名；核心市场（如 ETH）填 ""
   taker_fee_bps: 0.0         # taker fee / 吃单手续费
   max_position_usd: 1000     # position cap / 持仓上限（美元）
-  max_orders_per_min: 120    # order-send budget, sliding 60s / 每分钟下单预算
+  max_orders_per_min: 30     # order-send budget, sliding 60s / 每分钟下单预算
 
 hedge:
-  # symbol: ANTHROPIC  # RH name corresponding to Entropy ANTH / RH 对应名称
+  # symbol: ANTHROPIC  # RH market name / RH 市场名称
   # symbol: SNDK-USD   # Arcus exact market name / Arcus 市场名称
   taker_fee_bps: 0.0         # Lighter venues: 0; tradexyz: ~1.0
   # Arcus requires this field: replace 0.0 with your verified account fee.
@@ -74,7 +67,7 @@ hedge:
 # Arcus only; credentials must belong to this network and subaccount.
 # 仅 Arcus 使用；API 密钥必须与网络、子账户一致，详见 docs/arcus.md。
 arcus:
-  network: mainnet           # mainnet | testnet; Entropy remains mainnet
+  network: mainnet           # mainnet | testnet
 
 # ========================= SIZING / 下单规模 ===============================
 sizing:
@@ -106,9 +99,6 @@ execution:
   reconcile_sec: 15.0          # on-chain position sync cadence / 链上持仓核对周期
   venue_probe_sec: 30.0        # probe cadence for a down venue / 故障交易所探测周期
   http_keepalive_sec: 10.0     # keep order-path TLS warm; 0 = off / 订单链路保活
-  latency_buffer_bps: 0.0      # measured p95 latency reserve / 延迟损失预留
-  slippage_buffer_bps: 0.0     # measured p95 fill reserve / 实际滑点预留
-  max_book_skew_sec: 0.5       # max receipt-time gap between two books / 两边盘口最大时间差
 
 # ================== DATA RECORDER / 数据采集 ===============================
 # Always-on while the bot runs: samples both real order books 1/sec and

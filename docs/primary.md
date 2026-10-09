@@ -1,7 +1,7 @@
 # 配置主腿
 
 主腿可以选择 `entropy`、`lighter`、`lighter-rh`、`tradexyz`、`arcus`。
-默认仍为 Entropy，现有 `entropy:` YAML 和启动命令保持兼容。
+默认主腿为 RH（`lighter-rh`）；现有明确写了 `entropy:` 的旧 YAML 仍保持兼容。
 对冲腿也支持这五个选项，通过 `--hedge` 指定。两边不能解析到同一个市场。
 
 ## RH 主腿 + Arcus 对冲
@@ -71,8 +71,7 @@ premium_bps = (主腿价格 / 对冲腿价格 - 1) × 10000
 ```
 
 `upper_bps` 控制卖主腿、买对冲腿；`lower_bps` 控制买主腿、卖对冲腿。
-平仓带宽继续使用 `close_upper_bps / close_lower_bps`。手续费由引擎计入，
-无须再手动叠加到带宽。更换主腿、对冲腿或交换两腿后，需要重新采集并分析；
+手续费由引擎计入，无须再手动叠加到带宽。更换主腿、对冲腿或交换两腿后，需要重新采集并分析；
 原组合的中枢和阈值不能直接照搬。
 
 示例将日志隔离到 `logs/lighter-rh-arcus/ETH/`。可以使用路径占位符
