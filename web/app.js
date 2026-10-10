@@ -7,7 +7,7 @@ const active = (task) => ["running", "stopping"].includes(task.state);
 const escapeHtml = (value) => String(value ?? "").replace(/[&<>"']/g, (character) => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"}[character]));
 const number = (value, digits = 2) => value == null || !Number.isFinite(Number(value)) ? "—" : Number(value).toLocaleString("en-US", {maximumFractionDigits: digits, minimumFractionDigits: digits});
 const signed = (value, digits = 2) => value == null ? "—" : `${Number(value) >= 0 ? "+" : ""}${number(value, digits)}`;
-const money = (value) => value == null ? "—" : `$${number(value)}`;
+const money = (value, digits = 2) => value == null ? "—" : `$${number(value, digits)}`;
 const timeLabel = (timestamp) => timestamp ? new Date(timestamp * 1000).toLocaleString("zh-CN", {hour12: false}) : "—";
 const duration = (task) => {
   if (!task.started_at) return "—";
@@ -230,9 +230,12 @@ function renderMonitor() {
   const metrics = task.status;
   const fresh = active(task) && !task.status_stale;
   const metricNote = fresh ? "当前运行会话" : metrics ? "最后快照 · 当前非实时" : "等待首次状态快照";
-  const telegramLabel = task.mode === "live" && metrics ? ` · Telegram ${metrics.telegram_enabled ? "已启用" : "未配置"}` : "";
+  const telegram = metrics?.telegram;
+  const telegramState = !metrics ? "" : !metrics.telegram_enabled ? "未配置" : telegram?.status === "failed" ? "发送失败" : `已启用 · 已发 ${telegram?.sent ?? 0}`;
+  const telegramProfile = telegram?.profile ? ` · ${escapeHtml(telegram.profile)}` : "";
+  const telegramLabel = task.mode === "live" && metrics ? ` · Telegram${telegramProfile} ${telegramState}` : "";
   element("monitor-summary").innerHTML = `<div><strong>${escapeHtml(task.symbol)}</strong><span>${escapeHtml(venues[task.primary])} ⇄ ${escapeHtml(venues[task.hedge])}</span><span class="badge ${task.mode}">${task.mode === "live" ? "LIVE · 实盘" : "DATA · 采集"}</span>${badge(task)}</div><small>${fresh ? "实时快照" : "最后快照"} ${timeLabel(metrics?.updated_at)}${telegramLabel} ${task.exit_code == null ? "" : ` · 退出码 ${task.exit_code}`}</small>`;
-  element("monitor-stats").innerHTML = stat("双腿中间价溢价", signed(metrics?.premium_bps), metricNote, "⇄", "bps") + stat("净敞口", metrics?.net_delta == null ? "—" : signed(metrics.net_delta, 6), "双腿基础币数量合计", "⊞") + stat("会话盈亏 · MTM", metrics?.session_pnl == null ? "—" : `$${signed(metrics.session_pnl)}`, "按盘口标记的会话估值变化，非已实现收益", "↗") + stat("套利执行 / 对冲", `${metrics?.trades ?? 0} / ${metrics?.hedges ?? 0}`, `当前会话记录 ${metrics?.minute_rows ?? 0} 条分钟数据`, "▥");
+  element("monitor-stats").innerHTML = stat("双腿中间价溢价", signed(metrics?.premium_bps), metricNote, "⇄", "bps") + stat("净敞口", metrics?.net_delta == null ? "—" : signed(metrics.net_delta, 6), "双腿基础币数量合计", "⊞") + stat("会话盈亏 · MTM", metrics?.session_pnl == null ? "—" : `$${signed(metrics.session_pnl)}`, "按盘口标记的会话估值变化，非已实现收益", "↗") + stat("套利执行 / 对冲", `${metrics?.trades ?? 0} / ${metrics?.hedges ?? 0}`, `当前会话记录 ${metrics?.minute_rows ?? 0} 条分钟数据`, "▥") + stat("总成交额 · 双腿合计", money(metrics?.session_volume_usd), "实际成交名义金额，不是账户权益", "⇄") + stat("总利润 · 已实现", money(metrics?.session_profit_usd, 4), "匹配成交净利润，已扣手续费", "↗") + stat("总手续费", money(metrics?.session_fees_usd, 4), "两条腿及后续对冲手续费", "▥");
   element("venue-cards").innerHTML = metrics?.venues?.length ? metrics.venues.map((venue) => `<article class="venue-card"><div class="venue-top"><div><b>${escapeHtml(venue.name)}</b><small>${escapeHtml(venue.symbol)}</small></div><span class="badge ${fresh && venue.fresh && !venue.down ? "" : "stale"}">${!fresh ? "非实时" : venue.down ? "连接异常" : venue.fresh ? `正常 · ${number(venue.age_sec, 1)}s` : "行情过期"}</span></div><div class="venue-values"><div><span>买一 / 卖一</span><strong class="number">${number(venue.bid, 5)} / ${number(venue.ask, 5)}</strong></div><div><span>持仓数量</span><strong>${signed(venue.position, 6)}</strong></div><div><span>持仓金额 · USD</span><strong>${money(venue.position_usd)}</strong></div><div><span>账户权益 / 可用</span><strong>${money(venue.equity)} / ${money(venue.free)}</strong></div><div><span>会话成交额 · USD</span><strong>${money(venue.volume_usd)}</strong></div></div></article>`).join("") : `<div class="empty-state"><h3>等待市场连接</h3><p>启动任务后将展示真实双腿盘口。启动失败请查看下方日志。</p></div>`;
   drawChart(state.detail.minutes);
   renderLogs();

@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import time
 
 import aiohttp
 
@@ -21,6 +22,11 @@ class TelegramNotifier:
         self._owned_session = False
         self._send_lock = None
         self._next_send_at = 0.0
+        self.last_status = "disabled" if not self.enabled else "idle"
+        self.last_error = "" if self.enabled else "missing bot token or chat id"
+        self.sent_count = 0
+        self.failed_count = 0
+        self.last_sent_at = None
 
     @property
     def enabled(self) -> bool:
@@ -33,7 +39,11 @@ class TelegramNotifier:
 
     async def send(self, text: str) -> bool:
         if not self.enabled:
+            self.last_status = "disabled"
+            self.last_error = "missing bot token or chat id"
+            self.failed_count += 1
             return False
+        self.last_status = "pending"
         if self._send_lock is None:
             self._send_lock = asyncio.Lock()
         async with self._send_lock:
@@ -58,6 +68,10 @@ class TelegramNotifier:
                     if response.status == 200:
                         body = await response.json(content_type=None)
                         if body.get("ok"):
+                            self.last_status = "sent"
+                            self.last_error = ""
+                            self.sent_count += 1
+                            self.last_sent_at = time.time()
                             return True
                     retry_after = 0
                     if response.status == 429:
@@ -68,12 +82,18 @@ class TelegramNotifier:
                             await asyncio.sleep(max(retry_after, 0.5))
                             continue
                     detail = (await response.text())[:300]
+                    self.last_status = "failed"
+                    self.last_error = f"HTTP {response.status}: {detail}"
+                    self.failed_count += 1
                     log.warning("Telegram notification failed (%s): %s", response.status, detail)
                     return False
             except Exception as error:
                 if attempt < 2:
                     await asyncio.sleep(0.5 * (attempt + 1))
                     continue
+                self.last_status = "failed"
+                self.last_error = str(error)[:300]
+                self.failed_count += 1
                 log.warning("Telegram notification failed: %s", error)
         return False
 

@@ -878,6 +878,7 @@ class TaskManager:
                    if key not in CREDENTIAL_NAMES and key != "WEB_PASSWORD"}
             if task["mode"] == "live":
                 env.update(credentials)
+                env["TELEGRAM_PROFILE"] = task["profile"]
             env["PYTHONUNBUFFERED"] = "1"
             command = [sys.executable, "-u", str(self.root / "main.py"),
                        "--symbol", task["symbol"], "--primary", task["primary"],

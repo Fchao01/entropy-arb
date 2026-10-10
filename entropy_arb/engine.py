@@ -78,6 +78,7 @@ class Engine:
         self.hedges = 0
         self.total_exp_edge = 0.0
         self.total_fill_edge = 0.0
+        self.total_fees_usd = 0.0
         self.start_ts = time.time()
         self._last_skiplog = 0.0
         self._poke_due: Optional[float] = None
@@ -100,9 +101,11 @@ class Engine:
         # per-execution records for the dashboard (newest last)
         self.recent_trades: deque = deque(maxlen=50)
         self.telegram = TelegramNotifier()
+        self.telegram_profile = os.environ.get("TELEGRAM_PROFILE", "default")
         self._telegram_tasks: set = set()
         self._telegram_disabled_logged = False
-        log.info("[TELEGRAM] trade notifications %s",
+        log.info("[TELEGRAM] profile=%s; trade notifications %s",
+                 self.telegram_profile,
                  "enabled" if self.telegram.enabled else
                  "disabled: missing bot token or chat id")
 
@@ -533,6 +536,7 @@ class Engine:
         buy_fee_usd = bfill * bpx * plan.buy_fee
         sell_fee_usd = sfill * spx * plan.sell_fee
         fees_usd = buy_fee_usd + sell_fee_usd
+        self.total_fees_usd += fees_usd
         if bfill:
             buy.cash -= bfill * bpx * (1 + plan.buy_fee)
             buy.volume_usd += bfill * bpx
@@ -711,6 +715,7 @@ class Engine:
                     if fill:
                         px = info.get("avg_px") or limit
                         fee = v.fee_bps / 1e4
+                        self.total_fees_usd += fill * px * fee
                         v.cash += fill * px * (1 - fee) if is_sell \
                             else -fill * px * (1 + fee)
                         v.volume_usd += fill * px
