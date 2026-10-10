@@ -12,7 +12,7 @@ from aiohttp.test_utils import TestClient, TestServer
 from entropy_arb.config import ConfigError, load_config
 from entropy_arb.engine import Engine
 from entropy_arb.status import clean_numbers, snapshot
-from entropy_arb.web import ConsoleError, ROOT, TaskManager, create_app, tail_csv
+from entropy_arb.web import ConsoleError, ROOT, TaskManager, create_app, paged_csv, tail_csv
 
 STRATEGY = """thresholds:
   midline_bps: 0
@@ -304,6 +304,20 @@ def test_csv_tail_is_bounded_and_handles_partial_rows(tmp_path):
     rows = tail_csv(path, 120)
     assert len(rows) == 120 and rows[0]["minute_ts"] == "80"
     assert rows[-1]["minute_ts"] == "199"
+
+
+def test_csv_pagination_returns_newest_rows_first(tmp_path):
+    path = tmp_path / "trades.csv"
+    path.write_text("ts,fill_edge_usd\n" + "".join(f"{index},{index / 10}\n" for index in range(25)))
+
+    first = paged_csv(path)
+    second = paged_csv(path, page=2)
+    last = paged_csv(path, page=3)
+
+    assert first["total"] == 25 and first["pages"] == 3
+    assert first["page"] == 1 and [row["ts"] for row in first["rows"]] == [str(index) for index in range(24, 14, -1)]
+    assert [row["ts"] for row in second["rows"]] == [str(index) for index in range(14, 4, -1)]
+    assert [row["ts"] for row in last["rows"]] == [str(index) for index in range(4, -1, -1)]
 
 
 def test_configuration_library_privacy_and_retained_values(tmp_path, monkeypatch):

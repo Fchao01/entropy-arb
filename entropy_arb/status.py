@@ -17,12 +17,18 @@ def snapshot(engine) -> dict:
     venues = []
     for venue in engine.venues.values():
         book = venue.book
+        bid = book.best_bid()
+        ask = book.best_ask()
+        position = venue.position if not engine.record_only else None
+        mid = ((bid + ask) / 2.0 if bid is not None and ask is not None
+               and bid > 0 and ask > 0 else None)
         venues.append({
             "key": venue.key, "name": venue.name, "symbol": venue.conf.symbol,
-            "bid": book.best_bid(), "ask": book.best_ask(),
+            "bid": bid, "ask": ask,
             "fresh": book.is_fresh(engine.cfg.staleness_sec),
             "age_sec": now - book.last_update_ts if book.ready else None,
-            "position": venue.position if not engine.record_only else None,
+            "position": position,
+            "position_usd": abs(position) * mid if position is not None and mid is not None else None,
             "equity": venue.equity, "free": venue.free,
             "volume_usd": venue.volume_usd,
             "limited": engine._venue_limited(venue),
@@ -34,6 +40,7 @@ def snapshot(engine) -> dict:
         "updated_at": now, "started_at": engine.start_ts,
         "ready": ready, "halted": engine.halted, "paused": engine.manual_paused,
         "mode": "record" if engine.record_only else "live",
+        "telegram_enabled": engine.telegram.enabled,
         "premium_bps": engine.premium_bps() if ready else None,
         "net_delta": sum(venue.position for venue in engine.venues.values()) if live else None,
         "session_pnl": engine.session_pnl() if live else None,

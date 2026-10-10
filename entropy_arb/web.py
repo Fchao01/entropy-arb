@@ -108,6 +108,27 @@ def tail_csv(path: Path, limit=120) -> list:
     return [dict(zip(header, row)) for row in rows if len(row) == len(header) and row != header][-limit:]
 
 
+def paged_csv(path: Path, page=1, page_size=10) -> dict:
+    page = max(1, int(page))
+    page_size = min(100, max(1, int(page_size)))
+    if not path.exists():
+        return {"rows": [], "total": 0, "page": 1, "page_size": page_size, "pages": 0}
+    with path.open("r", encoding="utf-8", newline="") as handle:
+        rows = list(csv.DictReader(handle))
+    total = len(rows)
+    pages = math.ceil(total / page_size) if total else 0
+    if pages:
+        page = min(page, pages)
+        end = total - (page - 1) * page_size
+        start = max(0, end - page_size)
+        rows = list(reversed(rows[start:end]))
+    else:
+        page = 1
+        rows = []
+    return {"rows": rows, "total": total, "page": page,
+            "page_size": page_size, "pages": pages}
+
+
 def market_resource(venue) -> tuple:
     symbol = venue.symbol.upper().split(":")[-1]
     if venue.kind == "arcus" and symbol.endswith("-USD"):
@@ -1158,9 +1179,19 @@ def create_app(manager: TaskManager, password: str, secure_cookie=False):
     async def detail(request):
         task = manager.get(request.match_info["id"])
         directory = manager.directory(task["id"])
+        try:
+            trades_page = int(request.query.get("trades_page", "1"))
+            trades_page_size = int(request.query.get("trades_page_size", "10"))
+        except ValueError:
+            raise web.HTTPBadRequest(text="成交记录分页参数无效")
+        trades = paged_csv(directory / "trades.csv", trades_page, trades_page_size)
         return web.json_response(dict(task=manager.view(task),
                                       minutes=tail_csv(directory / "minutes.csv"),
-                                      trades=tail_csv(directory / "trades.csv", 50)))
+                                      trades=trades["rows"],
+                                      trades_total=trades["total"],
+                                      trades_page=trades["page"],
+                                      trades_page_size=trades["page_size"],
+                                      trades_pages=trades["pages"]))
 
     async def logs(request):
         task = manager.get(request.match_info["id"])

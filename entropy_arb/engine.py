@@ -40,6 +40,7 @@ CSV_HEADER = ["ts", "direction", "buy_venue", "sell_venue", "qty",
               "exp_edge_usd", "gross_edge_usd", "marginal_premium_bps",
               "midline_bps", "inv_add_bps", "ok", "buy_fill", "sell_fill",
               "buy_status", "sell_status", "fill_edge_usd",
+              "buy_fee_usd", "sell_fee_usd", "fees_usd",
               "book_age_ms", "book_skew_ms", "send_total_ms",
               "buy_send_ms", "sell_send_ms", "buy_avg_px", "sell_avg_px",
               "realized_edge_bps", "edge_shortfall_bps"]
@@ -100,6 +101,10 @@ class Engine:
         self.recent_trades: deque = deque(maxlen=50)
         self.telegram = TelegramNotifier()
         self._telegram_tasks: set = set()
+        self._telegram_disabled_logged = False
+        log.info("[TELEGRAM] trade notifications %s",
+                 "enabled" if self.telegram.enabled else
+                 "disabled: missing bot token or chat id")
 
     def ensure_async_state(self) -> None:
         """Create loop-bound events once the application loop is running."""
@@ -523,12 +528,15 @@ class Engine:
         sfill = sinfo["filled_base"]
         buy.position += bfill
         sell.position -= sfill
+        bpx = binfo.get("avg_px") or plan.buy_limit
+        spx = sinfo.get("avg_px") or plan.sell_limit
+        buy_fee_usd = bfill * bpx * plan.buy_fee
+        sell_fee_usd = sfill * spx * plan.sell_fee
+        fees_usd = buy_fee_usd + sell_fee_usd
         if bfill:
-            bpx = binfo.get("avg_px") or plan.buy_limit
             buy.cash -= bfill * bpx * (1 + plan.buy_fee)
             buy.volume_usd += bfill * bpx
         if sfill:
-            spx = sinfo.get("avg_px") or plan.sell_limit
             sell.cash += sfill * spx * (1 - plan.sell_fee)
             sell.volume_usd += sfill * spx
 
@@ -591,6 +599,8 @@ class Engine:
                       sell_send_ms=sell_send_ms,
                       buy_avg_px=binfo.get("avg_px"),
                       sell_avg_px=sinfo.get("avg_px"),
+                      buy_fee_usd=buy_fee_usd, sell_fee_usd=sell_fee_usd,
+                      fees_usd=fees_usd,
                       realized_edge_bps=realized_edge_bps,
                       edge_shortfall_bps=shortfall_bps)
         trade_volume = bfill * (binfo.get("avg_px") or plan.buy_limit) \
@@ -604,6 +614,9 @@ class Engine:
     def _notify_trade(self, direction, buy, sell, plan, ok, bfill, sfill,
                       buy_status, sell_status, fill_edge, trade_volume) -> None:
         if not self.telegram.enabled:
+            if not self._telegram_disabled_logged:
+                log.warning("[TELEGRAM] trade notification skipped: bot token or chat id is not available in this task process")
+                self._telegram_disabled_logged = True
             return
         message = trade_message(
             symbol=self.cfg.symbol, direction=direction,
@@ -616,7 +629,17 @@ class Engine:
             account_delta=self.account_delta())
         task = asyncio.create_task(self.telegram.send(message), name="telegram-trade")
         self._telegram_tasks.add(task)
-        task.add_done_callback(self._telegram_tasks.discard)
+        task.add_done_callback(self._telegram_finished)
+
+    def _telegram_finished(self, task) -> None:
+        self._telegram_tasks.discard(task)
+        if task.cancelled():
+            return
+        try:
+            if not task.result():
+                log.warning("[TELEGRAM] trade notification was not delivered")
+        except Exception:
+            log.exception("[TELEGRAM] trade notification task failed")
 
     def _total_volume(self) -> float:
         return sum(float(getattr(v, "volume_usd", 0.0) or 0.0)
@@ -709,6 +732,9 @@ class Engine:
     def _notify_hedge(self, venue, side, qty, status, fill, ok, net,
                       trade_volume) -> None:
         if not self.telegram.enabled:
+            if not self._telegram_disabled_logged:
+                log.warning("[TELEGRAM] hedge notification skipped: bot token or chat id is not available in this task process")
+                self._telegram_disabled_logged = True
             return
         message = hedge_message(symbol=self.cfg.symbol, venue=venue.name,
                                 side=side, qty=qty, status=status, fill=fill,
@@ -720,7 +746,7 @@ class Engine:
                                 account_delta=self.account_delta())
         task = asyncio.create_task(self.telegram.send(message), name="telegram-hedge")
         self._telegram_tasks.add(task)
-        task.add_done_callback(self._telegram_tasks.discard)
+        task.add_done_callback(self._telegram_finished)
 
     # --------------------------------------------------- reconcile / status
 
@@ -905,7 +931,8 @@ class Engine:
                  sfill, bstatus, sstatus, fill_edge, inv_bps, *,
                  book_age_ms=None, book_skew_ms=None, send_total_ms=None,
                  buy_send_ms=None, sell_send_ms=None, buy_avg_px=None,
-                 sell_avg_px=None, realized_edge_bps=None,
+                 sell_avg_px=None, buy_fee_usd=None, sell_fee_usd=None,
+                 fees_usd=None, realized_edge_bps=None,
                  edge_shortfall_bps=None) -> None:
         try:
             path = self.cfg.trades_csv
@@ -930,6 +957,9 @@ class Engine:
                             f"{self.cfg.midline_bps:.3f}",
                             f"{inv_bps:.3f}", int(ok), f"{bfill:.8g}",
                             f"{sfill:.8g}", bstatus, sstatus, f"{fill_edge:.4f}",
+                            "" if buy_fee_usd is None else f"{buy_fee_usd:.4f}",
+                            "" if sell_fee_usd is None else f"{sell_fee_usd:.4f}",
+                            "" if fees_usd is None else f"{fees_usd:.4f}",
                             "" if book_age_ms is None else f"{book_age_ms:.3f}",
                             "" if book_skew_ms is None else f"{book_skew_ms:.3f}",
                             "" if send_total_ms is None else f"{send_total_ms:.3f}",

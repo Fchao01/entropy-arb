@@ -1,7 +1,7 @@
 "use strict";
 
 const element = (id) => document.getElementById(id);
-const state = {tasks: [], meta: null, selected: null, page: location.pathname === "/monitor" ? "monitor" : "dex", authenticated: false, editing: null, detail: null, logs: null, logTab: "logs", busy: new Set(), polling: false, detailTask: null, detailTab: "logs", detailLogs: null, libraryKind: "yaml", libraryOriginal: null, tri: {candidates: [], snapshot: null, selectedSymbol: null}};
+const state = {tasks: [], meta: null, selected: null, page: location.pathname === "/monitor" ? "monitor" : "dex", authenticated: false, editing: null, detail: null, logs: null, logTab: "logs", tradesPage: 1, tradesPageSize: 10, busy: new Set(), polling: false, detailTask: null, detailTab: "logs", detailLogs: null, libraryKind: "yaml", libraryOriginal: null, tri: {candidates: [], snapshot: null, selectedSymbol: null}};
 const venues = {entropy: "Entropy", lighter: "Lighter", "lighter-rh": "RH", tradexyz: "Trade.xyz", arcus: "Arcus"};
 const active = (task) => ["running", "stopping"].includes(task.state);
 const escapeHtml = (value) => String(value ?? "").replace(/[&<>"']/g, (character) => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"}[character]));
@@ -230,9 +230,10 @@ function renderMonitor() {
   const metrics = task.status;
   const fresh = active(task) && !task.status_stale;
   const metricNote = fresh ? "当前运行会话" : metrics ? "最后快照 · 当前非实时" : "等待首次状态快照";
-  element("monitor-summary").innerHTML = `<div><strong>${escapeHtml(task.symbol)}</strong><span>${escapeHtml(venues[task.primary])} ⇄ ${escapeHtml(venues[task.hedge])}</span><span class="badge ${task.mode}">${task.mode === "live" ? "LIVE · 实盘" : "DATA · 采集"}</span>${badge(task)}</div><small>${fresh ? "实时快照" : "最后快照"} ${timeLabel(metrics?.updated_at)} ${task.exit_code == null ? "" : ` · 退出码 ${task.exit_code}`}</small>`;
+  const telegramLabel = task.mode === "live" && metrics ? ` · Telegram ${metrics.telegram_enabled ? "已启用" : "未配置"}` : "";
+  element("monitor-summary").innerHTML = `<div><strong>${escapeHtml(task.symbol)}</strong><span>${escapeHtml(venues[task.primary])} ⇄ ${escapeHtml(venues[task.hedge])}</span><span class="badge ${task.mode}">${task.mode === "live" ? "LIVE · 实盘" : "DATA · 采集"}</span>${badge(task)}</div><small>${fresh ? "实时快照" : "最后快照"} ${timeLabel(metrics?.updated_at)}${telegramLabel} ${task.exit_code == null ? "" : ` · 退出码 ${task.exit_code}`}</small>`;
   element("monitor-stats").innerHTML = stat("双腿中间价溢价", signed(metrics?.premium_bps), metricNote, "⇄", "bps") + stat("净敞口", metrics?.net_delta == null ? "—" : signed(metrics.net_delta, 6), "双腿基础币数量合计", "⊞") + stat("会话盈亏 · MTM", metrics?.session_pnl == null ? "—" : `$${signed(metrics.session_pnl)}`, "按盘口标记的会话估值变化，非已实现收益", "↗") + stat("套利执行 / 对冲", `${metrics?.trades ?? 0} / ${metrics?.hedges ?? 0}`, `当前会话记录 ${metrics?.minute_rows ?? 0} 条分钟数据`, "▥");
-  element("venue-cards").innerHTML = metrics?.venues?.length ? metrics.venues.map((venue) => `<article class="venue-card"><div class="venue-top"><div><b>${escapeHtml(venue.name)}</b><small>${escapeHtml(venue.symbol)}</small></div><span class="badge ${fresh && venue.fresh && !venue.down ? "" : "stale"}">${!fresh ? "非实时" : venue.down ? "连接异常" : venue.fresh ? `正常 · ${number(venue.age_sec, 1)}s` : "行情过期"}</span></div><div class="venue-values"><div><span>买一 / 卖一</span><strong class="number">${number(venue.bid, 5)} / ${number(venue.ask, 5)}</strong></div><div><span>持仓数量</span><strong>${signed(venue.position, 6)}</strong></div><div><span>账户权益 / 可用</span><strong>${money(venue.equity)} / ${money(venue.free)}</strong></div><div><span>会话成交额 · USD</span><strong>${money(venue.volume_usd)}</strong></div></div></article>`).join("") : `<div class="empty-state"><h3>等待市场连接</h3><p>启动任务后将展示真实双腿盘口。启动失败请查看下方日志。</p></div>`;
+  element("venue-cards").innerHTML = metrics?.venues?.length ? metrics.venues.map((venue) => `<article class="venue-card"><div class="venue-top"><div><b>${escapeHtml(venue.name)}</b><small>${escapeHtml(venue.symbol)}</small></div><span class="badge ${fresh && venue.fresh && !venue.down ? "" : "stale"}">${!fresh ? "非实时" : venue.down ? "连接异常" : venue.fresh ? `正常 · ${number(venue.age_sec, 1)}s` : "行情过期"}</span></div><div class="venue-values"><div><span>买一 / 卖一</span><strong class="number">${number(venue.bid, 5)} / ${number(venue.ask, 5)}</strong></div><div><span>持仓数量</span><strong>${signed(venue.position, 6)}</strong></div><div><span>持仓金额 · USD</span><strong>${money(venue.position_usd)}</strong></div><div><span>账户权益 / 可用</span><strong>${money(venue.equity)} / ${money(venue.free)}</strong></div><div><span>会话成交额 · USD</span><strong>${money(venue.volume_usd)}</strong></div></div></article>`).join("") : `<div class="empty-state"><h3>等待市场连接</h3><p>启动任务后将展示真实双腿盘口。启动失败请查看下方日志。</p></div>`;
   drawChart(state.detail.minutes);
   renderLogs();
   const base = `/api/tasks/${task.id}/download/`;
@@ -279,10 +280,23 @@ function renderLogs() {
     button.classList.toggle("selected", selected);
     button.setAttribute("aria-selected", String(selected));
   });
+  const pagination = element("trades-pagination");
   if (trades) {
-    const rows = [...(state.detail?.trades || [])].reverse();
-    element("trades-output").innerHTML = rows.length ? `<table class="records"><thead><tr><th>时间</th><th>方向</th><th>数量</th><th>买 / 卖成交</th><th>成交价差 USD</th><th>结果</th></tr></thead><tbody>${rows.map((row) => `<tr><td>${timeLabel(Number(row.ts))}</td><td>${escapeHtml(row.direction)}</td><td>${escapeHtml(row.qty)}</td><td>${escapeHtml(row.buy_fill)} / ${escapeHtml(row.sell_fill)}</td><td>${escapeHtml(row.fill_edge_usd)}</td><td><span class="badge ${row.ok === "1" ? "" : "failed"}">${row.ok === "1" ? "完成" : "异常"}</span></td></tr>`).join("")}</tbody></table>` : `<div class="empty-state"><h3>暂无成交记录</h3><p>采集模式不发送订单。实盘执行后，记录会显示在这里。</p></div>`;
+    const rows = state.detail?.trades || [];
+    const total = Number(state.detail?.trades_total || 0);
+    const page = Number(state.detail?.trades_page || state.tradesPage || 1);
+    const pages = Number(state.detail?.trades_pages || 0);
+    state.tradesPage = page;
+    element("trades-output").innerHTML = rows.length ? `<table class="records"><thead><tr><th>时间</th><th>方向</th><th>数量</th><th>买 / 卖成交</th><th>手续费 USD</th><th>利润 USD</th><th>结果</th></tr></thead><tbody>${rows.map((row) => {
+      const profit = Number(row.fill_edge_usd);
+      const profitClass = Number.isFinite(profit) ? profit >= 0 ? "positive" : "negative" : "";
+      return `<tr><td>${timeLabel(Number(row.ts))}</td><td>${escapeHtml(row.direction)}</td><td>${escapeHtml(row.qty)}</td><td>${escapeHtml(row.buy_fill)} / ${escapeHtml(row.sell_fill)}</td><td class="number">${money(row.fees_usd)}</td><td class="number ${profitClass}">${money(row.fill_edge_usd)}</td><td><span class="badge ${row.ok === "1" ? "" : "failed"}">${row.ok === "1" ? "完成" : "异常"}</span></td></tr>`;
+    }).join("")}</tbody></table>` : `<div class="empty-state"><h3>暂无成交记录</h3><p>采集模式不发送订单。实盘执行后，记录会显示在这里。</p></div>`;
+    pagination.hidden = !total || pages <= 1;
+    pagination.innerHTML = `<span>第 ${page} / ${pages} 页，共 ${total} 条</span><div><button class="button secondary small" data-trades-page="${page - 1}" ${page <= 1 ? "disabled" : ""}>上一页</button><button class="button secondary small" data-trades-page="${page + 1}" ${page >= pages ? "disabled" : ""}>下一页</button></div>`;
   } else {
+    pagination.hidden = true;
+    pagination.replaceChildren();
     const text = state.logTab === "events" ? state.logs?.events : state.logs?.text;
     const output = element("log-output");
     if (output.textContent !== (text || "等待运行事件。任务启动后的日志将在这里显示。")) {
@@ -296,7 +310,8 @@ function renderLogs() {
 async function refreshDetail() {
   const selected = state.selected;
   if (!selected || !state.authenticated) return;
-  const [detail, logs] = await Promise.all([api(`/api/tasks/${selected}`), api(`/api/tasks/${selected}/logs`)]);
+  const tradeQuery = `?trades_page=${state.tradesPage}&trades_page_size=${state.tradesPageSize}`;
+  const [detail, logs] = await Promise.all([api(`/api/tasks/${selected}${tradeQuery}`), api(`/api/tasks/${selected}/logs`)]);
   if (state.selected !== selected) return;
   state.detail = detail;
   state.logs = logs;
@@ -521,7 +536,7 @@ element("task-rows").addEventListener("click", (event) => {
   if (action === "edit") openEditor(task);
   else if (action === "detail") openTaskDetails(task);
   else if (action === "threshold") openThreshold(task);
-  else if (action === "monitor") {state.selected = task.id; element("monitor-select").value = task.id; navigate("monitor");}
+  else if (action === "monitor") {state.selected = task.id; state.tradesPage = 1; element("monitor-select").value = task.id; navigate("monitor");}
   else if (action === "start") {
     if (task.mode === "live") confirm(`启动 ${task.symbol} 实盘交易`, "程序会使用所选凭据发送真实订单。请核对手续费、阈值、仓位上限和账户整体风险；多进程实盘必须使用独立签名密钥。", () => operate(task, "start", {confirm_live: true}), task.symbol, true);
     else operate(task, "start").catch((error) => toast(error.message, true));
@@ -544,12 +559,19 @@ element("search").addEventListener("input", renderTasks);
 element("state-filter").addEventListener("change", renderTasks);
 element("monitor-select").addEventListener("change", () => {
   state.selected = element("monitor-select").value;
+  state.tradesPage = 1;
   state.detail = null;
   state.logs = null;
   element("log-output").textContent = "加载中…";
   refreshDetail().catch((error) => toast(error.message, true));
 });
 document.querySelectorAll("[data-log-tab]").forEach((button) => button.addEventListener("click", () => {state.logTab = button.dataset.logTab; renderMonitor();}));
+element("trades-pagination").addEventListener("click", (event) => {
+  const button = event.target.closest("button[data-trades-page]");
+  if (!button || button.disabled) return;
+  state.tradesPage = Number(button.dataset.tradesPage);
+  refreshDetail().catch((error) => toast(error.message, true));
+});
 element("refresh-detail").addEventListener("click", () => refreshDetail().catch((error) => toast(error.message, true)));
 element("log-follow").addEventListener("change", () => {if (element("log-follow").checked) element("log-output").scrollTop = element("log-output").scrollHeight;});
 element("login-form").addEventListener("submit", async (event) => {
@@ -615,7 +637,7 @@ element("task-detail-dialog").addEventListener("close", () => {state.detailTask 
 element("detail-refresh").addEventListener("click", refreshTaskDetails);
 element("detail-follow").addEventListener("change", renderDetailLogs);
 document.querySelectorAll("[data-detail-tab]").forEach((button) => button.addEventListener("click", () => {state.detailTab = button.dataset.detailTab; renderDetailLogs();}));
-element("detail-monitor").addEventListener("click", () => {state.selected = state.detailTask; element("task-detail-dialog").close(); navigate("monitor");});
+element("detail-monitor").addEventListener("click", () => {state.selected = state.detailTask; state.tradesPage = 1; element("task-detail-dialog").close(); navigate("monitor");});
 
 let libraryRequest = 0;
 function renderCredentials(fields) {
