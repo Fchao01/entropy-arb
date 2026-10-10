@@ -216,7 +216,10 @@ def test_invalid_config_and_environment_isolation(tmp_path, monkeypatch):
             cfg = load_config(str(ROOT / "configs/rh-arcus.yaml"), symbol="ETH", hedge_venue="arcus", credential_env={})
             assert cfg.primary.lighter_creds.api_key_index is None
             assert not cfg.creds_complete
-            assert snapshot(Engine(cfg, record_only=True))["net_delta"] is None
+            status = snapshot(Engine(cfg, record_only=True))
+            assert status["net_delta"] is None
+            assert status["session_profit_usd"] == 0.0
+            assert status["session_fees_usd"] == 0.0
             assert clean_numbers({"value": float("nan")}) == {"value": None}
         finally:
             await manager.close()
