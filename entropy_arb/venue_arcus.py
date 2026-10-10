@@ -53,6 +53,7 @@ class ArcusVenue:
         self.api_url, self.ws_url = ARCUS_ENDPOINTS[conf.arcus_network]
         self.settle_timeout = settle_timeout_sec
         self.book = OrderBook()
+        self.mark_price = None
         self.position = self.cash = self.volume_usd = 0.0
         self.equity = self.free = self.start_equity = None
         self.fee_bps, self.cap_usd = conf.fee_bps, conf.cap_usd
@@ -510,7 +511,14 @@ class ArcusVenue:
         return float(data["equity"]), float(data["freeCollateral"])
 
     async def warm_http(self) -> None:
-        await self._get("/v1/markets", market=self.market_name)
+        data = await self._get("/v1/markets", market=self.market_name)
+        for market in data.get("markets") or []:
+            if market.get("marketDisplayName") != self.market_name:
+                continue
+            value = float(market.get("markPrice"))
+            if math.isfinite(value) and value > 0:
+                self.mark_price = value
+            break
 
     async def close(self) -> None:
         ws = self._ws

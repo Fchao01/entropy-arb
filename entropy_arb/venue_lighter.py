@@ -149,6 +149,7 @@ class LighterVenue:
         self.settle_timeout = settle_timeout_sec
         self.profile = conf.lighter_profile
         self.book = OrderBook()
+        self.mark_price = None
         self.position = 0.0
         self.cash = 0.0
         self.volume_usd = 0.0     # cumulative filled notional this session
@@ -245,6 +246,20 @@ class LighterVenue:
             await self._get("/api/v1/status")
         except Exception as e:
             log.debug("[%s] keepalive ping failed: %r", self.name, e)
+        try:
+            data = await self._get("/api/v1/orderBookDetails",
+                                   params={"market_id": str(self.market_id)})
+            for detail in data.get("order_book_details") or []:
+                if int(detail.get("market_id", -1)) != self.market_id:
+                    continue
+                value = float(detail.get("mark_price"))
+                if math.isfinite(value) and value > 0:
+                    self.mark_price = value
+                break
+        except (TypeError, ValueError, KeyError):
+            log.debug("[%s] invalid mark price response", self.name)
+        except Exception as e:
+            log.debug("[%s] mark price request failed: %r", self.name, e)
         if self.signer is None:
             return
         try:

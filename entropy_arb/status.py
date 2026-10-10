@@ -20,15 +20,17 @@ def snapshot(engine) -> dict:
         bid = book.best_bid()
         ask = book.best_ask()
         position = venue.position if not engine.record_only else None
-        mid = ((bid + ask) / 2.0 if bid is not None and ask is not None
-               and bid > 0 and ask > 0 else None)
+        mark_price = getattr(venue, "mark_price", None)
         venues.append({
             "key": venue.key, "name": venue.name, "symbol": venue.conf.symbol,
             "bid": bid, "ask": ask,
             "fresh": book.is_fresh(engine.cfg.staleness_sec),
             "age_sec": now - book.last_update_ts if book.ready else None,
             "position": position,
-            "position_usd": abs(position) * mid if position is not None and mid is not None else None,
+            "mark_price": mark_price,
+            "position_usd": (abs(position) * mark_price
+                              if position is not None and mark_price is not None
+                              else None),
             "equity": venue.equity, "free": venue.free,
             "volume_usd": venue.volume_usd,
             "limited": engine._venue_limited(venue),
