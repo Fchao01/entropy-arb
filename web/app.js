@@ -1,7 +1,7 @@
 "use strict";
 
 const element = (id) => document.getElementById(id);
-const state = {tasks: [], meta: null, selected: null, page: location.pathname === "/monitor" ? "monitor" : "dex", authenticated: false, editing: null, detail: null, logs: null, logTab: "logs", busy: new Set(), polling: false, detailTask: null, detailTab: "logs", detailLogs: null, libraryKind: "yaml", libraryOriginal: null, tri: {candidates: [], snapshot: null}};
+const state = {tasks: [], meta: null, selected: null, page: location.pathname === "/monitor" ? "monitor" : "dex", authenticated: false, editing: null, detail: null, logs: null, logTab: "logs", busy: new Set(), polling: false, detailTask: null, detailTab: "logs", detailLogs: null, libraryKind: "yaml", libraryOriginal: null, tri: {candidates: [], snapshot: null, selectedSymbol: null}};
 const venues = {entropy: "Entropy", lighter: "Lighter", "lighter-rh": "RH", tradexyz: "Trade.xyz", arcus: "Arcus"};
 const active = (task) => ["running", "stopping"].includes(task.state);
 const escapeHtml = (value) => String(value ?? "").replace(/[&<>"']/g, (character) => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"}[character]));
@@ -115,9 +115,9 @@ function renderTasks() {
     const paused = Boolean(task.manual_paused || task.status?.paused);
     const controls = active(task)
       ? task.state === "stopping" ? `<button class="text-button stop" data-action="stop" ${disabled}>强制结束</button>`
-        : `<button class="text-button ${paused ? "resume" : "pause"}" data-action="${paused ? "resume" : "pause"}" ${disabled}>${paused ? "恢复" : "暂停"}</button><button class="text-button stop" data-action="stop" ${disabled}>停止</button>`
+        : `${task.mode === "live" ? `<button class="text-button ${paused ? "resume" : "pause"}" data-action="${paused ? "resume" : "pause"}" ${disabled}>${paused ? "恢复" : "暂停"}</button>` : ""}<button class="text-button stop" data-action="stop" ${disabled}>停止</button>`
       : `<button class="text-button" data-action="start" ${disabled}>启动</button><button class="text-button" data-action="edit" ${disabled}>配置</button>`;
-    return `<tr data-id="${task.id}"><td><div class="coin-cell"><span class="coin-icon">${escapeHtml(task.symbol.slice(0, 1))}</span><div><button class="text-button task-title" data-action="detail" aria-label="查看 ${escapeHtml(task.symbol)} 任务详情">${escapeHtml(task.symbol)}</button><small title="${escapeHtml(task.name)}">${escapeHtml(task.name)}</small></div></div></td><td class="route-cell"><b>${escapeHtml(venues[task.primary])}</b><span>⇄</span><b>${escapeHtml(venues[task.hedge])}</b></td><td><span class="badge ${task.mode}">${task.mode === "live" ? "LIVE · 实盘" : "DATA · 采集"}</span></td><td>${badge(task)}${thresholdStatus(task)}</td><td class="number ${premium == null ? "" : premium >= 0 ? "positive" : "negative"}">${signed(premium)}</td><td class="number">${duration(task)}</td><td><div class="actions">${controls}<button class="text-button" data-action="detail">详情</button><button class="text-button" data-action="monitor">监控 ↗</button>${!active(task) ? `<button class="icon-button" data-action="delete" aria-label="删除 ${escapeHtml(task.name)}" title="删除任务">×</button>` : ""}</div></td></tr>`;
+    return `<tr data-id="${task.id}"><td><div class="coin-cell"><span class="coin-icon">${escapeHtml(task.symbol.slice(0, 1))}</span><div><button class="text-button task-title" data-action="detail" aria-label="查看 ${escapeHtml(task.symbol)} 任务详情">${escapeHtml(task.symbol)}</button><small title="${escapeHtml(task.name)}">${escapeHtml(task.name)}</small></div></div></td><td class="route-cell"><b>${escapeHtml(venues[task.primary])}</b><span>⇄</span><b>${escapeHtml(venues[task.hedge])}</b></td><td><span class="badge ${task.mode}">${task.mode === "live" ? "LIVE · 实盘" : "DATA · 采集"}</span></td><td>${badge(task)}${thresholdStatus(task)}</td><td class="number ${premium == null ? "" : premium >= 0 ? "positive" : "negative"}">${signed(premium)}</td><td class="number">${duration(task)}</td><td><div class="actions">${controls}<button class="text-button" data-action="threshold">阈值</button><button class="text-button" data-action="detail">详情</button><button class="text-button" data-action="monitor">监控 ↗</button>${!active(task) ? `<button class="icon-button" data-action="delete" aria-label="删除 ${escapeHtml(task.name)}" title="删除任务">×</button>` : ""}</div></td></tr>`;
   }).join("");
   element("task-empty").hidden = tasks.length > 0;
   if (!tasks.length) {
@@ -164,14 +164,24 @@ function renderTriple() {
     : '<option value="">暂无三市场共同币种</option>';
   if (candidates.some((row) => row.symbol === current)) select.value = current;
   const snapshot = state.tri.snapshot;
+  if (!state.tri.selectedSymbol) state.tri.selectedSymbol = snapshot?.selected_symbol || compatible[0]?.symbol || null;
+  const details = snapshot?.selected || (state.tri.selectedSymbol ? snapshot?.symbols?.[state.tri.selectedSymbol] : null);
   const running = Boolean(snapshot?.running);
-  element("tri-monitor-status").textContent = running ? `运行中 · ${snapshot.symbol}` : "未启动";
+  element("tri-monitor-status").textContent = running ? `运行中 · ${snapshot.count || 1} 个币种` : "未启动";
   element("tri-monitor-status").className = `badge ${running ? "running" : ""}`;
   element("tri-start").disabled = !select.value;
   element("tri-stop").disabled = !running;
   element("tri-candidates").innerHTML = candidates.length ? `<div class="tri-candidate-grid">${candidates.map((row) => `<article class="tri-candidate ${row.compatible ? "compatible" : "incompatible"}"><b>${escapeHtml(row.symbol)}</b><span>${escapeHtml(row.label)}</span><small>${row.compatible ? "RH / Arcus / Entropy 均有活跃永续" : escapeHtml((row.warnings || []).join("；"))}</small></article>`).join("")}</div>` : '<div class="empty-state"><h3>没有共同活跃市场</h3><p>刷新后重试；共同币种为空时不会启动监控。</p></div>';
-  element("tri-venues").innerHTML = snapshot?.venues?.length ? snapshot.venues.map((venue) => `<article class="venue-card"><div class="venue-top"><div><b>${escapeHtml(venue.name)}</b><small>${escapeHtml(venue.symbol)}</small></div><span class="badge ${venue.fresh ? "" : "stale"}">${venue.fresh ? `正常 · ${number(venue.age_sec, 1)}s` : "等待行情"}</span></div><div class="venue-values"><div><span>买一 / 卖一</span><strong class="number">${number(venue.bid, 5)} / ${number(venue.ask, 5)}</strong></div><div><span>中间价</span><strong>${number(venue.mid, 5)}</strong></div></div></article>`).join("") : "";
-  element("tri-pairs").innerHTML = snapshot?.pairs?.length ? snapshot.pairs.map((pair) => `<article class="tri-pair"><div class="tri-pair-head"><b>${escapeHtml(pair.left)} ⇄ ${escapeHtml(pair.right)}</b><span class="badge ${pair.script_compatible ? "" : "stale"}">${pair.script_compatible ? "脚本可对冲" : "仅价差监控"}</span></div><div class="tri-pair-grid"><div><small>中间价差</small><strong>${signed(pair.mid_spread_bps)} bps</strong></div><div class="${pair.sell_signal ? "signal" : ""}"><small>卖左 / 买右</small><strong>${signed(pair.sell_left_buy_right_bps)} <em>门槛 ${signed(pair.sell_hurdle_bps)}</em></strong></div><div class="${pair.buy_signal ? "signal" : ""}"><small>买左 / 卖右</small><strong>${signed(pair.buy_left_sell_right_bps)} <em>门槛 ${signed(pair.buy_hurdle_bps)}</em></strong></div></div></article>`).join("") : "";
+  const overview = snapshot?.symbols || {};
+  const pairFor = (row, names) => row.pairs?.find((pair) => new Set([pair.left, pair.right]).size === 2 && names.every((name) => [pair.left, pair.right].includes(name)));
+  const overviewCell = (pair) => {
+    if (!pair) return "<span class=\"overview-muted\">—</span>";
+    const signal = pair.sell_signal ? `卖${pair.left}/买${pair.right} ${signed(pair.sell_left_buy_right_bps)}` : pair.buy_signal ? `买${pair.left}/卖${pair.right} ${signed(pair.buy_left_sell_right_bps)}` : `净价差 ${signed(Math.max(pair.sell_left_buy_right_bps ?? -Infinity, pair.buy_left_sell_right_bps ?? -Infinity))}`;
+    return `<b>${signed(pair.mid_spread_bps)} bps</b><small>${escapeHtml(signal)}</small>`;
+  };
+  element("tri-overview").innerHTML = Object.keys(overview).length ? `<div class="overview-heading"><b>全部币种实时价差</b><small>${Object.keys(overview).length} 个共同活跃市场 · 点击币种查看三边盘口</small></div><div class="table-scroll"><table class="tri-overview-table"><thead><tr><th>币种</th><th>RH ↔ Entropy</th><th>RH ↔ Arcus</th><th>Arcus ↔ Entropy</th><th>行情</th></tr></thead><tbody>${Object.entries(overview).map(([symbol, row]) => `<tr data-tri-symbol="${escapeHtml(symbol)}"><td><button class="text-button tri-symbol-link" type="button">${escapeHtml(symbol)}</button></td><td>${overviewCell(pairFor(row, ["RH", "ENTROPY"]))}</td><td>${overviewCell(pairFor(row, ["RH", "ARCUS"]))}</td><td>${overviewCell(pairFor(row, ["ARCUS", "ENTROPY"]))}</td><td><span class="badge ${row.venues?.every((venue) => venue.fresh) ? "" : "stale"}">${row.venues?.every((venue) => venue.fresh) ? "正常" : "等待 / 过期"}</span></td></tr>`).join("")}</tbody></table></div>` : "";
+  element("tri-venues").innerHTML = details?.venues?.length ? details.venues.map((venue) => `<article class="venue-card"><div class="venue-top"><div><b>${escapeHtml(venue.name)}</b><small>${escapeHtml(venue.symbol)}</small></div><span class="badge ${venue.fresh ? "" : "stale"}">${venue.fresh ? `正常 · ${number(venue.age_sec, 1)}s` : "等待行情"}</span></div><div class="venue-values"><div><span>买一 / 卖一</span><strong class="number">${number(venue.bid, 5)} / ${number(venue.ask, 5)}</strong></div><div><span>中间价</span><strong>${number(venue.mid, 5)}</strong></div></div></article>`).join("") : "";
+  element("tri-pairs").innerHTML = details?.pairs?.length ? details.pairs.map((pair) => `<article class="tri-pair"><div class="tri-pair-head"><b>${escapeHtml(pair.left)} ⇄ ${escapeHtml(pair.right)}</b><span class="badge ${pair.script_compatible ? "" : "stale"}">${pair.script_compatible ? "脚本可对冲" : "仅价差监控"}</span></div><div class="tri-pair-grid"><div><small>中间价差</small><strong>${signed(pair.mid_spread_bps)} bps</strong></div><div class="${pair.sell_signal ? "signal" : ""}"><small>卖左 / 买右</small><strong>${signed(pair.sell_left_buy_right_bps)} <em>门槛 ${signed(pair.sell_hurdle_bps)}</em></strong></div><div class="${pair.buy_signal ? "signal" : ""}"><small>买左 / 卖右</small><strong>${signed(pair.buy_left_sell_right_bps)} <em>门槛 ${signed(pair.buy_hurdle_bps)}</em></strong></div></div></article>`).join("") : "";
 }
 
 async function loadTripleCandidates() {
@@ -199,12 +209,19 @@ element("tri-start").addEventListener("click", async () => {
   if (!symbol || !strategy_file) return;
   element("tri-start").disabled = true;
   element("tri-monitor-error").textContent = "正在连接三个公开盘口…";
-  try {state.tri.snapshot = await api("/api/market-monitor/start", "POST", {symbol, strategy_file, hedge_venue}); element("tri-monitor-error").textContent = ""; renderTriple();}
+  try {state.tri.snapshot = await api("/api/market-monitor/start", "POST", {symbol, strategy_file, hedge_venue, all: true}); const errors = Object.values(state.tri.snapshot.errors || {}); element("tri-monitor-error").textContent = errors.length ? `部分币种未连接：${errors.join("；")}` : ""; renderTriple();}
   catch (error) {element("tri-monitor-error").textContent = error.message; renderTriple();}
 });
 element("tri-stop").addEventListener("click", async () => {
   try {state.tri.snapshot = await api("/api/market-monitor/stop", "POST", {}); renderTriple();}
   catch (error) {element("tri-monitor-error").textContent = error.message;}
+});
+element("tri-overview").addEventListener("click", (event) => {
+  const row = event.target.closest("tr[data-tri-symbol]");
+  if (!row) return;
+  state.tri.selectedSymbol = row.dataset.triSymbol;
+  element("tri-symbol").value = state.tri.selectedSymbol;
+  renderTriple();
 });
 
 function renderMonitor() {
@@ -444,6 +461,48 @@ element("confirm-form").addEventListener("submit", async (event) => {
   try {await confirmAction(); element("confirm-dialog").close();} catch (error) {element("confirm-error").textContent = error.message;} finally {element("confirm-submit").disabled = false;}
 });
 
+let thresholdTask = null;
+async function openThreshold(task) {
+  thresholdTask = task;
+  element("threshold-title").textContent = `${task.symbol} 阈值计算`;
+  element("threshold-error").textContent = "正在读取最近完成日的分钟数据…";
+  element("threshold-result").hidden = true;
+  element("threshold-apply").disabled = true;
+  element("threshold-dialog").showModal();
+  try {
+    const result = await api(`/api/tasks/${task.id}/threshold`);
+    element("threshold-window").textContent = `${result.window} · ${result.rows} 条有效分钟数据 · 覆盖 ${number(result.span_hours, 1)} 小时`;
+    element("threshold-current").textContent = `当前：中线 ${number(result.current.midline_bps, 1)} / 上带 ${number(result.current.upper_bps, 1)} / 下带 ${number(result.current.lower_bps, 1)} bps`;
+    element("threshold-midline").value = result.suggested.midline_bps;
+    element("threshold-upper").value = result.suggested.upper_bps;
+    element("threshold-lower").value = result.suggested.lower_bps;
+    element("threshold-result").hidden = false;
+    element("threshold-apply").disabled = false;
+    element("threshold-error").textContent = "";
+  } catch (error) {element("threshold-error").textContent = error.message;}
+}
+
+element("threshold-cancel").addEventListener("click", () => element("threshold-dialog").close());
+element("threshold-apply").addEventListener("click", () => {
+  if (!thresholdTask) return;
+  const task = thresholdTask;
+  element("threshold-dialog").close();
+  const apply = () => operateThreshold(task);
+  if (task.mode === "live") confirm(`应用 ${task.symbol} 新阈值？`, "应用会优雅停止并重新启动该实盘任务；当前持仓不会自动平仓，请确认交易所持仓后继续。", apply, task.symbol, true);
+  else apply();
+});
+
+async function operateThreshold(task) {
+  state.busy.add(task.id);
+  renderTasks();
+  try {
+    const thresholds = {midline_bps: Number(element("threshold-midline").value), upper_bps: Number(element("threshold-upper").value), lower_bps: Number(element("threshold-lower").value)};
+    await api(`/api/tasks/${task.id}/threshold`, "POST", {apply: true, confirm_live: task.mode === "live", thresholds});
+    toast("阈值已应用；任务会在下一次启动时读取新配置");
+    await refresh();
+  } catch (error) {toast(error.message, true);} finally {state.busy.delete(task.id); renderTasks();}
+}
+
 async function operate(task, action, payload = {}) {
   state.busy.add(task.id);
   renderTasks();
@@ -461,6 +520,7 @@ element("task-rows").addEventListener("click", (event) => {
   const action = button.dataset.action;
   if (action === "edit") openEditor(task);
   else if (action === "detail") openTaskDetails(task);
+  else if (action === "threshold") openThreshold(task);
   else if (action === "monitor") {state.selected = task.id; element("monitor-select").value = task.id; navigate("monitor");}
   else if (action === "start") {
     if (task.mode === "live") confirm(`启动 ${task.symbol} 实盘交易`, "程序会使用所选凭据发送真实订单。请核对手续费、阈值、仓位上限和账户整体风险；多进程实盘必须使用独立签名密钥。", () => operate(task, "start", {confirm_live: true}), task.symbol, true);
@@ -595,6 +655,7 @@ async function loadLibraryFile() {
 
 function switchLibrary(kind) {
   state.libraryKind = kind;
+  element("test-telegram").hidden = kind !== "env";
   element("library-yaml").hidden = kind !== "yaml";
   element("library-env").hidden = kind !== "env";
   document.querySelectorAll("[data-library-tab]").forEach((button) => button.classList.toggle("selected", button.dataset.libraryTab === kind));
@@ -609,10 +670,41 @@ async function openLibrary() {
     element("library-template").innerHTML = Object.keys(state.meta.templates).map((name) => `<option value="${name}">${name === "rh-arcus" ? "RH / Arcus" : "Entropy / RH"} · 示例模板</option>`).join("");
     element("library-dialog").showModal();
     switchLibrary("yaml");
-  } catch (error) {toast(error.message, true);}
+    return true;
+  } catch (error) {toast(error.message, true); return false;}
 }
 
 element("open-library").addEventListener("click", openLibrary);
+element("open-telegram").addEventListener("click", async () => {
+  if (!await openLibrary()) return;
+  switchLibrary("env");
+  element("library-file").value = "default";
+  await loadLibraryFile();
+  const telegramGroup = [...document.querySelectorAll(".credential-group")].find((group) => group.querySelector("summary")?.textContent.includes("Telegram"));
+  if (telegramGroup) telegramGroup.open = true;
+});
+element("test-telegram").addEventListener("click", async () => {
+  if (state.libraryKind !== "env") {
+    toast("请先切换到 ENV 凭据", true);
+    return;
+  }
+  if ([...document.querySelectorAll("[data-credential]")].some((input) => input.value.trim())) {
+    toast("请先保存凭据，再发送测试", true);
+    return;
+  }
+  const profile = element("library-name").value.trim() || "default";
+  const button = element("test-telegram");
+  button.disabled = true;
+  element("library-error").textContent = "";
+  try {
+    await api("/api/telegram/test", "POST", {profile});
+    toast("Telegram 测试消息已发送");
+  } catch (error) {
+    element("library-error").textContent = error.message;
+  } finally {
+    button.disabled = false;
+  }
+});
 element("close-library").addEventListener("click", () => element("library-dialog").close());
 element("cancel-library").addEventListener("click", () => element("library-dialog").close());
 element("library-dialog").addEventListener("close", () => {libraryRequest++; element("credential-fields").replaceChildren();});

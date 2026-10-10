@@ -21,6 +21,7 @@ from .book import OrderBook
 from .venue_arcus import ArcusVenue
 from .venue_hl import HLVenue
 from .venue_lighter import LighterVenue
+from .telegram import TelegramNotifier
 
 
 HL_INFO = "https://api.hyperliquid.xyz/info"
@@ -199,6 +200,7 @@ class TripleVenueMonitor:
         self.last_alert = {}
         self.notify_tasks = set()
 
+
     @staticmethod
     def _conf(key, kind, label, symbol, *, fee=0.0, dex="io") -> VenueConf:
         if kind == "hl":
@@ -344,3 +346,63 @@ class TripleVenueMonitor:
         self.stop_event = None
         self.venues = {}
         self.running = False
+
+MAX_OVERVIEW_SYMBOLS = 40
+
+
+class MultiVenueMonitor:
+    """Run isolated read-only three-venue monitors for an overview table."""
+
+    def __init__(self, notifier=None):
+        self.notifier = notifier
+        self.monitors: dict[str, TripleVenueMonitor] = {}
+        self.errors: dict[str, str] = {}
+        self.rules = MonitorRules()
+        self.running = False
+        self.selected_symbol = None
+
+    async def start(self, candidate: dict, rules: MonitorRules):
+        return await self.start_all([candidate], rules)
+
+    async def start_all(self, candidates: list[dict], rules: MonitorRules):
+        await self.stop()
+        self.rules = rules
+        self.errors = {}
+        selected = [row for row in candidates if row.get("compatible")]
+        if len(selected) > MAX_OVERVIEW_SYMBOLS:
+            selected = selected[:MAX_OVERVIEW_SYMBOLS]
+            self.errors["__limit__"] = f"候选超过 {MAX_OVERVIEW_SYMBOLS} 个，仅监控前 {MAX_OVERVIEW_SYMBOLS} 个"
+
+        async def launch(candidate):
+            symbol = candidate["symbol"]
+            token = getattr(self.notifier, "token", "") if self.notifier else ""
+            chat_id = getattr(self.notifier, "chat_id", "") if self.notifier else ""
+            child = TripleVenueMonitor(TelegramNotifier(token=token, chat_id=chat_id)
+                                       if self.notifier else None)
+            try:
+                await child.start(candidate, rules)
+                self.monitors[symbol] = child
+            except Exception as error:
+                self.errors[symbol] = str(error) or repr(error)
+                await child.stop()
+
+        await asyncio.gather(*(launch(candidate) for candidate in selected))
+        self.running = bool(self.monitors)
+        self.selected_symbol = selected[0]["symbol"] if selected else None
+        return self.snapshot()
+
+    def snapshot(self):
+        rows = {symbol: monitor.snapshot() for symbol, monitor in self.monitors.items()}
+        selected = rows.get(self.selected_symbol)
+        return {"running": self.running, "updated_at": time.time(),
+                "rules": self.rules.__dict__, "symbols": rows,
+                "errors": self.errors, "selected_symbol": self.selected_symbol,
+                "selected": selected, "count": len(rows)}
+
+    async def stop(self):
+        if self.monitors:
+            await asyncio.gather(*(monitor.stop() for monitor in self.monitors.values()),
+                                 return_exceptions=True)
+        self.monitors = {}
+        self.running = False
+        self.selected_symbol = None

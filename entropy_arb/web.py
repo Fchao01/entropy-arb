@@ -29,11 +29,11 @@ from aiohttp import web
 from dotenv import dotenv_values
 
 from .config import ConfigError, HEDGE_VENUES, PRIMARY_VENUES, _SCHEMA, _validate, load_config
-from .market_monitor import MonitorRules, TripleVenueMonitor, discover_candidates
+from .market_monitor import MonitorRules, MultiVenueMonitor, discover_candidates
 from .privacy import PrivateLogCapture
-from .thresholds import (ThresholdDataError, daily_window, load_window_rows,
-                         prune_csv, suggest)
-from .telegram import TelegramNotifier
+from .thresholds import (ThresholdDataError, ThresholdSuggestion, daily_window,
+                         load_window_rows, prune_csv, suggest)
+from .telegram import TelegramNotifier, test_message
 
 ROOT = Path(__file__).resolve().parent.parent
 STATIC = ROOT / "web"
@@ -201,7 +201,7 @@ class TaskManager:
     async def monitor_instance(self, profile="default"):
         if self.market_monitor is None:
             values = self.environment(profile) if profile in self.profiles() else {}
-            self.market_monitor = TripleVenueMonitor(
+            self.market_monitor = MultiVenueMonitor(
                 TelegramNotifier(token=values.get("TELEGRAM_BOT_TOKEN"),
                                  chat_id=values.get("TELEGRAM_CHAT_ID")))
         elif profile in self.profiles():
@@ -341,7 +341,63 @@ class TaskManager:
         })
         return yaml.safe_dump(raw, allow_unicode=True, sort_keys=False)
 
-    async def auto_update_task(self, task_id, window):
+    def _threshold_suggestion(self, task_id):
+        """Calculate a threshold proposal without changing the task."""
+        task = self.get(task_id)
+        directory = self.directory(task_id)
+        config_path = directory / "config.yaml"
+        cfg = load_config(str(config_path), symbol=task["symbol"],
+                          primary_venue=task["primary"], hedge_venue=task["hedge"],
+                          credential_env=self.environment(task["profile"]))
+        window = daily_window()
+        csv_path = directory / "minutes.csv"
+        if not csv_path.exists():
+            raise ConsoleError("还没有分钟行情数据，先运行采集任务")
+        rows = load_window_rows(csv_path, window, AUTO_THRESHOLD_MIN_SAMPLES)
+        try:
+            suggestion = suggest(rows, cfg.entropy.fee_bps + cfg.hedge.fee_bps,
+                                 window, AUTO_THRESHOLD_MIN_ROWS)
+        except ThresholdDataError as error:
+            raise ConsoleError(str(error)) from error
+        current = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+        return task, window, suggestion, dict(current.get("thresholds", {}))
+
+    async def manual_threshold(self, task_id, apply=False, confirm_live=False,
+                               thresholds=None):
+        """Preview or apply a threshold proposal requested from the UI."""
+        task, window, suggestion, old = self._threshold_suggestion(task_id)
+        if not apply:
+            return {
+                "task_id": task_id, "window": window.label,
+                "window_start": window.start_ts, "window_end": window.end_ts,
+                "rows": suggestion.rows, "span_hours": suggestion.span_hours,
+                "current": old,
+                "suggested": {"midline_bps": suggestion.midline_bps,
+                              "upper_bps": suggestion.upper_bps,
+                              "lower_bps": suggestion.lower_bps},
+            }
+        if task["mode"] == "live" and confirm_live is not True:
+            raise ConsoleError("修改实盘阈值需要明确确认")
+        if thresholds is not None:
+            if not isinstance(thresholds, dict):
+                raise ConsoleError("阈值必须是 JSON 对象")
+            try:
+                midline = float(thresholds["midline_bps"])
+                upper = float(thresholds["upper_bps"])
+                lower = float(thresholds["lower_bps"])
+            except (KeyError, TypeError, ValueError) as error:
+                raise ConsoleError("阈值必须是数字") from error
+            if not all(math.isfinite(value) for value in (midline, upper, lower)):
+                raise ConsoleError("阈值必须是有限数字")
+            if upper <= 0 or lower <= 0:
+                raise ConsoleError("上下入场带宽必须大于 0")
+            suggestion = ThresholdSuggestion(midline, upper, lower,
+                                              suggestion.rows, suggestion.span_hours,
+                                              window)
+        await self.auto_update_task(task_id, window, suggestion=suggestion)
+        return self._read_auto_status(task_id)
+
+    async def auto_update_task(self, task_id, window, suggestion=None):
         """Update one live task and restart it only after a valid calculation."""
         task = self.get(task_id)
         directory = self.directory(task_id)
@@ -350,9 +406,10 @@ class TaskManager:
         cfg = load_config(str(config_path), symbol=task["symbol"],
                           primary_venue=task["primary"], hedge_venue=task["hedge"],
                           credential_env=self.environment(task["profile"]))
-        rows = load_window_rows(csv_path, window, AUTO_THRESHOLD_MIN_SAMPLES)
-        suggestion = suggest(rows, cfg.entropy.fee_bps + cfg.hedge.fee_bps,
-                             window, AUTO_THRESHOLD_MIN_ROWS)
+        if suggestion is None:
+            rows = load_window_rows(csv_path, window, AUTO_THRESHOLD_MIN_SAMPLES)
+            suggestion = suggest(rows, cfg.entropy.fee_bps + cfg.hedge.fee_bps,
+                                 window, AUTO_THRESHOLD_MIN_ROWS)
         current_raw = yaml.safe_load(config_path.read_text(encoding="utf-8"))
         old_thresholds = dict(current_raw.get("thresholds", {}))
         new_thresholds = {
@@ -377,7 +434,8 @@ class TaskManager:
 
         running = task_id in self.running
         runtime = self.running.get(task_id)
-        if running:
+        restart = running and task["mode"] == "live"
+        if restart:
             await self.pause(task_id, True)
             await self.stop(task_id)
             try:
@@ -411,7 +469,7 @@ class TaskManager:
         task["config"] = new_text
         self.save()
         try:
-            if running:
+            if restart:
                 await self.start(task_id, confirmed=True)
         except Exception:
             # Restore both copies before surfacing the failure.  The stopped
@@ -623,6 +681,20 @@ class TaskManager:
             values = {**{key: value for key, value in file_values.items()
                          if key in CREDENTIAL_NAMES and value is not None}, **values}
         return values
+
+    async def telegram_test(self, profile="default"):
+        """Send a harmless test message using the selected credential profile."""
+        values = self.environment(profile)
+        notifier = TelegramNotifier(token=values.get("TELEGRAM_BOT_TOKEN"),
+                                    chat_id=values.get("TELEGRAM_CHAT_ID"))
+        if not notifier.enabled:
+            raise ConsoleError("请先配置 TELEGRAM_BOT_TOKEN 和 TELEGRAM_CHAT_ID")
+        try:
+            if not await notifier.send(test_message()):
+                raise ConsoleError("Telegram 测试消息发送失败，请检查 Bot Token、Chat ID 和网络")
+            return {"ok": True}
+        finally:
+            await notifier.close()
 
     def validate(self, payload, task_id):
         if not isinstance(payload, dict):
@@ -1062,6 +1134,23 @@ def create_app(manager: TaskManager, password: str, secure_cookie=False):
     async def resume(request):
         return web.json_response(await manager.pause(request.match_info["id"], False))
 
+    async def threshold(request):
+        payload = await body(request) if request.method == "POST" else {}
+        apply = payload.get("apply", False)
+        confirm_live = payload.get("confirm_live", False)
+        if not isinstance(apply, bool) or not isinstance(confirm_live, bool):
+            raise ConsoleError("阈值操作参数无效")
+        return web.json_response(await manager.manual_threshold(
+            request.match_info["id"], apply=apply, confirm_live=confirm_live,
+            thresholds=payload.get("thresholds") if apply else None))
+
+    async def telegram_test(request):
+        payload = await body(request)
+        profile = payload.get("profile", "default")
+        if not isinstance(profile, str):
+            raise ConsoleError("凭据配置名称无效")
+        return web.json_response(await manager.telegram_test(profile))
+
     async def delete(request):
         await manager.delete(request.match_info["id"])
         return web.json_response({"ok": True})
@@ -1098,13 +1187,19 @@ def create_app(manager: TaskManager, password: str, secure_cookie=False):
         candidates = None
         async with aiohttp.ClientSession() as session:
             candidates = await discover_candidates(session)
+        all_candidates = payload.get("all") is True
         candidate = next((row for row in candidates["symbols"] if row["symbol"] == symbol), None)
-        if candidate is None:
-            raise ConsoleError("该币种没有同时出现在 RH、Arcus、Entropy 的活跃市场列表")
-        if not candidate["compatible"]:
-            raise ConsoleError("该币种的数量步长或最小下单规格无法验证，不能标记为可自动对冲")
+        if not all_candidates:
+            if candidate is None:
+                raise ConsoleError("该币种没有同时出现在 RH、Arcus、Entropy 的活跃市场列表")
+            if not candidate["compatible"]:
+                raise ConsoleError("该币种的数量步长或最小下单规格无法验证，不能标记为可自动对冲")
+        elif not any(row.get("compatible") for row in candidates["symbols"]):
+            raise ConsoleError("没有可同时监控的共同币种")
         rules = await manager.monitor_rules(strategy_file, hedge_venue)
         monitor = await manager.monitor_instance(profile)
+        if all_candidates:
+            return web.json_response(await monitor.start_all(candidates["symbols"], rules))
         return web.json_response(await monitor.start(candidate, rules))
 
     async def market_monitor_stop(request):
@@ -1156,6 +1251,9 @@ def create_app(manager: TaskManager, password: str, secure_cookie=False):
     app.router.add_post("/api/tasks/{id}/stop", stop)
     app.router.add_post("/api/tasks/{id}/pause", pause)
     app.router.add_post("/api/tasks/{id}/resume", resume)
+    app.router.add_get("/api/tasks/{id}/threshold", threshold)
+    app.router.add_post("/api/tasks/{id}/threshold", threshold)
+    app.router.add_post("/api/telegram/test", telegram_test)
     app.router.add_get("/api/tasks/{id}", detail)
     app.router.add_get("/api/tasks/{id}/logs", logs)
     app.router.add_get("/api/tasks/{id}/download/{kind}", download)

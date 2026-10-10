@@ -31,7 +31,7 @@ from .recorder import MinuteRecorder
 from .venue_hl import HLVenue
 from .venue_lighter import LighterVenue
 from .venue_arcus import ArcusVenue
-from .telegram import TelegramNotifier, trade_message
+from .telegram import TelegramNotifier, hedge_message, trade_message
 
 log = logging.getLogger("engine")
 
@@ -593,24 +593,38 @@ class Engine:
                       sell_avg_px=sinfo.get("avg_px"),
                       realized_edge_bps=realized_edge_bps,
                       edge_shortfall_bps=shortfall_bps)
+        trade_volume = bfill * (binfo.get("avg_px") or plan.buy_limit) \
+            + sfill * (sinfo.get("avg_px") or plan.sell_limit)
         self._notify_trade(direction, buy, sell, plan, sent_ok, bfill, sfill,
                            binfo["status"], sinfo["status"],
-                           None if unresolved else fill_edge)
+                           None if unresolved else fill_edge, trade_volume)
         self.last_trade_ts = time.time()
         return bool(unresolved)
 
     def _notify_trade(self, direction, buy, sell, plan, ok, bfill, sfill,
-                      buy_status, sell_status, fill_edge) -> None:
+                      buy_status, sell_status, fill_edge, trade_volume) -> None:
         if not self.telegram.enabled:
             return
         message = trade_message(
             symbol=self.cfg.symbol, direction=direction,
             buy_venue=buy.name, sell_venue=sell.name, qty=plan.qty,
             buy_status=buy_status, sell_status=sell_status,
-            buy_fill=bfill, sell_fill=sfill, fill_edge=fill_edge, ok=ok)
+            buy_fill=bfill, sell_fill=sfill, fill_edge=fill_edge, ok=ok,
+            trade_volume=trade_volume, total_volume=self._total_volume(),
+            total_profit=self.total_fill_edge, hedges=self.hedges,
+            balances=self._notification_balances(),
+            account_delta=self.account_delta())
         task = asyncio.create_task(self.telegram.send(message), name="telegram-trade")
         self._telegram_tasks.add(task)
         task.add_done_callback(self._telegram_tasks.discard)
+
+    def _total_volume(self) -> float:
+        return sum(float(getattr(v, "volume_usd", 0.0) or 0.0)
+                   for v in self.venues.values())
+
+    def _notification_balances(self) -> list[dict]:
+        return [{"name": v.name, "free": v.free, "equity": v.equity}
+                for v in self.venues.values()]
 
     def _record_trade(self, direction: str, plan: ArbPlan, fill_edge,
                       status: str, ok: bool) -> None:
@@ -661,6 +675,7 @@ class Engine:
                 self._record_send(v)  # counts toward the budget, never blocked
                 info = await v.send_taker(is_buy=not is_sell, qty=qty,
                                           limit_px=limit, reduce_only=True)
+                hedge_ok = not info.get("err") and not info.get("unresolved")
                 if info.get("err") or info.get("unresolved"):
                     log.error("[HEDGE] %s: %s", v.name,
                               info.get("err") or "unresolved")
@@ -678,12 +693,34 @@ class Engine:
                         v.volume_usd += fill * px
                     log.info("[HEDGE SETTLED] %s %s %.6g/%.6g",
                              v.name, info["status"], fill, qty)
+                self._notify_hedge(
+                    v, "SELL" if is_sell else "BUY", qty,
+                    info.get("status", "unknown"), info.get("filled_base", 0.0),
+                    hedge_ok, net,
+                    (info.get("filled_base", 0.0) or 0.0)
+                    * (info.get("avg_px") or limit))
                 v.last_traded_ts = time.time()
             finally:
                 lk.release()
             return
         log.warning("[HEDGE] net %+.6g below hedgeable minimum — carrying "
                     "(next reconcile retries)", net)
+
+    def _notify_hedge(self, venue, side, qty, status, fill, ok, net,
+                      trade_volume) -> None:
+        if not self.telegram.enabled:
+            return
+        message = hedge_message(symbol=self.cfg.symbol, venue=venue.name,
+                                side=side, qty=qty, status=status, fill=fill,
+                                ok=ok, net=net, trade_volume=trade_volume,
+                                total_volume=self._total_volume(),
+                                total_profit=self.total_fill_edge,
+                                hedges=self.hedges,
+                                balances=self._notification_balances(),
+                                account_delta=self.account_delta())
+        task = asyncio.create_task(self.telegram.send(message), name="telegram-hedge")
+        self._telegram_tasks.add(task)
+        task.add_done_callback(self._telegram_tasks.discard)
 
     # --------------------------------------------------- reconcile / status
 
