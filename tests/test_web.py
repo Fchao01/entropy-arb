@@ -396,6 +396,11 @@ def test_stopped_task_migrates_overridden_csv_from_original_yaml(tmp_path):
             path.write_text(yaml.safe_dump(old))
             assert manager.minute_path(manager.get(task["id"])) == manager.root / "logs/SNDK/minutes.csv"
             assert yaml.safe_load(path.read_text())["recorder"]["csv"] == "logs/{symbol}/minutes.csv"
+            old["recorder"]["csv"] = str(manager.data / "SNDK" / "minutes.csv")
+            path.write_text(yaml.safe_dump(old))
+            manager.get(task["id"])["config"] = STRATEGY + (
+                f"recorder:\n  csv: {manager.data / 'SNDK' / 'minutes.csv'}\n")
+            assert manager.minute_path(manager.get(task["id"])) == manager.root / "logs/SNDK/minutes.csv"
         finally:
             await manager.close()
     asyncio.run(scenario())

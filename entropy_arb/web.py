@@ -546,6 +546,21 @@ class TaskManager:
         path = Path(value)
         return (path if path.is_absolute() else self.root / path).resolve()
 
+    def _legacy_task_output(self, task_id, symbol, value, filename):
+        """Recognize paths injected by old console versions.
+
+        Before output paths became YAML-owned, the web console wrote every
+        recorder/log file below ``web-data/<task-id>/``.  Those paths must not
+        keep winning over the saved strategy after an upgrade.  Restrict the
+        migration to the old task-id/symbol shapes so an explicit user path
+        elsewhere remains authoritative.
+        """
+        if not isinstance(value, str):
+            return False
+        path = self.configured_path(value)
+        roots = (self.directory(task_id), self.data / str(symbol).upper())
+        return any(path == root.resolve() / filename for root in roots)
+
     def task_config(self, task):
         return load_config(str(self.ensure_task_config(task)),
                            symbol=task["symbol"], primary_venue=task["primary"],
@@ -793,6 +808,12 @@ class TaskManager:
         if "primary" in raw and raw["primary"].get("venue", primary) != primary:
             raise ConsoleError("YAML primary.venue 与页面主腿选择不一致")
         directory = self.directory(task_id)
+        recorder = raw.get("recorder") or {}
+        if self._legacy_task_output(task_id, symbol, recorder.get("csv"), "minutes.csv"):
+            # Let load_config use the YAML default logs/{symbol}/minutes.csv.
+            # This only removes the old console-injected path.
+            recorder.pop("csv", None)
+            raw["recorder"] = recorder
         # Keep recorder.csv exactly as authored; load_config expands market
         # placeholders and supplies the same default as the CLI when omitted.
         logging_config = raw.setdefault("logging", {})
