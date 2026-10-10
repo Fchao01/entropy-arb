@@ -29,8 +29,7 @@ def test_net_edge_matches_fee_aware_execution_inequality():
 def test_triple_snapshot_follows_rh_primary_semantics():
     monitor = TripleVenueMonitor()
     monitor.symbol = "ETH"
-    monitor.rules = MonitorRules(midline_bps=2, upper_bps=4, lower_bps=3,
-                                 primary_key="rh")
+    monitor.rules = MonitorRules(primary_key="rh")
     monitor.venues = {
         "entropy": venue("entropy", "ENTROPY", 101, 102),
         "rh": venue("rh", "RH", 99, 100),
@@ -42,5 +41,7 @@ def test_triple_snapshot_follows_rh_primary_semantics():
     assert pairs[1]["script_compatible"] is False
     assert pairs[2]["script_compatible"] is True
     assert pairs[0]["left"] == "RH" and pairs[0]["right"] == "ENTROPY"
-    assert pairs[0]["sell_hurdle_bps"] == 6
-    assert pairs[0]["buy_hurdle_bps"] == 1
+    assert "sell_hurdle_bps" not in pairs[0]
+    assert "buy_hurdle_bps" not in pairs[0]
+    assert "sell_signal" not in pairs[0]
+    assert "buy_signal" not in pairs[0]

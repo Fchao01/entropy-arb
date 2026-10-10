@@ -231,9 +231,16 @@ class TaskManager:
             self.market_monitor.notifier.chat_id = (values.get("TELEGRAM_CHAT_ID") or "").strip()
         return self.market_monitor
 
-    async def monitor_rules(self, strategy_file, hedge_venue=None):
+    async def monitor_rules(self, strategy_file=None, hedge_venue=None):
+        """Build display fees without making market compatibility depend on YAML.
+
+        The three-market page answers a different question from the trading
+        engine: which symbols can use the RH-primary hedge path.  A strategy
+        file is optional and is only used as a fee source when the caller
+        explicitly supplies one; its thresholds are never read here.
+        """
         if not strategy_file:
-            raise ConsoleError("三市场监控需要选择策略 YAML，以使用同一套阈值和费率")
+            return MonitorRules(source="脚本适配检查（未加载阈值）", primary_key="rh")
         text = self.strategy(strategy_file)
         raw = self.check_strategy(text)
         primary = raw.get("primary") or raw.get("entropy") or {}
@@ -241,7 +248,6 @@ class TaskManager:
         def number(section, key, default=0.0):
             value = section.get(key, default)
             return float(value)
-        thresholds = raw.get("thresholds") or {}
         primary_venue = (primary.get("venue") or
                          ("entropy" if "entropy" in raw and "primary" not in raw
                           else "lighter-rh"))
@@ -270,14 +276,13 @@ class TaskManager:
                 entropy_fee = hedge_fee
         primary_key = {"entropy": "entropy", "lighter-rh": "rh", "arcus": "arcus"}.get(primary_venue, "rh")
         return MonitorRules(
-            midline_bps=number(thresholds, "midline_bps"),
-            upper_bps=number(thresholds, "upper_bps"),
-            lower_bps=number(thresholds, "lower_bps"),
             entropy_fee_bps=entropy_fee,
             rh_fee_bps=rh_fee,
             arcus_fee_bps=arcus_fee,
-            source=str(strategy_file),
-            primary_key=primary_key,
+            source=f"费率来源：{strategy_file}（未使用阈值）",
+            # The monitoring page follows the current script default even if
+            # an old YAML was authored for another primary venue.
+            primary_key="rh",
         )
 
     def save(self):
@@ -1211,10 +1216,10 @@ def create_app(manager: TaskManager, password: str, secure_cookie=False):
     async def market_monitor_start(request):
         payload = await body(request)
         symbol = str(payload.get("symbol", "")).strip().upper()
-        strategy_file = payload.get("strategy_file") or "@default"
-        hedge_venue = payload.get("hedge_venue") or "arcus"
-        if hedge_venue not in ("entropy", "lighter-rh", "arcus"):
-            raise ConsoleError("三市场监控的策略对冲腿必须是 Entropy、RH 或 Arcus")
+        # A strategy YAML is optional here. Compatibility is determined by
+        # public market metadata, never by strategy thresholds.
+        strategy_file = payload.get("strategy_file")
+        hedge_venue = payload.get("hedge_venue")
         profile = payload.get("profile") or "default"
         candidates = None
         async with aiohttp.ClientSession() as session:

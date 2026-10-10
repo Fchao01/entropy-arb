@@ -140,6 +140,9 @@ async def discover_candidates(session: aiohttp.ClientSession) -> dict:
             "perpetual": True,
             "base_units_known": all(v["step"] is not None for v in venues.values()),
             "minimums_known": all(v["min_base"] > 0 for v in venues.values()),
+            "rh_primary": True,
+            "arcus_hedge": True,
+            "entropy_hedge": True,
         }
         warnings = []
         if not checks["base_units_known"]:
@@ -157,18 +160,24 @@ async def discover_candidates(session: aiohttp.ClientSession) -> dict:
             "venues": {name: {k: v for k, v in value.items() if k != "status"}
                        for name, value in venues.items()},
         })
-    return {"updated_at": time.time(), "symbols": symbols, "errors": errors}
+    return {
+        "updated_at": time.time(),
+        "symbols": symbols,
+        "compatible_symbols": [row["symbol"] for row in symbols if row["compatible"]],
+        "errors": errors,
+        "compatibility_basis": (
+            "RH 是脚本默认主腿；Arcus 与 Entropy 是可选对冲腿。"
+            "候选只要求三个市场都活跃，且数量步长和最小下单数量可验证；不读取策略阈值。"
+        ),
+    }
 
 
 @dataclass
 class MonitorRules:
-    midline_bps: float = 0.0
-    upper_bps: float = 4.0
-    lower_bps: float = 4.0
     entropy_fee_bps: float = 0.0
     rh_fee_bps: float = 0.0
     arcus_fee_bps: float = 0.0
-    source: str = "默认"
+    source: str = "脚本适配检查"
     primary_key: str = "rh"
 
 
@@ -269,15 +278,10 @@ class TripleVenueMonitor:
                           left.fee_bps, right.fee_bps)
         buy = _net_edge(right.book.best_bid(), left.book.best_ask(),
                         right.fee_bps, left.fee_bps)
-        sell_hurdle = self.rules.midline_bps + self.rules.upper_bps if script_compatible else self.rules.upper_bps
-        buy_hurdle = self.rules.lower_bps - self.rules.midline_bps if script_compatible else self.rules.lower_bps
         return {
             "key": f"{left_key}-{right_key}", "left": left.name, "right": right.name,
             "mid_spread_bps": mid, "sell_left_buy_right_bps": sell,
-            "buy_left_sell_right_bps": buy, "sell_hurdle_bps": sell_hurdle,
-            "buy_hurdle_bps": buy_hurdle, "script_compatible": script_compatible,
-            "sell_signal": sell is not None and sell >= sell_hurdle,
-            "buy_signal": buy is not None and buy >= buy_hurdle,
+            "buy_left_sell_right_bps": buy, "script_compatible": script_compatible,
         }
 
     def snapshot(self) -> dict:
@@ -301,10 +305,12 @@ class TripleVenueMonitor:
             return
         now = time.time()
         for pair in self.snapshot()["pairs"]:
-            for direction, edge_key, hurdle_key in (("卖左买右", "sell_left_buy_right_bps", "sell_hurdle_bps"),
-                                                     ("买左卖右", "buy_left_sell_right_bps", "buy_hurdle_bps")):
-                edge, hurdle = pair[edge_key], pair[hurdle_key]
-                active = edge is not None and edge >= hurdle
+            for direction, edge_key in (("卖左买右", "sell_left_buy_right_bps"),
+                                        ("买左卖右", "buy_left_sell_right_bps")):
+                edge = pair[edge_key]
+                # This is only a notification condition. Candidate
+                # compatibility above never depends on a threshold.
+                active = pair["script_compatible"] and edge is not None and edge > 0
                 key = pair["key"] + ":" + direction
                 if not active:
                     self.alert_state[key] = False
@@ -315,8 +321,8 @@ class TripleVenueMonitor:
                 self.last_alert[key] = now
                 text = (f"📊 价差信号 · {self.symbol}\n"
                         f"路径：{pair['left']} ⇄ {pair['right']} · {direction}\n"
-                        f"可成交净价差：{edge:+.2f} bps（门槛 {hurdle:+.2f} bps）\n"
-                        f"脚本对冲适配：{'是' if pair['script_compatible'] else '否，仅监控'}")
+                        f"可成交净价差：{edge:+.2f} bps（扣除当前配置费率后为正）\n"
+                        "RH 为默认主腿；该币种通过脚本市场规格适配检查")
                 task = asyncio.create_task(self.notifier.send(text), name="telegram-spread-alert")
                 self.notify_tasks.add(task)
                 task.add_done_callback(self.notify_tasks.discard)

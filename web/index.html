@@ -34,14 +34,14 @@
         <section id="monitor-page" hidden>
           <div class="page-heading"><div><div class="eyebrow">OBSERVABILITY</div><h1>监控<span class="heading-dot">.</span></h1><p>查看双腿盘口、持仓与执行，跟踪每一个运行事件。</p></div><label class="task-picker"><span>当前任务</span><select id="monitor-select" aria-label="选择监控任务"></select></label></div>
           <section class="panel tri-monitor-panel">
-            <div class="panel-heading"><div><h2>RH / Arcus / Entropy 三市场价差</h2><p>只读行情；按策略 YAML 的阈值计算可成交净价差，不会发送订单。</p></div><span id="tri-monitor-status" class="badge">未启动</span></div>
-            <div class="tri-toolbar"><label>详情币种<select id="tri-symbol" aria-label="选择三市场详情币种"><option value="">正在发现市场…</option></select></label><label>阈值配置<select id="tri-strategy" aria-label="选择三市场策略"></select></label><label>策略对冲腿<select id="tri-hedge-venue" aria-label="选择策略对冲腿"><option value="arcus">Arcus</option><option value="entropy">Entropy</option></select></label><button id="tri-refresh" class="button secondary" type="button">刷新候选</button><button id="tri-start" class="button primary" type="button">启动全部候选</button><button id="tri-stop" class="button secondary" type="button" disabled>停止</button></div>
+            <div class="panel-heading"><div><h2>RH / Arcus / Entropy 三市场价差</h2><p>只读行情；候选币种按脚本适配条件筛选，差价展示不使用阈值，也不会发送订单。</p></div><span id="tri-monitor-status" class="badge">未启动</span></div>
+            <div class="tri-toolbar"><label>详情币种<select id="tri-symbol" aria-label="选择三市场详情币种"><option value="">正在发现市场…</option></select></label><button id="tri-refresh" class="button secondary" type="button">刷新适配币种</button><button id="tri-start" class="button primary" type="button">监控全部适配币种</button><button id="tri-stop" class="button secondary" type="button" disabled>停止</button></div>
             <p id="tri-monitor-error" class="form-error" role="alert"></p>
             <div id="tri-candidates" class="tri-candidates"></div>
             <div id="tri-overview" class="tri-overview"></div>
             <div id="tri-venues" class="tri-venues"></div>
             <div id="tri-pairs" class="tri-pairs"></div>
-            <p class="field-note">当前脚本默认主腿是 RH；选择的“策略对冲腿”会决定 YAML 中对冲费率套用到 Entropy 或 Arcus。候选只表示三个公开市场都活跃且数量步长、最小数量可验证；交易所未公开合约乘数时，仍需用最小仓位人工核对实际成交数量。</p>
+            <p class="field-note">当前脚本默认主腿是 RH，Arcus 与 Entropy 都作为可选对冲腿。适配币种只根据三个公开市场都活跃、数量步长和最小下单数量是否可验证来判断；阈值只属于交易脚本下单策略，不参与这里的筛选。交易所未公开合约乘数时，仍需用最小仓位人工核对实际成交数量。</p>
           </section>
           <div id="monitor-empty" class="panel empty-state"><div class="empty-icon">▥</div><h3>等待你的第一个任务</h3><p>创建任务后，就可以在这里查看运行状态与日志。</p><a href="/dex-arbitrage" class="button secondary" data-page="dex">前往 DEX 套利 ↗</a></div>
           <div id="monitor-content" hidden>
