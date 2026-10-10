@@ -56,8 +56,10 @@ def setup_logging(level: str, log_file: str = None,
 
 async def amain(cfg, record_only: bool, use_dashboard: bool, force_tty: bool,
                 log_buffer, lang: str, status_file: str = None,
-                parent_pid: int = None, control_file: str = None) -> None:
-    eng = Engine(cfg, record_only=record_only, control_file=control_file)
+                parent_pid: int = None, control_file: str = None,
+                config_path: str = None) -> None:
+    eng = Engine(cfg, record_only=record_only, control_file=control_file,
+                 config_path=config_path)
     eng.ensure_async_state()
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
@@ -182,7 +184,8 @@ def main() -> None:
                           lang="zh" if args.cn else "en",
                           status_file=args.status_file,
                           parent_pid=args.parent_pid,
-                          control_file=args.control_file))
+                          control_file=args.control_file,
+                          config_path=args.config))
     except RuntimeError as e:
         # startup failures (missing credentials, market not found, venue
         # unreachable) — a clean message, not a traceback

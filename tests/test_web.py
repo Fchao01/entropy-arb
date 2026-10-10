@@ -323,6 +323,22 @@ def test_csv_pagination_returns_newest_rows_first(tmp_path):
     assert [row["ts"] for row in last["rows"]] == [str(index) for index in range(4, -1, -1)]
 
 
+def test_missing_task_config_is_rebuilt_from_strategy_file(tmp_path):
+    async def scenario():
+        manager = manager_at(tmp_path)
+        try:
+            (manager.root / "configs/btc.yaml").write_text(STRATEGY)
+            task = await manager.put({**payload("BTC"), "strategy_file": "btc.yaml"})
+            config_path = manager.directory(task["id"]) / "config.yaml"
+            config_path.unlink()
+            rebuilt = manager.ensure_task_config(manager.get(task["id"]))
+            assert rebuilt == config_path
+            assert "midline_bps" in rebuilt.read_text()
+        finally:
+            await manager.close()
+    asyncio.run(scenario())
+
+
 def test_configuration_library_privacy_and_retained_values(tmp_path, monkeypatch):
     async def scenario():
         manager = manager_at(tmp_path)

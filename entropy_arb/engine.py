@@ -48,10 +48,12 @@ BALANCE_POLL_SEC = 30.0
 
 
 class Engine:
-    def __init__(self, cfg: Config, record_only: bool = False, control_file: str = None) -> None:
+    def __init__(self, cfg: Config, record_only: bool = False,
+                 control_file: str = None, config_path: str = None) -> None:
         self.cfg = cfg
         self.record_only = record_only
         self.control_file = control_file
+        self.config_path = config_path
         self.session: Optional[aiohttp.ClientSession] = None
         self.entropy = None
         self.hedge = None
@@ -211,6 +213,9 @@ class Engine:
                  self.hedge.conf.symbol, cfg.midline_bps, cfg.lower_bps,
                  cfg.upper_bps, self.entropy.fee_bps, self.hedge.fee_bps,
                  self._step, self._min_notional)
+        log.info("strategy config=%s thresholds={midline_bps: %+.3f, upper_bps: %.3f, lower_bps: %.3f}",
+                 self.config_path or "<in-memory>", cfg.midline_bps,
+                 cfg.upper_bps, cfg.lower_bps)
 
         if self.record_only:
             log.warning("RECORD-ONLY — collecting minute data, no strategy, "

@@ -40,6 +40,12 @@ def snapshot(engine) -> dict:
     live = ready and not engine.record_only
     result = {
         "updated_at": now, "started_at": engine.start_ts,
+        "config_path": getattr(engine, "config_path", None),
+        "thresholds": {
+            "midline_bps": engine.cfg.midline_bps,
+            "upper_bps": engine.cfg.upper_bps,
+            "lower_bps": engine.cfg.lower_bps,
+        },
         "ready": ready, "halted": engine.halted, "paused": engine.manual_paused,
         "mode": "record" if engine.record_only else "live",
         "telegram_enabled": engine.telegram.enabled,

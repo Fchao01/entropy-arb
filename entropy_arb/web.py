@@ -371,7 +371,7 @@ class TaskManager:
         """Calculate a threshold proposal without changing the task."""
         task = self.get(task_id)
         directory = self.directory(task_id)
-        config_path = directory / "config.yaml"
+        config_path = self.ensure_task_config(task)
         cfg = load_config(str(config_path), symbol=task["symbol"],
                           primary_venue=task["primary"], hedge_venue=task["hedge"],
                           credential_env=self.environment(task["profile"]))
@@ -395,6 +395,7 @@ class TaskManager:
         if not apply:
             return {
                 "task_id": task_id, "window": window.label,
+                "config_path": str(self.directory(task_id) / "config.yaml"),
                 "window_start": window.start_ts, "window_end": window.end_ts,
                 "rows": suggestion.rows, "span_hours": suggestion.span_hours,
                 "current": old,
@@ -536,6 +537,14 @@ class TaskManager:
 
     def directory(self, task_id):
         return self.data / task_id
+
+    def ensure_task_config(self, task):
+        path = self.directory(task["id"]) / "config.yaml"
+        if path.is_file() and not path.is_symlink():
+            return path
+        _, rendered, _, _ = self.validate(task, task["id"])
+        self.write_config(path, rendered)
+        return path
 
     def get(self, task_id):
         if task_id not in self.tasks:
