@@ -1,5 +1,6 @@
 """Web manager integration tests; child processes never connect to exchanges."""
 import asyncio
+import csv
 import fcntl
 import json
 import os
@@ -13,6 +14,7 @@ from entropy_arb.config import ConfigError, load_config
 from entropy_arb.engine import Engine
 from entropy_arb.status import clean_numbers, snapshot
 from entropy_arb.web import ConsoleError, ROOT, TaskManager, create_app, paged_csv, tail_csv
+from entropy_arb.thresholds import daily_window
 
 STRATEGY = """thresholds:
   midline_bps: 0
@@ -80,7 +82,8 @@ def test_process_lifecycle_and_isolated_paths(tmp_path):
             task = await manager.put(payload())
             task_id = task["id"]
             config = yaml.safe_load((manager.directory(task_id) / "config.yaml").read_text())
-            assert config["recorder"]["csv"] == str(manager.directory(task_id) / "minutes.csv")
+            assert "recorder" not in config
+            assert manager.minute_path(manager.get(task_id)) == manager.root / "logs/ETH/minutes.csv"
             result = await manager.start(task_id)
             assert result["state"] == "running" and result["pid"]
             watcher = manager.running[task_id]["watcher"]
@@ -251,7 +254,9 @@ def test_auth_origin_errors_downloads_and_logout(tmp_path):
             listed = await (await client.get("/api/tasks")).json()
             assert "config" not in listed["tasks"][0]
             directory = manager.directory(task["id"])
-            (directory / "minutes.csv").write_text("minute_ts,time_utc,premium_close_bps\n1,2026-01-01,2.5\n")
+            minutes = manager.minute_path(manager.get(task["id"]))
+            minutes.parent.mkdir(parents=True, exist_ok=True)
+            minutes.write_text("minute_ts,time_utc,premium_close_bps\n1,2026-01-01,2.5\n")
             (directory / "engine.log").write_text("test log\n")
             detail = await (await client.get(f"/api/tasks/{task['id']}")).json()
             assert detail["minutes"][0]["premium_close_bps"] == "2.5"
@@ -339,6 +344,78 @@ def test_missing_task_config_is_rebuilt_from_strategy_file(tmp_path):
     asyncio.run(scenario())
 
 
+@pytest.mark.parametrize("absolute", [False, True])
+def test_thresholds_read_yaml_csv_and_update_linked_yaml(tmp_path, absolute):
+    async def scenario():
+        manager = manager_at(tmp_path)
+        try:
+            template = "history/{primary}-{hedge}/{symbol}/minutes.csv"
+            if absolute:
+                template = str(tmp_path / template)
+            source = STRATEGY + f"recorder:\n  csv: {template}\n"
+            await manager.save_strategy("sndk.yaml", {"config": source})
+            task = await manager.put({**payload("SNDK"), "strategy_file": "sndk.yaml"})
+            snapshot_path = manager.directory(task["id"]) / "config.yaml"
+            assert yaml.safe_load(snapshot_path.read_text())["recorder"]["csv"] == template
+            expected = manager.configured_path(template.format(
+                primary="lighter-rh", hedge="arcus", symbol="SNDK"))
+            assert manager.minute_path(manager.get(task["id"])) == expected
+            window = daily_window()
+            expected.parent.mkdir(parents=True)
+            fields = ["minute_ts", "samples", "premium_close_bps", "sell_edge_max_bps", "buy_edge_max_bps"]
+            with expected.open("w", newline="") as handle:
+                writer = csv.DictWriter(handle, fieldnames=fields)
+                writer.writeheader()
+                for index in range(40):
+                    writer.writerow(dict(minute_ts=window.start_ts + index * 60,
+                                         samples=60, premium_close_bps=7,
+                                         sell_edge_max_bps=20, buy_edge_max_bps=1))
+            (manager.directory(task["id"]) / "minutes.csv").write_text("wrong data\n")
+            preview = await manager.manual_threshold(task["id"])
+            assert preview["data_path"] == str(expected)
+            assert preview["suggested"]["midline_bps"] == 7
+            await manager.auto_update_task(task["id"], window)
+            updated = yaml.safe_load(manager.strategy("sndk.yaml"))
+            assert updated["thresholds"]["midline_bps"] == 7
+            assert updated["recorder"]["csv"] == template
+            assert manager._read_auto_status(task["id"])["data_path"] == str(expected)
+        finally:
+            await manager.close()
+    asyncio.run(scenario())
+
+
+def test_stopped_task_migrates_overridden_csv_from_original_yaml(tmp_path):
+    async def scenario():
+        manager = manager_at(tmp_path)
+        try:
+            source = STRATEGY + "recorder:\n  csv: logs/{symbol}/minutes.csv\n"
+            task = await manager.put({**payload("SNDK"), "config": source})
+            path = manager.directory(task["id"]) / "config.yaml"
+            old = yaml.safe_load(path.read_text())
+            old["recorder"]["csv"] = str(manager.directory(task["id"]) / "minutes.csv")
+            path.write_text(yaml.safe_dump(old))
+            assert manager.minute_path(manager.get(task["id"])) == manager.root / "logs/SNDK/minutes.csv"
+            assert yaml.safe_load(path.read_text())["recorder"]["csv"] == "logs/{symbol}/minutes.csv"
+        finally:
+            await manager.close()
+    asyncio.run(scenario())
+
+
+def test_running_tasks_cannot_share_configured_csv(tmp_path):
+    async def scenario():
+        manager = manager_at(tmp_path)
+        try:
+            source = STRATEGY + "recorder:\n  csv: history/shared.csv\n"
+            first = await manager.put({**payload("ETH"), "config": source})
+            second = await manager.put({**payload("BTC"), "config": source})
+            await manager.start(first["id"])
+            with pytest.raises(ConsoleError, match="CSV 路径"):
+                await manager.start(second["id"])
+        finally:
+            await manager.close()
+    asyncio.run(scenario())
+
+
 def test_configuration_library_privacy_and_retained_values(tmp_path, monkeypatch):
     async def scenario():
         manager = manager_at(tmp_path)
@@ -409,6 +486,21 @@ def test_linked_yaml_uses_latest_server_file_and_blocks_running_edits(tmp_path):
             await manager.save_strategy("eth.yaml", {"config": changed_market, "overwrite": True})
             with pytest.raises(ConsoleError, match="新建任务"):
                 await manager.start(task["id"])
+        finally:
+            await manager.close()
+    asyncio.run(scenario())
+
+
+def test_editing_linked_yaml_saves_back_to_source_file(tmp_path):
+    async def scenario():
+        manager = manager_at(tmp_path)
+        try:
+            await manager.save_strategy("btc.yaml", {"config": STRATEGY})
+            task = await manager.put({**payload("BTC"), "strategy_file": "btc.yaml"})
+            edited = STRATEGY.replace("midline_bps: 0", "midline_bps: -0.3")
+            await manager.put({**task, "config": edited, "strategy_file": "btc.yaml", "save_strategy": True}, task["id"])
+            assert "midline_bps: -0.3" in (manager.root / "configs/btc.yaml").read_text()
+            assert yaml.safe_load((manager.directory(task["id"]) / "config.yaml").read_text())["thresholds"]["midline_bps"] == -0.3
         finally:
             await manager.close()
     asyncio.run(scenario())

@@ -388,6 +388,7 @@ async function openEditor(task = null) {
   for (const kind of ["primary", "hedge"]) element(`task-${kind}`).innerHTML = state.meta[`${kind}_venues`].map((value) => `<option value="${value}">${escapeHtml(venues[value])}</option>`).join("");
   element("task-profile").innerHTML = state.meta.profiles.map((profile) => `<option value="${escapeHtml(profile)}">${escapeHtml(profile === "default" ? "default · 默认 .env" : profile)}</option>`).join("");
   element("task-strategy").innerHTML = '<option value="">独立配置 · 此任务专用</option>' + state.meta.strategies.map((name) => `<option value="${escapeHtml(name)}">${escapeHtml(strategyLabel(name))}</option>`).join("");
+  element("task-strategy").parentElement.querySelector("small").textContent = "选择文件会加载模板；修改后点击保存任务，会直接更新这个 YAML 文件。";
   element("task-strategy").value = task ? task.strategy_file || "" : state.meta.strategies[0] || "";
   element("task-primary").value = task?.primary || "lighter-rh";
   element("task-hedge").value = task?.hedge || "arcus";
@@ -415,8 +416,8 @@ async function applyStrategy() {
       element("config-yaml").value = saved.preview;
       syncFields();
     }
-    for (const id of [...Object.keys(fieldMap), "task-primary", "sync-fields"]) element(id).disabled = Boolean(name);
-    element("config-yaml").readOnly = Boolean(name);
+    for (const id of [...Object.keys(fieldMap), "task-primary", "task-hedge", "sync-fields"]) element(id).disabled = false;
+    element("config-yaml").readOnly = false;
   } finally {element("save-task").disabled = false;}
 }
 
@@ -430,7 +431,7 @@ for (const [id, [section, key]] of Object.entries(fieldMap)) {
   });
 }
 element("task-primary").addEventListener("change", venueChanged);
-element("task-hedge").addEventListener("change", () => {if (!element("task-strategy").value) venueChanged();});
+element("task-hedge").addEventListener("change", venueChanged);
 element("sync-fields").addEventListener("click", syncFields);
 element("config-yaml").addEventListener("change", syncFields);
 element("task-symbol").addEventListener("input", () => {
@@ -444,7 +445,8 @@ element("task-form").addEventListener("submit", async (event) => {
   element("save-task").disabled = true;
   element("task-error").textContent = "";
   try {
-    const payload = {name: element("task-name").value, symbol: element("task-symbol").value, primary: element("task-primary").value, hedge: element("task-hedge").value, profile: element("task-profile").value, mode: element("task-form").querySelector('input[name="mode"]:checked').value, config: element("config-yaml").value, strategy_file: element("task-strategy").value || null};
+    const strategyFile = element("task-strategy").value || null;
+    const payload = {name: element("task-name").value, symbol: element("task-symbol").value, primary: element("task-primary").value, hedge: element("task-hedge").value, profile: element("task-profile").value, mode: element("task-form").querySelector('input[name="mode"]:checked').value, config: element("config-yaml").value, strategy_file: strategyFile, save_strategy: Boolean(strategyFile)};
     await api(state.editing ? `/api/tasks/${state.editing}` : "/api/tasks", state.editing ? "PUT" : "POST", payload);
     element("task-dialog").close();
     toast("配置已保存，任务尚未启动");
@@ -488,7 +490,7 @@ async function openThreshold(task) {
   element("threshold-dialog").showModal();
   try {
     const result = await api(`/api/tasks/${task.id}/threshold`);
-    element("threshold-window").textContent = `${result.window} · ${result.rows} 条有效分钟数据 · 覆盖 ${number(result.span_hours, 1)} 小时 · 配置：${result.config_path || "—"}`;
+    element("threshold-window").textContent = `${result.window} · ${result.rows} 条有效分钟数据 · 覆盖 ${number(result.span_hours, 1)} 小时 · 数据：${result.data_path || "—"} · 配置：${result.config_path || "—"}`;
     element("threshold-current").textContent = `当前：中线 ${number(result.current.midline_bps, 1)} / 上带 ${number(result.current.upper_bps, 1)} / 下带 ${number(result.current.lower_bps, 1)} bps`;
     element("threshold-midline").value = result.suggested.midline_bps;
     element("threshold-upper").value = result.suggested.upper_bps;

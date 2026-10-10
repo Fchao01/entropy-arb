@@ -175,7 +175,10 @@ def main() -> None:
         setup_logging(cfg.log_level, log_file=cfg.log_file,
                       extra_handler=log_buffer)
     else:
-        setup_logging(cfg.log_level)
+        # The web console starts children with --no-dashboard.  That mode
+        # still needs to honor the YAML logging.file; otherwise every logger
+        # falls back to stdout and the configured file stays empty.
+        setup_logging(cfg.log_level, log_file=cfg.log_file)
 
     try:
         asyncio.run(amain(cfg, record_only=args.record_only,

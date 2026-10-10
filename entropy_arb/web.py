@@ -376,7 +376,7 @@ class TaskManager:
                           primary_venue=task["primary"], hedge_venue=task["hedge"],
                           credential_env=self.environment(task["profile"]))
         window = daily_window()
-        csv_path = directory / "minutes.csv"
+        csv_path = self.configured_path(cfg.recorder_csv)
         if not csv_path.exists():
             raise ConsoleError("还没有分钟行情数据，先运行采集任务")
         rows = load_window_rows(csv_path, window, AUTO_THRESHOLD_MIN_SAMPLES)
@@ -396,6 +396,7 @@ class TaskManager:
             return {
                 "task_id": task_id, "window": window.label,
                 "config_path": str(self.directory(task_id) / "config.yaml"),
+                "data_path": str(self.minute_path(task)),
                 "window_start": window.start_ts, "window_end": window.end_ts,
                 "rows": suggestion.rows, "span_hours": suggestion.span_hours,
                 "current": old,
@@ -428,11 +429,11 @@ class TaskManager:
         """Update one live task and restart it only after a valid calculation."""
         task = self.get(task_id)
         directory = self.directory(task_id)
-        config_path = directory / "config.yaml"
-        csv_path = directory / "minutes.csv"
+        config_path = self.ensure_task_config(task)
         cfg = load_config(str(config_path), symbol=task["symbol"],
                           primary_venue=task["primary"], hedge_venue=task["hedge"],
                           credential_env=self.environment(task["profile"]))
+        csv_path = self.configured_path(cfg.recorder_csv)
         if suggestion is None:
             rows = load_window_rows(csv_path, window, AUTO_THRESHOLD_MIN_SAMPLES)
             suggestion = suggest(rows, cfg.entropy.fee_bps + cfg.hedge.fee_bps,
@@ -451,6 +452,7 @@ class TaskManager:
             self._write_auto_status(task_id, {
                 "status": "unchanged", "window": window.label,
                 "window_start": window.start_ts, "window_end": window.end_ts,
+                "data_path": str(csv_path),
                 "rows": suggestion.rows, "span_hours": suggestion.span_hours,
                 "thresholds": new_thresholds, "removed_rows": removed,
                 "checked_at": time.time(),
@@ -511,6 +513,7 @@ class TaskManager:
         self._write_auto_status(task_id, {
             "status": "applied", "window": window.label,
             "window_start": window.start_ts, "window_end": window.end_ts,
+            "data_path": str(csv_path),
             "rows": suggestion.rows, "span_hours": suggestion.span_hours,
             "old_thresholds": old_thresholds, "thresholds": new_thresholds,
             "removed_rows": removed, "applied_at": time.time(),
@@ -538,13 +541,41 @@ class TaskManager:
     def directory(self, task_id):
         return self.data / task_id
 
+    def configured_path(self, value):
+        """Resolve a YAML output path relative to the project root."""
+        path = Path(value)
+        return (path if path.is_absolute() else self.root / path).resolve()
+
+    def task_config(self, task):
+        return load_config(str(self.ensure_task_config(task)),
+                           symbol=task["symbol"], primary_venue=task["primary"],
+                           hedge_venue=task["hedge"], credential_env={})
+
+    def minute_path(self, task):
+        return self.configured_path(self.task_config(task).recorder_csv)
+
+    def log_path(self, task):
+        return self.configured_path(self.task_config(task).log_file)
+
+    def trades_path(self, task):
+        return self.configured_path(self.task_config(task).trades_csv)
+
     def ensure_task_config(self, task):
         path = self.directory(task["id"]) / "config.yaml"
-        if path.is_file() and not path.is_symlink():
+        # Never replace the snapshot of a running process: it still uses the
+        # path loaded at startup. Stopped tasks use their original YAML again,
+        # which also removes the old console-imposed recorder path.
+        if (task["id"] in self.running or self.instance_locked(task["id"])) and path.is_file() and not path.is_symlink():
             return path
         _, rendered, _, _ = self.validate(task, task["id"])
         self.write_config(path, rendered)
         return path
+
+    def task_snapshot_config(self, task):
+        path = self.directory(task["id"]) / "config.yaml"
+        if path.is_file() and not path.is_symlink():
+            return path
+        return self.ensure_task_config(task)
 
     def get(self, task_id):
         if task_id not in self.tasks:
@@ -731,7 +762,7 @@ class TaskManager:
         finally:
             await notifier.close()
 
-    def validate(self, payload, task_id):
+    def validate(self, payload, task_id, strategy_text=None):
         if not isinstance(payload, dict):
             raise ConsoleError("请求必须是 JSON 对象")
         name = str(payload.get("name", "")).strip()
@@ -749,7 +780,7 @@ class TaskManager:
         if mode not in ("record", "live"):
             raise ConsoleError("模式必须为采集或实盘")
         strategy_file = payload.get("strategy_file") or None
-        text = self.strategy(strategy_file) if strategy_file else payload.get("config", "")
+        text = (strategy_text if strategy_text is not None else self.strategy(strategy_file)) if strategy_file else payload.get("config", "")
         if not isinstance(text, str) or len(text) > 32000:
             raise ConsoleError("YAML 配置长度不能超过 32000 字符")
         raw = self.check_strategy(text)
@@ -762,9 +793,14 @@ class TaskManager:
         if "primary" in raw and raw["primary"].get("venue", primary) != primary:
             raise ConsoleError("YAML primary.venue 与页面主腿选择不一致")
         directory = self.directory(task_id)
-        raw.setdefault("recorder", {}).update(csv=str(directory / "minutes.csv"))
-        raw.setdefault("logging", {}).update(
-            trades_csv=str(directory / "trades.csv"), file=str(directory / "engine.log"), dashboard=False)
+        # Keep recorder.csv exactly as authored; load_config expands market
+        # placeholders and supplies the same default as the CLI when omitted.
+        logging_config = raw.setdefault("logging", {})
+        # YAML owns output locations.  The task directory is only the safe
+        # fallback for strategies that omit them.
+        logging_config.setdefault("trades_csv", str(directory / "trades.csv"))
+        logging_config.setdefault("file", str(directory / "engine.log"))
+        logging_config["dashboard"] = False
         rendered = yaml.safe_dump(raw, allow_unicode=True, sort_keys=False)
         values = self.environment(profile)
         with tempfile.TemporaryDirectory(dir=self.data) as temporary:
@@ -807,9 +843,16 @@ class TaskManager:
                 old = dict(id=task_id, created_at=time.time(), state="stopped",
                            pid=None, started_at=None, ended_at=None, exit_code=None,
                            manual_paused=False)
-            public, rendered, cfg, values = self.validate(payload, task_id)
+            strategy_file = payload.get("strategy_file") or None
+            save_strategy = bool(strategy_file and payload.get("save_strategy") is True)
+            strategy_text = payload.get("config") if save_strategy else None
+            public, rendered, cfg, values = self.validate(payload, task_id,
+                                                          strategy_text=strategy_text)
+            if save_strategy:
+                self.ensure_unused("strategy_file", strategy_file)
+                self.write_config(self.strategy_path(strategy_file), public["config"])
             if old.get("started_at"):
-                old_cfg = load_config(str(self.directory(task_id) / "config.yaml"),
+                old_cfg = load_config(str(self.task_snapshot_config(old)),
                                       symbol=old["symbol"], primary_venue=old["primary"],
                                       hedge_venue=old["hedge"], credential_env={})
                 prior_pair = (old["symbol"], old["primary"], old["hedge"],
@@ -857,7 +900,7 @@ class TaskManager:
                     raise ConsoleError("上一进程仍在退出，请等待并核对服务器进程与持仓")
             public, rendered, cfg, credentials = self.validate(task, task_id)
             if task.get("started_at"):
-                previous = load_config(str(self.directory(task_id) / "config.yaml"),
+                previous = load_config(str(self.task_snapshot_config(task)),
                                        symbol=task["symbol"], primary_venue=task["primary"],
                                        hedge_venue=task["hedge"], credential_env={})
                 if (market_resource(previous.primary), market_resource(previous.hedge)) != (
@@ -879,6 +922,8 @@ class TaskManager:
                 other = self.tasks[other_id]
                 if other["symbol"] == task["symbol"] and {other["primary"], other["hedge"]} == {task["primary"], task["hedge"]}:
                     raise ConsoleError(f"同币种交易所组合已运行：{other['name']}")
+                if self.configured_path(cfg.recorder_csv) == runtime.get("recorder_path"):
+                    raise ConsoleError(f"行情 CSV 路径与运行任务「{other['name']}」相同；请在 YAML 中设置独立 recorder.csv")
                 if other["mode"] == task["mode"] == "live":
                     if markets & runtime["markets"]:
                         raise ConsoleError(f"交易市场与实盘任务「{other['name']}」重叠，请勿同时管理同一持仓")
@@ -911,6 +956,7 @@ class TaskManager:
             task.update(state="running", pid=process.pid, started_at=time.time(), ended_at=None,
                         exit_code=None, manual_paused=False)
             runtime = dict(process=process, markets=markets, signers=signers,
+                           recorder_path=self.configured_path(cfg.recorder_csv),
                            grace=cfg.settle_timeout_sec + 20,
                            log_capture=PrivateLogCapture(credentials))
             self.running[task_id] = runtime
@@ -935,7 +981,8 @@ class TaskManager:
 
     async def watch(self, task_id, runtime):
         process = runtime["process"]
-        log_path = self.directory(task_id) / "engine.log"
+        log_path = self.log_path(self.tasks[task_id])
+        log_path.parent.mkdir(parents=True, exist_ok=True)
         capture = runtime["log_capture"]
         try:
             while True:
@@ -1199,9 +1246,9 @@ def create_app(manager: TaskManager, password: str, secure_cookie=False):
             trades_page_size = int(request.query.get("trades_page_size", "10"))
         except ValueError:
             raise web.HTTPBadRequest(text="成交记录分页参数无效")
-        trades = paged_csv(directory / "trades.csv", trades_page, trades_page_size)
+        trades = paged_csv(manager.trades_path(task), trades_page, trades_page_size)
         return web.json_response(dict(task=manager.view(task),
-                                      minutes=tail_csv(directory / "minutes.csv"),
+                                      minutes=tail_csv(manager.minute_path(task)),
                                       trades=trades["rows"],
                                       trades_total=trades["total"],
                                       trades_page=trades["page"],
@@ -1211,7 +1258,7 @@ def create_app(manager: TaskManager, password: str, secure_cookie=False):
     async def logs(request):
         task = manager.get(request.match_info["id"])
         directory = manager.directory(task["id"])
-        return web.json_response(dict(text=tail_text(directory / "engine.log"),
+        return web.json_response(dict(text=tail_text(manager.log_path(task)),
                                       events=tail_text(directory / "events.log", 16000)))
 
     async def market_candidates(request):
@@ -1254,12 +1301,19 @@ def create_app(manager: TaskManager, password: str, secure_cookie=False):
         return web.json_response(monitor.snapshot())
 
     async def download(request):
-        manager.get(request.match_info["id"])
+        task = manager.get(request.match_info["id"])
         kind = request.match_info["kind"]
         names = {"minutes": "minutes.csv", "trades": "trades.csv", "logs": "engine.log", "events": "events.log"}
         if kind not in names:
             raise web.HTTPNotFound()
-        path = manager.directory(request.match_info["id"]) / names[kind]
+        if kind == "minutes":
+            path = manager.minute_path(task)
+        elif kind == "trades":
+            path = manager.trades_path(task)
+        elif kind == "logs":
+            path = manager.log_path(task)
+        else:
+            path = manager.directory(request.match_info["id"]) / names[kind]
         if not path.exists():
             raise web.HTTPNotFound(text="还没有生成文件")
         return web.FileResponse(path, headers={"Content-Disposition": f'attachment; filename="{names[kind]}"'})
