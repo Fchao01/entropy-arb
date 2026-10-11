@@ -490,7 +490,7 @@ async function openThreshold(task) {
   element("threshold-dialog").showModal();
   try {
     const result = await api(`/api/tasks/${task.id}/threshold`);
-    element("threshold-window").textContent = `${result.window} · ${result.rows} 条有效分钟数据 · 覆盖 ${number(result.span_hours, 1)} 小时 · 数据：${result.data_path || "—"} · 配置：${result.config_path || "—"}`;
+    element("threshold-window").textContent = `${result.window} · ${result.rows} 条有效分钟数据 · 覆盖 ${number(result.span_hours, 1)} 小时 · 手续费合计 ${number(result.fees_bps, 2)} bps · 数据：${result.data_path || "—"} · 配置：${result.config_path || "—"}`;
     element("threshold-current").textContent = `当前：中线 ${number(result.current.midline_bps, 1)} / 上带 ${number(result.current.upper_bps, 1)} / 下带 ${number(result.current.lower_bps, 1)} bps`;
     element("threshold-midline").value = result.suggested.midline_bps;
     element("threshold-upper").value = result.suggested.upper_bps;

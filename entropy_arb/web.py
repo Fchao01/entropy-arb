@@ -393,11 +393,15 @@ class TaskManager:
         """Preview or apply a threshold proposal requested from the UI."""
         task, window, suggestion, old = self._threshold_suggestion(task_id)
         if not apply:
+            cfg = load_config(str(self.ensure_task_config(task)), symbol=task["symbol"],
+                              primary_venue=task["primary"], hedge_venue=task["hedge"],
+                              credential_env={})
             return {
                 "task_id": task_id, "window": window.label,
                 "config_path": str(self.directory(task_id) / "config.yaml"),
                 "data_path": str(self.minute_path(task)),
                 "window_start": window.start_ts, "window_end": window.end_ts,
+                "fees_bps": cfg.entropy.fee_bps + cfg.hedge.fee_bps,
                 "rows": suggestion.rows, "span_hours": suggestion.span_hours,
                 "current": old,
                 "suggested": {"midline_bps": suggestion.midline_bps,
@@ -829,6 +833,8 @@ class TaskManager:
             config_file.write_text(rendered, encoding="utf-8")
             cfg = load_config(str(config_file), symbol=symbol, primary_venue=primary,
                               hedge_venue=hedge, credential_env=values)
+        if self.configured_path(cfg.log_file) == self.configured_path(cfg.recorder_csv):
+            raise ConsoleError("logging.file 不能与 recorder.csv 相同；日志不能写入分钟行情 CSV")
         positive = (cfg.entropy.cap_usd, cfg.hedge.cap_usd, cfg.max_order_notional,
                     cfg.min_order_notional, cfg.settle_timeout_sec, cfg.staleness_sec,
                     cfg.reconcile_sec, cfg.status_interval_sec, cfg.venue_probe_sec)

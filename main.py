@@ -156,6 +156,10 @@ def main() -> None:
     except ConfigError as e:
         print(f"config error: {e}", file=sys.stderr)
         sys.exit(2)
+    if os.path.abspath(cfg.log_file) == os.path.abspath(cfg.recorder_csv):
+        print("config error: logging.file must be different from recorder.csv; "
+              "日志不能写入分钟行情 CSV", file=sys.stderr)
+        sys.exit(2)
 
     use_dashboard = (cfg.dashboard or args.dashboard) and not args.no_dashboard
     force_tty = args.dashboard

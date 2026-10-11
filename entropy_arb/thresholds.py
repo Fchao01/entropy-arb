@@ -109,13 +109,11 @@ def load_window_rows(path, window: ThresholdWindow,
     return rows
 
 
-def suggest(rows: Iterable[dict], fees_bps: float, window: ThresholdWindow,
-            min_rows: int = 30) -> ThresholdSuggestion:
+def threshold_values(rows: Iterable[dict], fees_bps: float) -> tuple[float, float, float]:
+    """One calculation used by both the CLI and the daily web update."""
     rows = list(rows)
-    if len(rows) < min_rows:
-        raise ThresholdDataError(
-            f"only {len(rows)} valid minute rows in {window.label} window; "
-            f"at least {min_rows} are required")
+    if not rows:
+        raise ThresholdDataError("no valid minute rows")
     if not math.isfinite(fees_bps) or fees_bps < 0:
         raise ThresholdDataError("combined taker fees must be a finite non-negative number")
     prem = sorted(row["prem"] for row in rows)
@@ -126,6 +124,17 @@ def suggest(rows: Iterable[dict], fees_bps: float, window: ThresholdWindow,
     lower = max(round(_pctl(buy_room, 90) * 2) / 2, 1.0)
     if not all(math.isfinite(value) for value in (midline, upper, lower)):
         raise ThresholdDataError("calculated thresholds are not finite")
+    return midline, upper, lower
+
+
+def suggest(rows: Iterable[dict], fees_bps: float, window: ThresholdWindow,
+            min_rows: int = 30) -> ThresholdSuggestion:
+    rows = list(rows)
+    if len(rows) < min_rows:
+        raise ThresholdDataError(
+            f"only {len(rows)} valid minute rows in {window.label} window; "
+            f"at least {min_rows} are required")
+    midline, upper, lower = threshold_values(rows, fees_bps)
     first, last = rows[0]["ts"], rows[-1]["ts"]
     span_hours = max(0.0, (last - first) / 3600.0 + 1 / 60.0)
     return ThresholdSuggestion(midline, upper, lower, len(rows), span_hours, window)
