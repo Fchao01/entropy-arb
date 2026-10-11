@@ -834,7 +834,17 @@ class TaskManager:
             cfg = load_config(str(config_file), symbol=symbol, primary_venue=primary,
                               hedge_venue=hedge, credential_env=values)
         if self.configured_path(cfg.log_file) == self.configured_path(cfg.recorder_csv):
-            raise ConsoleError("logging.file 不能与 recorder.csv 相同；日志不能写入分钟行情 CSV")
+            # Older task YAMLs used the recorder CSV as the log destination.
+            # Repair that unsafe value while saving so unrelated configuration
+            # edits remain possible and the CSV is never overwritten by logs.
+            logging_config["file"] = "logs/{symbol}/engine.log"
+            rendered = yaml.safe_dump(raw, allow_unicode=True, sort_keys=False)
+            text = rendered
+            with tempfile.TemporaryDirectory(dir=self.data) as temporary:
+                config_file = Path(temporary) / "config.yaml"
+                config_file.write_text(rendered, encoding="utf-8")
+                cfg = load_config(str(config_file), symbol=symbol, primary_venue=primary,
+                                  hedge_venue=hedge, credential_env=values)
         positive = (cfg.entropy.cap_usd, cfg.hedge.cap_usd, cfg.max_order_notional,
                     cfg.min_order_notional, cfg.settle_timeout_sec, cfg.staleness_sec,
                     cfg.reconcile_sec, cfg.status_interval_sec, cfg.venue_probe_sec)

@@ -344,6 +344,21 @@ def test_missing_task_config_is_rebuilt_from_strategy_file(tmp_path):
     asyncio.run(scenario())
 
 
+def test_legacy_log_csv_collision_is_repaired_when_saving(tmp_path):
+    async def scenario():
+        manager = manager_at(tmp_path)
+        try:
+            broken = payload("ETH")
+            broken["config"] += "\nlogging:\n  file: logs/{symbol}/minutes.csv\n"
+            task = await manager.put(broken)
+            saved = yaml.safe_load((manager.directory(task["id"]) / "config.yaml").read_text())
+            assert saved["logging"]["file"] == "logs/{symbol}/engine.log"
+            assert task["config"] == (manager.directory(task["id"]) / "config.yaml").read_text()
+        finally:
+            await manager.close()
+    asyncio.run(scenario())
+
+
 @pytest.mark.parametrize("absolute", [False, True])
 def test_thresholds_read_yaml_csv_and_update_linked_yaml(tmp_path, absolute):
     async def scenario():
