@@ -80,7 +80,6 @@ class BpsStrategy:
         self.pending = False
         self.last_entry_at = 0.0
         self.reason = '等待数据' if self.entry is None else '等待开仓点位'
-        self.projected_net_bps = None
         self.path = Path(self.cfg.log_file).with_suffix('.bps-state.json')
         self.identity = [self.cfg.symbol, self.cfg.primary_venue, self.cfg.hedge_venue,
                          self.cfg.primary.symbol, self.cfg.hedge.symbol, self.cfg.bps_direction]
@@ -178,7 +177,7 @@ class BpsStrategy:
                     window_minutes=self.cfg.bps_window_minutes, window_end=self.window_end,
                     entries=self.entries, max_entries=self.cfg.bps_max_entries,
                     closing=self.closing, reason=self.reason,
-                    projected_net_bps=self.projected_net_bps, data_path=self.cfg.recorder_csv)
+                    data_path=self.cfg.recorder_csv)
 
     def plan(self, buy, sell, closing=False, quote=None):
         eng, cfg = self.engine, self.cfg
@@ -252,32 +251,6 @@ class BpsStrategy:
                        cycle_entry_bps=self.locked_entry if self.entries else self.entry,
                        cycle_exit_bps=self.locked_exit if self.entries else self.exit)
 
-    def projected_return(self, plan, exit_bps):
-        """Cost guard estimate at exit ratio; hedge mid assumed unchanged."""
-        eng, cfg = self.engine, self.cfg
-        p, h = eng.entropy, eng.hedge
-        target_mid = h.book.mid() * (1 + exit_bps / 1e4)
-        if target_mid <= 0:
-            return -math.inf
-        p_half = (p.book.best_ask() - p.book.best_bid()) / (2 * p.book.mid())
-        slip = cfg.leg_slippage_bps / 1e4
-        # Exit is always reduce-only taker; include entry and exit price bounds.
-        if self.long:
-            close = plan.qty * (target_mid * (1 - p_half) * (1 - slip) * (1 - p.fee_bps / 1e4)
-                                - h.book.best_ask() * (1 + slip) * (1 + h.fee_bps / 1e4))
-            notional = plan.buy_notional
-            entry_slip = plan.sell_notional * slip * (1 - plan.sell_fee)
-            if cfg.primary_order_type != 'maker':
-                entry_slip += plan.buy_notional * slip * (1 + plan.buy_fee)
-        else:
-            close = plan.qty * (h.book.best_bid() * (1 - slip) * (1 - h.fee_bps / 1e4)
-                                - target_mid * (1 + p_half) * (1 + slip) * (1 + p.fee_bps / 1e4))
-            notional = plan.sell_notional
-            entry_slip = plan.buy_notional * slip * (1 + plan.buy_fee)
-            if cfg.primary_order_type != 'maker':
-                entry_slip += plan.sell_notional * slip * (1 - plan.sell_fee)
-        return (plan.exp_edge_usd - entry_slip + close) / notional * 1e4
-
     def scan(self, now):
         eng, cfg = self.engine, self.cfg
         if any(not v.book.is_fresh(cfg.staleness_sec) or not v.ready_to_trade()
@@ -331,11 +304,7 @@ class BpsStrategy:
         if plan is None:
             self.reason = '仓位上限或盘口深度不足'
             return None
-        self.projected_net_bps = self.projected_return(plan, exit)
-        if self.projected_net_bps <= cfg.bps_cost_buffer_bps:
-            self.reason = '预计回升空间不足以覆盖开平仓成本'
-            eng._skiplog('[BPS] entry blocked: projected net %.3fbps <= buffer %.3fbps', self.projected_net_bps, cfg.bps_cost_buffer_bps)
-            return None
+        self.reason = '等待开仓成交'
         return buy, sell, plan
 
     def before_execution(self, plan):

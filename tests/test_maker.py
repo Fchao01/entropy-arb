@@ -3,7 +3,7 @@ import asyncio
 import sys
 import time
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -325,6 +325,80 @@ def test_maker_quote_checks_actual_edge_and_book_age():
     e.hedge.set_book(102, 103)
     e.hedge.book.alive_ts = 0
     assert not check(buy, sell, plan, plan.buy_limit)
+
+
+@pytest.mark.parametrize('primary_buy', [True, False])
+def test_unchanged_maker_quote_does_not_shrink_on_validation(primary_buy):
+    from entropy_arb.engine import Engine
+    e, buy, sell, plan = setup_engine(primary_buy)
+    check = Engine._maker_quote_valid.__get__(e)
+    price = plan.buy_limit if primary_buy else plan.sell_limit
+    assert check(buy, sell, plan, price)
+
+
+def test_valid_unfilled_maker_waits_full_timeout_and_logs_reason(caplog):
+    import logging
+    async def run():
+        e, buy, sell, plan = setup_engine()
+        e.cfg.maker_timeout_sec = 5
+        tick = [100.0]
+        canceled_at = []
+        fake_time = SimpleNamespace(monotonic=lambda: tick[0], perf_counter=lambda: tick[0])
+        real_sleep = asyncio.sleep
+        async def sleep(seconds):
+            tick[0] += seconds
+            await real_sleep(0)
+        async def cancel(order):
+            canceled_at.append(tick[0])
+        e.entropy.cancel_maker = AsyncMock(side_effect=cancel)
+        e.entropy.maker_state = AsyncMock(side_effect=lambda *args: state(0, bool(canceled_at), 'canceled' if canceled_at else 'open'))
+        with patch('entropy_arb.maker.time', fake_time), patch('entropy_arb.maker.asyncio.sleep', sleep):
+            await execute_primary_maker(e, buy, sell, plan)
+        assert 5 <= canceled_at[0] - 100 <= 5.11
+        e.hedge.send_taker.assert_not_awaited()
+    with caplog.at_level(logging.INFO, logger='maker'):
+        asyncio.run(run())
+    assert 'reason=timeout' in caplog.text and 'elapsed=' in caplog.text
+
+
+def test_arcus_maker_uses_received_order_stream_without_forced_http_query():
+    from test_arcus import order
+    async def run():
+        v = signed_venue()
+        v._remember_order(order(status='OPEN', state='OPEN', filledSize='0',
+                                remainingSize='0.02', avgFillPrice=None, timeInForce='ALO'))
+        v._lookup_order = AsyncMock(side_effect=RuntimeError('HTTP indexing lag'))
+        handle = MakerOrder('client-1', 2500.01, time.time(), order_id='order-1')
+        initial = await v.maker_state(handle)
+        assert not initial['terminal'] and initial['filled_base'] == 0
+        v._remember_order(order(status='CANCELED', state='CANCELED', filledSize='0.01',
+                                remainingSize='0.01', timeInForce='ALO'))
+        final = await v.maker_state(handle)
+        assert final['terminal'] and final['filled_base'] == .01
+        v._lookup_order.assert_not_awaited()
+        v._orders_ready = False
+        with pytest.raises(RuntimeError, match='HTTP indexing'):
+            await v.maker_state(handle)
+        v._lookup_order.assert_awaited_once()
+    asyncio.run(run())
+
+
+def test_arcus_ack_can_precede_orders_push_without_forcing_early_cancel():
+    from test_arcus import order
+    async def run():
+        v = signed_venue()
+        v._lookup_order = AsyncMock(side_effect=RuntimeError('HTTP indexing lag'))
+        handle = MakerOrder('client-1', 2500.01, time.time(), order_id='order-1')
+        async def publish():
+            await asyncio.sleep(.02)
+            v._remember_order(order(status='OPEN', state='OPEN', filledSize='0',
+                                    remainingSize='0.02', avgFillPrice=None, timeInForce='ALO'))
+        task = asyncio.create_task(publish())
+        result = await v.maker_state(handle)
+        await task
+        assert not result['terminal'] and result['filled_base'] == 0
+        v._lookup_order.assert_not_awaited()
+    asyncio.run(run())
 
 
 def test_hyperliquid_partial_fills_use_actual_prices_and_do_not_guess_on_lag():

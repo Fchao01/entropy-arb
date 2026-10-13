@@ -13,7 +13,6 @@ bps:
   max_entries: 1
   add_interval_sec: 60
   max_position_usd: 1000
-  cost_buffer_bps: 0
 thresholds:
   midline_bps: 0.0
   upper_bps: 4.0

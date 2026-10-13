@@ -35,6 +35,7 @@ from .venue_hl import HLVenue
 from .venue_lighter import LighterVenue
 from .venue_arcus import ArcusVenue
 from .telegram import TelegramNotifier, hedge_message, trade_message
+from .execution_stats import ExecutionStats
 
 log = logging.getLogger("engine")
 
@@ -86,6 +87,7 @@ class Engine:
         self.total_exp_edge = 0.0
         self.total_fill_edge = 0.0
         self.total_fees_usd = 0.0
+        self.execution_stats = ExecutionStats()
         self.start_ts = time.time()
         self._last_skiplog = 0.0
         self._poke_due: Optional[float] = None
@@ -362,10 +364,15 @@ class Engine:
         # The maker quote provides a fixed price, not marketable primary depth.
         # Hedge book depth, inventory caps and order size still limit the quote.
         quote = OrderBook()
-        available = max(cap_notional / price, self._step) / self.cfg.take_fraction
+        primary_buy = buy is self.entropy
+        buy_price = price if primary_buy else buy.book.best_ask()
+        if buy_price is None:
+            return None, "empty_book"
+        # cap_notional limits the BUY leg. A fixed primary SELL quote must
+        # not be shrunk a second time using the different primary price.
+        available = max(cap_notional / buy_price, self._step) / self.cfg.take_fraction
         quote.asks = {price: available}
         quote.bids = {price: available}
-        primary_buy = buy is self.entropy
         return plan_arb(
             quote if primary_buy else buy.book,
             sell.book if primary_buy else quote,
@@ -388,8 +395,7 @@ class Engine:
             if premium is None or (premium > entry if strategy.long else premium < entry):
                 return False
             current = strategy.plan(buy, sell, quote=price)
-            return (current is not None and current.qty >= plan.qty - self._step / 2
-                    and strategy.projected_return(current, strategy.locked_exit) > self.cfg.bps_cost_buffer_bps)
+            return current is not None and current.qty >= plan.qty - self._step / 2
         current, _ = self._maker_plan_at(buy, sell, plan.buy_notional, price)
         return current is not None and current.qty >= plan.qty - self._step / 2
 
@@ -626,6 +632,16 @@ class Engine:
                 log.error("[%s] %s leg: %s", v.name, side, info["err"])
         bfill = binfo["filled_base"]
         sfill = sinfo["filled_base"]
+        primary_before = self.entropy.position
+        self.execution_stats.record(buy.key, True, bfill, binfo.get("avg_px"), buy.position, self._step)
+        self.execution_stats.record(sell.key, False, sfill, sinfo.get("avg_px"), sell.position, self._step)
+        if binfo.get("unresolved") or sinfo.get("unresolved"):
+            self.execution_stats.unresolved = True
+        primary_fill = bfill if buy is self.entropy else sfill
+        primary_sign = 1 if buy is self.entropy else -1
+        added = primary_fill if primary_before * primary_sign >= 0 else max(0, primary_fill - abs(primary_before))
+        if not closing and min(added, bfill, sfill) >= self._step / 2:
+            self.execution_stats.openings += 1
         buy.position += bfill
         sell.position -= sfill
         bpx = binfo.get("avg_px") or plan.buy_limit
@@ -817,6 +833,8 @@ class Engine:
                                           limit_px=limit, reduce_only=True)
                 hedge_ok = not info.get("err") and not info.get("unresolved")
                 if info.get("err") or info.get("unresolved"):
+                    if info.get("unresolved"):
+                        self.execution_stats.unresolved = True
                     log.error("[HEDGE] %s: %s", v.name,
                               info.get("err") or "unresolved")
                     if str(info.get("err", "")).startswith("RATE_LIMITED"):
@@ -824,6 +842,8 @@ class Engine:
                     self._reconcile_evt.set()
                 else:
                     fill = info["filled_base"]
+                    self.execution_stats.record(v.key, not is_sell, fill, info.get("avg_px"),
+                                                v.position, self._step)
                     v.position += -fill if is_sell else fill
                     if fill:
                         px = info.get("avg_px") or limit

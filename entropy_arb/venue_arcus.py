@@ -498,8 +498,18 @@ class ArcusVenue:
 
     async def maker_state(self, order):
         oid = order.order_id or self._clients.get(order.client_id)
-        if (not self._orders_ready or oid not in self._orders
-                or time.monotonic() - getattr(order, "last_query", 0) > 1):
+        if self._orders_ready and oid not in self._orders and not order.last_query:
+            # Placement ACK can beat the corresponding orders-channel update.
+            # Briefly await that update before consulting lagging HTTP indexes.
+            for _ in range(5):
+                await asyncio.sleep(.05)
+                oid = order.order_id or self._clients.get(order.client_id)
+                if not self._orders_ready or oid in self._orders:
+                    break
+        # A live orders subscription is authoritative. Do not force an HTTP
+        # lookup over an already received state on every new maker order:
+        # HTTP indexing can lag the stream and cause a false immediate cancel.
+        if not self._orders_ready or oid not in self._orders:
             await self._lookup_order(order.client_id, oid, int(order.sent_at * 1e9))
             order.last_query = time.monotonic()
             oid = oid or self._clients.get(order.client_id)

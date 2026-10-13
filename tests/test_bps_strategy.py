@@ -88,17 +88,17 @@ def test_open_frozen_target_and_reduce_only_close(tmp_path, long):
     asyncio.run(scenario())
 
 
-def test_cost_guard_accounts_for_all_fees_and_slippage(tmp_path):
+def test_bps_opens_by_levels_without_estimated_return_guard(tmp_path):
     async def scenario():
         eng = engine_at(tmp_path)
         eng.ensure_async_state()
         assert eng._scan(time.time())
         eng.hedge.fee_bps = 2.25
-        assert eng._scan(time.time()) is None  # hedge entry+exit alone cost 4.5bps > gap
-        assert eng.bps_strategy.projected_net_bps < 0
+        assert eng._scan(time.time())  # fees do not alter the level trigger
         eng.hedge.fee_bps = 0
         eng.cfg.leg_slippage_bps = 1
-        assert eng._scan(time.time()) is None  # four legs' slippage budget
+        assert eng._scan(time.time())  # slippage remains execution protection
+        assert 'projected_net_bps' not in eng.bps_strategy.snapshot()
         eng.entropy.send_taker.assert_not_awaited()
     asyncio.run(scenario())
 

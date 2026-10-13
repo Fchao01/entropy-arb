@@ -48,6 +48,7 @@ async def execute_primary_maker(engine, buy, sell, plan):
     terminal = False
     cancel_at = None
     cancel_sent = False
+    cancel_reason = None
     last_cancel_attempt = 0.0
     order = None
     deadline = time.monotonic() + cfg.maker_timeout_sec
@@ -77,9 +78,13 @@ async def execute_primary_maker(engine, buy, sell, plan):
                     hedge_failed = True
                 engine.active_maker.update(filled=filled, state=state["status"])
             except Exception as error:
-                log.warning("[%s] maker state unavailable: %s", primary.name, type(error).__name__)
+                detail = type(error).__name__
+                if getattr(error, 'status', None) is not None:
+                    detail += ' HTTP=' + str(error.status)
+                log.warning("[%s] maker state unavailable: %s", primary.name, detail)
                 # Uncertain state means cancel, never assume the order vanished.
                 deadline = min(deadline, time.monotonic())
+                cancel_reason = cancel_reason or ('order-state-unavailable:' + detail)
 
             remainder = floor_step(pinfo["filled_base"] - hinfo["filled_base"], engine._step)
             if remainder > 0 and not hedge_failed:
@@ -128,10 +133,22 @@ async def execute_primary_maker(engine, buy, sell, plan):
 
             if terminal:
                 break
-            should_cancel = (hedge_failed or engine.stop.is_set() or engine.manual_paused
-                             or engine.halted or time.monotonic() >= deadline
-                             or not engine._maker_quote_valid(buy, sell, plan, price))
-            if should_cancel and cancel_at is None:
+            reason = cancel_reason
+            if reason is None:
+                if hedge_failed:
+                    reason = 'hedge-failed'
+                elif engine.stop.is_set():
+                    reason = 'stop-requested'
+                elif engine.manual_paused:
+                    reason = 'manual-pause'
+                elif engine.halted:
+                    reason = 'engine-halted'
+                elif time.monotonic() >= deadline:
+                    reason = 'timeout'
+                elif not engine._maker_quote_valid(buy, sell, plan, price):
+                    reason = 'quote-invalid:signal/depth/readiness'
+            if reason is not None and cancel_at is None:
+                cancel_reason = reason
                 cancel_at = time.monotonic()
                 engine.active_maker["state"] = "canceling"
             if cancel_at is not None and not cancel_sent and time.monotonic() - last_cancel_attempt >= 1:
@@ -142,7 +159,8 @@ async def execute_primary_maker(engine, buy, sell, plan):
                     cancel_sent = True
                 except Exception as error:
                     log.warning("[%s] maker cancel not confirmed: %s", primary.name, type(error).__name__)
-                log.info("[MAKER] cancel requested client_id=%s; waiting for final fills", order.client_id)
+                log.info("[MAKER] cancel requested client_id=%s reason=%s elapsed=%.3fs timeout=%.2fs; waiting for final fills",
+                         order.client_id, cancel_reason, time.perf_counter() - start, cfg.maker_timeout_sec)
             if cancel_at is not None and time.monotonic() - cancel_at >= cfg.settle_timeout_sec:
                 pinfo.update(status="cancel-unconfirmed", unresolved=True,
                              err="maker final state unknown; check exchange open orders before restarting")

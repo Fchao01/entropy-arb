@@ -70,6 +70,7 @@ def snapshot(engine) -> dict:
         "session_volume_usd": engine._total_volume(),
         "session_profit_usd": engine.total_fill_edge,
         "session_fees_usd": getattr(engine, "total_fees_usd", 0.0),
+        "execution_stats": engine.execution_stats.snapshot(engine),
         "trades": engine.trades, "hedges": engine.hedges,
         "expected_edge_usd": engine.total_exp_edge,
         "fill_edge_usd": engine.total_fill_edge,
