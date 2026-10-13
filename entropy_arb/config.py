@@ -166,6 +166,18 @@ class Config:
     primary_venue: str = DEFAULT_PRIMARY_VENUE
     primary_order_type: str = "taker"
     maker_timeout_sec: float = 5.0
+    strategy_mode: str = "threshold"
+    bps_levels: str = "rolling"
+    bps_direction: str = "long_primary"
+    bps_entry: float = -9.0
+    bps_exit: float = -6.0
+    bps_window_minutes: int = 120
+    bps_entry_percentile: float = 10.0
+    bps_exit_percentile: float = 75.0
+    bps_max_entries: int = 1
+    bps_add_interval_sec: float = 60.0
+    bps_max_position_usd: float = 1000.0
+    bps_cost_buffer_bps: float = 0.0
 
     @property
     def primary(self) -> VenueConf:
@@ -199,6 +211,14 @@ class Config:
 
 # Schema: nested dict of key -> type (or nested dict). Unknown keys are errors.
 _SCHEMA: Dict[str, Any] = {
+    "strategy": {"mode": str},
+    "bps": {
+        "levels": str, "direction": str,
+        "entry_bps": float, "exit_bps": float,
+        "window_minutes": int, "entry_percentile": float, "exit_percentile": float,
+        "max_entries": int, "add_interval_sec": float,
+        "max_position_usd": float, "cost_buffer_bps": float,
+    },
     "primary": {
         "venue": str,
         "symbol": str,
@@ -466,7 +486,33 @@ def load_config(config_file: str = "config.yaml", env_file: str = ".env", *,
             raise ConfigError(f"'{section}.symbol' must not be empty / "
                               "交易所币种名称不能为空")
 
+    strategy_mode = _get(raw, "strategy", "mode", "threshold")
+    if strategy_mode not in ("threshold", "bps"):
+        raise ConfigError("strategy.mode must be threshold or bps")
+    bps = dict(raw.get("bps") or {})
+    bps_defaults = dict(levels="rolling", direction="long_primary", entry_bps=-9.0,
+                        exit_bps=-6.0, window_minutes=120, entry_percentile=10.0,
+                        exit_percentile=75.0, max_entries=1, add_interval_sec=60.0,
+                        max_position_usd=1000.0, cost_buffer_bps=0.0)
+    bps = {**bps_defaults, **bps}
+    if bps["levels"] not in ("manual", "rolling") or bps["direction"] not in ("long_primary", "short_primary"):
+        raise ConfigError("bps levels must be manual/rolling; direction must be long_primary/short_primary")
+    if any(isinstance(v, (int, float)) and not math.isfinite(v) for v in bps.values()):
+        raise ConfigError("bps parameters must be finite")
+    if not 2 <= bps["window_minutes"] <= 10080 or bps["max_entries"] < 1:
+        raise ConfigError("bps.window_minutes must be in [2, 10080]; max_entries must be >= 1")
+    if bps["add_interval_sec"] < 0 or bps["cost_buffer_bps"] < 0 or bps["max_position_usd"] <= 0:
+        raise ConfigError("bps interval/buffer must be >= 0; position cap must be > 0")
+    for name in ("entry_percentile", "exit_percentile"):
+        if not 0 <= bps[name] <= 100:
+            raise ConfigError("bps percentiles must be in [0, 100]")
+    long = bps["direction"] == "long_primary"
+    entry, exit = (bps["entry_bps"], bps["exit_bps"]) if bps["levels"] == "manual" else (bps["entry_percentile"], bps["exit_percentile"])
+    if (long and entry >= exit) or (not long and entry <= exit):
+        raise ConfigError("bps long entry must be below exit; short entry must be above exit / 开平仓点位顺序不正确")
     thr = raw.get("thresholds") or {}
+    if strategy_mode == "bps":
+        thr = {"midline_bps": 0, "upper_bps": 4, "lower_bps": 4, **thr}
     for k in ("midline_bps", "upper_bps", "lower_bps"):
         if k not in thr:
             raise ConfigError(f"'thresholds.{k}' is required — derive it from "
@@ -499,6 +545,9 @@ def load_config(config_file: str = "config.yaml", env_file: str = ".env", *,
     hedge_slippage_bps = float(_get(raw, "execution", "hedge_slippage_bps", 20.0))
     if leg_slippage_bps < 0 or hedge_slippage_bps < 0:
         raise ConfigError("execution slippage limits must be >= 0")
+    if strategy_mode == "bps" and not (math.isfinite(leg_slippage_bps + hedge_slippage_bps)
+                                      and max(leg_slippage_bps, hedge_slippage_bps) < 10000):
+        raise ConfigError("bps strategy slippage budgets must be finite and below 10000 bps")
     primary_order_type = _get(raw, "execution", "primary_order_type", "taker")
     if primary_order_type not in ("taker", "maker"):
         raise ConfigError("execution.primary_order_type must be taker or maker / 主腿成交方式必须为 taker 或 maker")
@@ -512,6 +561,15 @@ def load_config(config_file: str = "config.yaml", env_file: str = ".env", *,
         primary_venue=primary_venue,
         primary_order_type=primary_order_type,
         maker_timeout_sec=maker_timeout_sec,
+        strategy_mode=strategy_mode,
+        bps_levels=bps["levels"], bps_direction=bps["direction"],
+        bps_entry=float(bps["entry_bps"]), bps_exit=float(bps["exit_bps"]),
+        bps_window_minutes=bps["window_minutes"],
+        bps_entry_percentile=float(bps["entry_percentile"]),
+        bps_exit_percentile=float(bps["exit_percentile"]),
+        bps_max_entries=bps["max_entries"], bps_add_interval_sec=float(bps["add_interval_sec"]),
+        bps_max_position_usd=float(bps["max_position_usd"]),
+        bps_cost_buffer_bps=float(bps["cost_buffer_bps"]),
         entropy=entropy,
         hedge=hedge,
         midline_bps=midline,

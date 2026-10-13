@@ -26,12 +26,14 @@ from __future__ import annotations
 
 import asyncio
 import csv
+import json
 import logging
 import math
 import os
 import time
 from datetime import datetime, timezone
 from typing import Optional
+from pathlib import Path
 
 from .book import OrderBook
 
@@ -100,12 +102,13 @@ class _MinuteAgg:
 
 class MinuteRecorder:
     def __init__(self, path: str, entropy_book: OrderBook, hedge_book: OrderBook,
-                 staleness_sec: float, interval_sec: float = 1.0) -> None:
+                 staleness_sec: float, interval_sec: float = 1.0, source: dict = None) -> None:
         self.path = path
         self.entropy_book = entropy_book
         self.hedge_book = hedge_book
         self.staleness_sec = staleness_sec
         self.interval_sec = interval_sec
+        self.source = source
         self.rows_written = 0
         self._agg: Optional[_MinuteAgg] = None
         self._fh = None
@@ -123,6 +126,23 @@ class MinuteRecorder:
                                 self.path, self.path)
                     os.replace(self.path, self.path + ".old")
         new = not os.path.exists(self.path) or os.path.getsize(self.path) == 0
+        if self.source:
+            metadata_path = Path(str(self.path) + '.source.json')
+            try:
+                metadata = json.loads(metadata_path.read_text())
+                if not isinstance(metadata, dict) or not math.isfinite(float(metadata.get('since', math.nan))):
+                    metadata = {}
+            except (OSError, ValueError, TypeError):
+                metadata = {}
+            if new or not isinstance(metadata, dict) or metadata.get('source') != self.source:
+                # Old CSVs have no venue identity. Do not relabel old history
+                # when swapping the primary/hedge roles or reusing its path.
+                metadata = {'source': self.source, 'since': time.time()}
+                temporary = metadata_path.with_suffix('.tmp')
+                temporary.write_text(json.dumps(metadata))
+                os.replace(temporary, metadata_path)
+                log.info('CSV source changed; rolling signals use data since %.0f: %s',
+                         metadata['since'], self.path)
         self._fh = open(self.path, "a", newline="")
         self._writer = csv.writer(self._fh)
         if new:

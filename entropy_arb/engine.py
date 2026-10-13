@@ -27,6 +27,7 @@ from typing import Dict, List, Optional
 import aiohttp
 
 from .book import ArbPlan, OrderBook, floor_step, plan_arb
+from .bps_strategy import BpsStrategy, recorder_source
 from .maker import execute_primary_maker
 from .config import Config
 from .recorder import MinuteRecorder
@@ -110,6 +111,7 @@ class Engine:
         self.telegram_profile = os.environ.get("TELEGRAM_PROFILE", "default")
         self._telegram_tasks: set = set()
         self._telegram_disabled_logged = False
+        self.bps_strategy = BpsStrategy(self) if cfg.strategy_mode == "bps" else None
         log.info("[TELEGRAM] profile=%s; trade notifications %s",
                  self.telegram_profile,
                  "enabled" if self.telegram.enabled else
@@ -239,6 +241,8 @@ class Engine:
                               for v in self.venues.values()),
                      sum(v.position for v in self.venues.values()))
             self._check_starting_positions()
+            if self.bps_strategy:
+                self.bps_strategy.restore()
 
         tasks: List[asyncio.Task] = []
         for v in self.venues.values():
@@ -247,10 +251,13 @@ class Engine:
             tasks += v.start_tasks(self._feed_stop, self._update_evt.set, live)
         if cfg.recorder_enabled or self.record_only:
             self.recorder = MinuteRecorder(cfg.recorder_csv, self.entropy.book,
-                                           self.hedge.book, cfg.staleness_sec)
+                                           self.hedge.book, cfg.staleness_sec,
+                                           source=recorder_source(cfg))
             tasks.append(asyncio.create_task(self.recorder.run(self.stop),
                                              name="recorder"))
         if not self.record_only:
+            if self.bps_strategy:
+                tasks.append(asyncio.create_task(self.bps_strategy.refresh_loop(), name="bps-levels"))
             tasks.append(asyncio.create_task(self._strategy_loop(),
                                              name="strategy"))
             tasks.append(asyncio.create_task(self._balance_loop(),
@@ -374,6 +381,15 @@ class Engine:
                 or not self.entropy.ready_to_trade() or not self.hedge.ready_to_trade()
                 or self._venue_down):
             return False
+        if self.bps_strategy and plan.action == "bps_open":
+            strategy = self.bps_strategy
+            entry = strategy.locked_entry
+            premium = self.premium_bps()
+            if premium is None or (premium > entry if strategy.long else premium < entry):
+                return False
+            current = strategy.plan(buy, sell, quote=price)
+            return (current is not None and current.qty >= plan.qty - self._step / 2
+                    and strategy.projected_return(current, strategy.locked_exit) > self.cfg.bps_cost_buffer_bps)
         current, _ = self._maker_plan_at(buy, sell, plan.buy_notional, price)
         return current is not None and current.qty >= plan.qty - self._step / 2
 
@@ -442,7 +458,11 @@ class Engine:
         if self.halted or self.manual_paused:
             return
         now = time.time()
-        if now - self.last_trade_ts < cfg.cooldown_sec:
+        exiting = self.bps_strategy and self.bps_strategy.entries and (
+            self.bps_strategy.closing or (self.premium_bps() is not None and (
+                self.premium_bps() >= self.bps_strategy.locked_exit if self.bps_strategy.long
+                else self.premium_bps() <= self.bps_strategy.locked_exit)))
+        if not exiting and now - self.last_trade_ts < cfg.cooldown_sec:
             self._schedule_poke(cfg.cooldown_sec - (now - self.last_trade_ts))
             return
         best = self._scan(now)
@@ -466,12 +486,18 @@ class Engine:
         outcomes escalate to reconcile, everything else gets a net-delta
         check."""
         unresolved = False
+        before_qty = abs(self.entropy.position)
         try:
+            if self.bps_strategy:
+                self.bps_strategy.before_execution(plan)
             unresolved = await self._execute(buy, sell, plan)
         except asyncio.CancelledError:
             raise
         except Exception:
             log.exception("execute failed")
+            if self.bps_strategy:
+                unresolved = True
+                self.halted = True
         finally:
             self._vlock(buy.key).release()
             self._vlock(sell.key).release()
@@ -479,12 +505,16 @@ class Engine:
             self._reconcile_evt.set()
         else:
             await self._maybe_hedge()
+        if self.bps_strategy:
+            self.bps_strategy.after_execution(plan, before_qty, unresolved)
         self._update_evt.set()  # freed venues may have a queued opportunity
 
     def _scan(self, now: float):
         """Evaluate both directions; returns the best executable
         (buy, sell, plan), or None."""
         cfg = self.cfg
+        if self.bps_strategy:
+            return self.bps_strategy.scan(now)
         best = None
         for buy, sell, dkey in ((self.hedge, self.entropy, self.direction_key(True)),
                                 (self.entropy, self.hedge, self.direction_key(False))):
@@ -538,7 +568,7 @@ class Engine:
     # ------------------------------------------------------------- execution
 
     async def _timed_send(self, venue, *, is_buy: bool, qty: float,
-                          limit_px: float) -> tuple:
+                          limit_px: float, reduce_only: bool = False) -> tuple:
         """Send one leg and return (result, elapsed_ms).
 
         The elapsed value is local event-loop time, so it is suitable for
@@ -547,7 +577,8 @@ class Engine:
         started = time.perf_counter()
         try:
             result = await venue.send_taker(is_buy=is_buy, qty=qty,
-                                            limit_px=limit_px)
+                                            limit_px=limit_px,
+                                            **({"reduce_only": True} if reduce_only else {}))
         except Exception as e:
             result = {"status": "send-failed", "filled_base": 0.0,
                       "avg_px": None, "err": repr(e), "unresolved": True}
@@ -560,8 +591,11 @@ class Engine:
         if self.halted:
             return False
         cfg = self.cfg
-        inv_bps = self._inv_add_bps(buy, sell)
+        inv_bps = 0.0 if self.bps_strategy else self._inv_add_bps(buy, sell)
         direction = self.direction_key(sell.key == self.entropy.key)
+        closing = plan.action == "bps_close"
+        if plan.action != "arb":
+            direction = plan.action + ":" + direction
         signal_ts = time.time()
         book_age_ms = max(0.0, signal_ts - min(buy.book.last_update_ts,
                                                sell.book.last_update_ts)) * 1000.0
@@ -576,16 +610,16 @@ class Engine:
         buy_bound = buy.px_round(plan.buy_limit * (1 + slip), round_up=False)
         sell_bound = sell.px_round(plan.sell_limit * (1 - slip), round_up=True)
         send_started = time.perf_counter()
-        if cfg.primary_order_type == "maker":
+        if cfg.primary_order_type == "maker" and not closing:
             (binfo, buy_send_ms), (sinfo, sell_send_ms) = await execute_primary_maker(self, buy, sell, plan)
         else:
             self._record_send(buy)
             self._record_send(sell)
             (binfo, buy_send_ms), (sinfo, sell_send_ms) = await asyncio.gather(
                 self._timed_send(buy, is_buy=True, qty=plan.qty,
-                                 limit_px=buy_bound),
+                                 limit_px=buy_bound, **({"reduce_only": True} if closing else {})),
                 self._timed_send(sell, is_buy=False, qty=plan.qty,
-                                 limit_px=sell_bound))
+                                 limit_px=sell_bound, **({"reduce_only": True} if closing else {})))
         send_total_ms = (time.perf_counter() - send_started) * 1000.0
         for v, info, side in ((buy, binfo, "buy"), (sell, sinfo, "sell")):
             if info.get("err"):
@@ -733,10 +767,13 @@ class Engine:
                 "启动时已有仓位不平衡，已拒绝启动，不会自动平仓；请核对两边账户和旧仓位")
 
     async def _maybe_hedge(self) -> None:
+        if self.bps_strategy and self.halted:
+            return
         if self.active_maker is not None:
             return  # unknown live order/hedge: position reads alone cannot resolve it
         net = sum(v.position for v in self.venues.values())
-        if abs(net) > self.cfg.net_tolerance_base:
+        tolerance = self.bps_strategy.tolerance if self.bps_strategy else self.cfg.net_tolerance_base
+        if abs(net) > tolerance:
             await self._hedge(net)
             remaining = sum(v.position for v in self.venues.values())
             if self.cfg.primary_order_type == "maker" and abs(remaining) > self.cfg.net_tolerance_base:
@@ -894,6 +931,12 @@ class Engine:
             self._venue_fetch_fails[v.key] = 0
             delta = r - v.position
             if abs(delta) > 1e-12:
+                if self.bps_strategy and not strict and abs(delta) > self.bps_strategy.tolerance:
+                    self.halted = True
+                    self.bps_strategy.pending = True
+                    self.bps_strategy.reason = "链上仓位与已确认成交不一致，请核对账户"
+                    self.bps_strategy.save()
+                    log.critical("[BPS] unexpected position change on %s; no automatic flatten", v.name)
                 if abs(delta) > self.cfg.net_tolerance_base:
                     log.warning("[%s] reconcile: chain %+.6g vs local %+.6g "
                                 "— adopting chain", v.name, r, v.position)
@@ -998,6 +1041,15 @@ class Engine:
             pnl = self.session_pnl()
             rec = (f" | rec {self.recorder.rows_written} rows"
                    if self.recorder else "")
+            if self.bps_strategy:
+                state = self.bps_strategy.snapshot()
+                log.info("[status] %s | prem %s bps | BPS entry=%s exit=%s batches=%d/%d %s "
+                         "| pos %s net %+.6g | trades %d hedges %d | MTM %s%s%s",
+                         books, prem_s, state["entry_bps"], state["exit_bps"], state["entries"],
+                         state["max_entries"], state["reason"], pos, net, self.trades, self.hedges,
+                         f"${pnl:+.4f}" if pnl is not None else "—", rec,
+                         " *** HALTED ***" if self.halted else "")
+                continue
             log.info("[status] %s | prem %s bps (band %+.2f..%+.2f) | pos %s "
                      "net %+.6g | trades %d hedges %d | MTM %s expEdge $%.4f "
                      "fillEdge $%.4f%s%s",

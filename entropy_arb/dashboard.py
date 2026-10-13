@@ -338,6 +338,14 @@ class Dashboard:
 
     def _signal_panel(self):
         eng, cfg = self.eng, self.eng.cfg
+        if eng.bps_strategy:
+            state = eng.bps_strategy.snapshot()
+            direction = "BUY primary / SELL hedge" if eng.bps_strategy.long else "SELL primary / BUY hedge"
+            entry, exit = state["entry_bps"], state["exit_bps"]
+            content = Text(f"{direction}\nmid premium {eng.premium_bps()} bps\n"
+                           f"entry {entry} / exit {exit} bps · {state['entries']}/{state['max_entries']} batches\n"
+                           f"{state['reason']}\nCSV: {state['data_path']}")
+            return Panel(content, title="BPS levels · fixed exit per cycle", box=box.ROUNDED)
         prem = eng.premium_bps()
         head = Text()
         head.append(self._t("mid premium "), style="dim")

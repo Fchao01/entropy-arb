@@ -146,6 +146,9 @@ class ArbPlan:
     marginal_premium_bps: float
     buy_fee: float
     sell_fee: float
+    action: str = "arb"
+    cycle_entry_bps: Optional[float] = None
+    cycle_exit_bps: Optional[float] = None
 
     @property
     def gross_edge_usd(self) -> float:

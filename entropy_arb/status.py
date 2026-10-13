@@ -48,6 +48,8 @@ def snapshot(engine) -> dict:
         },
         "primary_order_type": engine.cfg.primary_order_type,
         "maker_timeout_sec": engine.cfg.maker_timeout_sec,
+        "strategy_mode": engine.cfg.strategy_mode,
+        "bps_strategy": engine.bps_strategy.snapshot() if engine.bps_strategy else None,
         "active_maker": getattr(engine, "active_maker", None),
         "ready": ready, "halted": engine.halted, "paused": engine.manual_paused,
         "mode": "record" if engine.record_only else "live",

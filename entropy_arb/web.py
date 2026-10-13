@@ -372,6 +372,8 @@ class TaskManager:
         cfg = load_config(str(config_path), symbol=task["symbol"],
                           primary_venue=task["primary"], hedge_venue=task["hedge"],
                           credential_env=self.environment(task["profile"]))
+        if cfg.strategy_mode == "bps":
+            raise ConsoleError("bps 策略使用独立开平仓点位，请在策略配置中修改；不使用每日三个套利阈值")
         window = daily_window()
         csv_path = self.configured_path(cfg.recorder_csv)
         if not csv_path.exists():
@@ -435,6 +437,13 @@ class TaskManager:
         cfg = load_config(str(config_path), symbol=task["symbol"],
                           primary_venue=task["primary"], hedge_venue=task["hedge"],
                           credential_env=self.environment(task["profile"]))
+        if cfg.strategy_mode == "bps":
+            self._write_auto_status(task_id, {
+                "status": "skipped", "window": window.label,
+                "window_start": window.start_ts, "window_end": window.end_ts,
+                "checked_at": time.time(), "reason": "bps 策略自行更新点位，不应用每日套利阈值",
+            })
+            return
         csv_path = self.configured_path(cfg.recorder_csv)
         if suggestion is None:
             rows = load_window_rows(csv_path, window, AUTO_THRESHOLD_MIN_SAMPLES)
@@ -868,6 +877,7 @@ class TaskManager:
             raise ConsoleError("双腿持仓上限合计超出有效数值范围")
         public = dict(name=name, symbol=symbol, primary=primary, hedge=hedge,
                       mode=mode, profile=profile, config=text, strategy_file=strategy_file,
+                      strategy_mode=cfg.strategy_mode,
                       cap_usd=cfg.entropy.cap_usd + cfg.hedge.cap_usd,
                       max_order_usd=cfg.max_order_notional)
         return public, rendered, cfg, values
