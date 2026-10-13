@@ -229,15 +229,9 @@ class TaskManager:
         return self.market_monitor
 
     async def monitor_rules(self, strategy_file=None, hedge_venue=None):
-        """Build display fees without making market compatibility depend on YAML.
-
-        The three-market page answers a different question from the trading
-        engine: which symbols can use the RH-primary hedge path.  A strategy
-        file is optional and is only used as a fee source when the caller
-        explicitly supplies one; its thresholds are never read here.
-        """
+        """Build optional display fees without filtering public market monitoring."""
         if not strategy_file:
-            return MonitorRules(source="脚本适配检查（未加载阈值）", primary_key="rh")
+            return MonitorRules(source="公开行情监控（未加载阈值）", primary_key="rh")
         text = self.strategy(strategy_file)
         raw = self.check_strategy(text)
         primary = raw.get("primary") or raw.get("entropy") or {}
@@ -1336,16 +1330,18 @@ def create_app(manager: TaskManager, password: str, secure_cookie=False):
         candidate = next((row for row in candidates["symbols"] if row["symbol"] == symbol), None)
         if not all_candidates:
             if candidate is None:
-                raise ConsoleError("该币种没有同时出现在 RH、Arcus、Entropy 的活跃市场列表")
-            if not candidate["compatible"]:
-                raise ConsoleError("该币种的数量步长或最小下单规格无法验证，不能标记为可自动对冲")
-        elif not any(row.get("compatible") for row in candidates["symbols"]):
-            raise ConsoleError("没有可同时监控的共同币种")
+                raise ConsoleError("该币种没有出现在至少两个公开市场的活跃列表")
+        elif not candidates["symbols"]:
+            raise ConsoleError("没有可监控价差的双市场共同币种")
         rules = await manager.monitor_rules(strategy_file, hedge_venue)
         monitor = await manager.monitor_instance(profile)
         if all_candidates:
-            return web.json_response(await monitor.start_all(candidates["symbols"], rules))
-        return web.json_response(await monitor.start(candidate, rules))
+            await monitor.start_all(candidates["symbols"], rules)
+        else:
+            await monitor.start(candidate, rules)
+        monitor.errors.update({f"market-list/{key}": message
+                               for key, message in candidates["errors"].items()})
+        return web.json_response(monitor.snapshot())
 
     async def market_monitor_stop(request):
         monitor = await manager.monitor_instance()

@@ -1,7 +1,7 @@
 """Read-only three-venue market discovery and spread monitoring.
 
 The trading engine intentionally remains a two-leg executor.  This module is
-the observability side of the application: it discovers symbols common to
+the observability side of the application: it discovers symbols shared by
 Entropy (Hyperliquid ``io``), Lighter Robinhood and Arcus, subscribes to their
 public books, and evaluates the same executable-price inequalities used by
 the engine.  It never creates an account signer or submits an order.
@@ -59,7 +59,7 @@ async def _json(session: aiohttp.ClientSession, method: str, url: str,
 
 
 async def discover_candidates(session: aiohttp.ClientSession) -> dict:
-    """Return a conservative intersection of the three public market lists."""
+    """Discover symbols shared by any two public market lists."""
     async def lighter():
         data = await _json(session, "GET", RH_API + "/api/v1/orderBooks")
         result = {}
@@ -71,13 +71,14 @@ async def discover_candidates(session: aiohttp.ClientSession) -> dict:
                 continue
             try:
                 decimals = int(row.get("supported_size_decimals"))
-            except (TypeError, ValueError):
-                decimals = -1
+                step = _decimal_step(10 ** -decimals) if decimals >= 0 else None
+            except (TypeError, ValueError, OverflowError):
+                step = None
             result[symbol] = {
                 "symbol": row.get("symbol"), "status": row.get("status"),
-                "quote": "USDG", "step": 10 ** -decimals if decimals >= 0 else None,
-                "min_base": float(row.get("min_base_amount") or 0),
-                "min_notional": float(row.get("min_quote_amount") or 0),
+                "quote": "USDG", "step": step,
+                "min_base": _decimal_step(row.get("min_base_amount")) or 0,
+                "min_notional": _decimal_step(row.get("min_quote_amount")) or 0,
             }
         return result
 
@@ -95,8 +96,8 @@ async def discover_candidates(session: aiohttp.ClientSession) -> dict:
             result[symbol] = {
                 "symbol": row.get("marketDisplayName"), "status": row.get("status"),
                 "quote": "USD", "step": _decimal_step(row.get("stepSize")),
-                "min_base": float(row.get("minOrderSize") or 0),
-                "min_notional": float(row.get("minOrderNotional") or 0),
+                "min_base": _decimal_step(row.get("minOrderSize")) or 0,
+                "min_notional": _decimal_step(row.get("minOrderNotional")) or 0,
             }
         return result
 
@@ -112,7 +113,7 @@ async def discover_candidates(session: aiohttp.ClientSession) -> dict:
                 continue
             try:
                 decimals = int(row.get("szDecimals"))
-                step = 10 ** -decimals
+                step = _decimal_step(10 ** -decimals) if decimals >= 0 else None
             except (TypeError, ValueError, OverflowError):
                 step = None
             result[symbol] = {
@@ -131,18 +132,20 @@ async def discover_candidates(session: aiohttp.ClientSession) -> dict:
               if isinstance(value, Exception)}
     maps = {name: value for name, value in zip(names, results)
             if not isinstance(value, Exception)}
-    common = set.intersection(*(set(value) for value in maps.values())) if len(maps) == 3 else set()
+    common = {symbol for market in maps.values() for symbol in market
+              if sum(symbol in value for value in maps.values()) >= 2}
     symbols = []
     for symbol in sorted(common):
-        venues = {name: maps[name][symbol] for name in names}
+        venues = {name: maps[name][symbol] for name in names
+                  if name in maps and symbol in maps[name]}
         checks = {
             "all_active": True,
             "perpetual": True,
             "base_units_known": all(v["step"] is not None for v in venues.values()),
             "minimums_known": all(v["min_base"] > 0 for v in venues.values()),
-            "rh_primary": True,
-            "arcus_hedge": True,
-            "entropy_hedge": True,
+            "rh_primary": "lighter_rh" in venues,
+            "arcus_hedge": "arcus" in venues,
+            "entropy_hedge": "entropy" in venues,
         }
         warnings = []
         if not checks["base_units_known"]:
@@ -154,8 +157,8 @@ async def discover_candidates(session: aiohttp.ClientSession) -> dict:
         # this limitation visible instead of claiming a mathematically perfect hedge.
         compatible = all(checks.values())
         symbols.append({
-            "symbol": symbol, "compatible": compatible,
-            "label": "可自动对冲候选" if compatible else "需人工核对",
+            "symbol": symbol, "compatible": compatible, "monitorable": True,
+            "label": "三市场价差" if len(venues) == 3 else "双市场价差",
             "checks": checks, "warnings": warnings,
             "venues": {name: {k: v for k, v in value.items() if k != "status"}
                        for name, value in venues.items()},
@@ -164,10 +167,12 @@ async def discover_candidates(session: aiohttp.ClientSession) -> dict:
         "updated_at": time.time(),
         "symbols": symbols,
         "compatible_symbols": [row["symbol"] for row in symbols if row["compatible"]],
+        "monitorable_symbols": [row["symbol"] for row in symbols],
+        "market_counts": {name: len(value) for name, value in maps.items()},
         "errors": errors,
         "compatibility_basis": (
-            "RH 是脚本默认主腿；Arcus 与 Entropy 是可选对冲腿。"
-            "候选只要求三个市场都活跃，且数量步长和最小下单数量可验证；不读取策略阈值。"
+            "任意两个市场都有的币种即可监控，不按数量步长、最小下单数量或策略阈值筛选。"
+            "行情价差不代表可直接交易，实盘仍需核对合约规格和费用。"
         ),
     }
 
@@ -201,6 +206,8 @@ class TripleVenueMonitor:
         self.feed_tasks = []
         self.sample_task = None
         self.venues = {}
+        self.market_specs = {}
+        self.errors = {}
         self.symbol = None
         self.rules = MonitorRules()
         self.running = False
@@ -231,20 +238,32 @@ class TripleVenueMonitor:
         self.stop_event = asyncio.Event()
         self.symbol, self.rules = candidate["symbol"], rules
         sources = candidate["venues"]
-        self.venues = {
-            "entropy": HLVenue(self._conf("entropy", "hl", "ENTROPY",
-                                           sources["entropy"]["symbol"], fee=rules.entropy_fee_bps),
-                               "https://api.hyperliquid.xyz", "wss://api.hyperliquid.xyz/ws",
-                               self.session, 5.0),
-            "rh": LighterVenue(self._conf("rh", "lighter", "RH",
-                                           sources["lighter_rh"]["symbol"], fee=rules.rh_fee_bps),
-                               self.session, 5.0),
-            "arcus": ArcusVenue(self._conf("arcus", "arcus", "ARCUS",
-                                            sources["arcus"]["symbol"], fee=rules.arcus_fee_bps),
-                                self.session, 5.0),
-        }
+        source_keys = {"entropy": "entropy", "rh": "lighter_rh", "arcus": "arcus"}
+        self.market_specs = {key: sources[source_key] for key, source_key in source_keys.items()
+                             if source_key in sources}
+        self.errors = {}
         try:
-            await asyncio.gather(*(venue.load_market() for venue in self.venues.values()))
+            if "entropy" in sources:
+                self.venues["entropy"] = HLVenue(
+                    self._conf("entropy", "hl", "ENTROPY", sources["entropy"]["symbol"],
+                               fee=rules.entropy_fee_bps),
+                    "https://api.hyperliquid.xyz", "wss://api.hyperliquid.xyz/ws", self.session, 5.0)
+            if "lighter_rh" in sources:
+                self.venues["rh"] = LighterVenue(
+                    self._conf("rh", "lighter", "RH", sources["lighter_rh"]["symbol"],
+                               fee=rules.rh_fee_bps), self.session, 5.0)
+            if "arcus" in sources:
+                self.venues["arcus"] = ArcusVenue(
+                    self._conf("arcus", "arcus", "ARCUS", sources["arcus"]["symbol"],
+                               fee=rules.arcus_fee_bps), self.session, 5.0)
+            results = await asyncio.gather(*(venue.load_market() for venue in self.venues.values()),
+                                           return_exceptions=True)
+            for key, result in zip(list(self.venues), results):
+                if isinstance(result, Exception):
+                    self.errors[key] = str(result) or repr(result)
+                    await self.venues.pop(key).close()
+            if len(self.venues) < 2:
+                raise RuntimeError("至少需要两个有效市场才能监控价差：" + str(self.errors))
             for venue in self.venues.values():
                 self.feed_tasks.extend(venue.start_tasks(self.stop_event, self._touch, False))
             self.sample_task = asyncio.create_task(self._sample_loop(), name="triple-monitor-sampler")
@@ -269,15 +288,16 @@ class TripleVenueMonitor:
 
     def _pair(self, left_key: str, right_key: str, script_compatible: bool) -> dict:
         primary = self.rules.primary_key
-        if script_compatible and right_key == primary:
+        if right_key == primary:
             left_key, right_key = right_key, left_key
         left, right = self.venues[left_key], self.venues[right_key]
-        left_mid, right_mid = left.book.mid(), right.book.mid()
+        fresh = left.book.is_fresh(10) and right.book.is_fresh(10)
+        left_mid, right_mid = (left.book.mid(), right.book.mid()) if fresh else (None, None)
         mid = ((left_mid / right_mid) - 1) * 1e4 if left_mid and right_mid else None
         sell = _net_edge(left.book.best_bid(), right.book.best_ask(),
-                          left.fee_bps, right.fee_bps)
+                          left.fee_bps, right.fee_bps) if fresh else None
         buy = _net_edge(right.book.best_bid(), left.book.best_ask(),
-                        right.fee_bps, left.fee_bps)
+                        right.fee_bps, left.fee_bps) if fresh else None
         return {
             "key": f"{left_key}-{right_key}", "left": left.name, "right": right.name,
             "mid_spread_bps": mid, "sell_left_buy_right_bps": sell,
@@ -288,7 +308,13 @@ class TripleVenueMonitor:
         pairs = []
         if self.venues:
             for left_key, right_key in (("entropy", "rh"), ("entropy", "arcus"), ("rh", "arcus")):
-                compatible = self.rules.primary_key in (left_key, right_key)
+                if left_key not in self.venues or right_key not in self.venues:
+                    continue
+                specs_known = not self.market_specs or all(
+                    self.market_specs[key].get("step") is not None
+                    and self.market_specs[key].get("min_base", 0) > 0
+                    for key in (left_key, right_key))
+                compatible = specs_known and self.rules.primary_key in (left_key, right_key)
                 pairs.append(self._pair(left_key, right_key, compatible))
         venues = []
         for key, venue in self.venues.items():
@@ -298,7 +324,8 @@ class TripleVenueMonitor:
                            "fresh": book.is_fresh(10),
                            "age_sec": time.time() - book.last_update_ts if book.ready else None})
         return {"running": self.running, "symbol": self.symbol, "updated_at": self.updated_at,
-                "rules": self.rules.__dict__, "venues": venues, "pairs": pairs}
+                "rules": self.rules.__dict__, "venues": venues, "pairs": pairs,
+                "errors": self.errors}
 
     def _check_alerts(self):
         if not self.notifier or not self.notifier.enabled:
@@ -322,7 +349,7 @@ class TripleVenueMonitor:
                 text = (f"📊 价差信号 · {self.symbol}\n"
                         f"路径：{pair['left']} ⇄ {pair['right']} · {direction}\n"
                         f"可成交净价差：{edge:+.2f} bps（扣除当前配置费率后为正）\n"
-                        "RH 为默认主腿；该币种通过脚本市场规格适配检查")
+                        "只读行情提示，不代表实盘利润；下单前仍需核对合约规格")
                 task = asyncio.create_task(self.notifier.send(text), name="telegram-spread-alert")
                 self.notify_tasks.add(task)
                 task.add_done_callback(self.notify_tasks.discard)
@@ -353,8 +380,6 @@ class TripleVenueMonitor:
         self.venues = {}
         self.running = False
 
-MAX_OVERVIEW_SYMBOLS = 40
-
 
 class MultiVenueMonitor:
     """Run isolated read-only three-venue monitors for an overview table."""
@@ -374,10 +399,8 @@ class MultiVenueMonitor:
         await self.stop()
         self.rules = rules
         self.errors = {}
-        selected = [row for row in candidates if row.get("compatible")]
-        if len(selected) > MAX_OVERVIEW_SYMBOLS:
-            selected = selected[:MAX_OVERVIEW_SYMBOLS]
-            self.errors["__limit__"] = f"候选超过 {MAX_OVERVIEW_SYMBOLS} 个，仅监控前 {MAX_OVERVIEW_SYMBOLS} 个"
+        selected = [row for row in candidates if len(row.get("venues", {})) >= 2]
+        semaphore = asyncio.Semaphore(4)
 
         async def launch(candidate):
             symbol = candidate["symbol"]
@@ -386,15 +409,18 @@ class MultiVenueMonitor:
             child = TripleVenueMonitor(TelegramNotifier(token=token, chat_id=chat_id)
                                        if self.notifier else None)
             try:
-                await child.start(candidate, rules)
+                async with semaphore:
+                    await child.start(candidate, rules)
                 self.monitors[symbol] = child
+                for key, message in child.errors.items():
+                    self.errors[f"{symbol}/{key}"] = message
             except Exception as error:
                 self.errors[symbol] = str(error) or repr(error)
                 await child.stop()
 
         await asyncio.gather(*(launch(candidate) for candidate in selected))
         self.running = bool(self.monitors)
-        self.selected_symbol = selected[0]["symbol"] if selected else None
+        self.selected_symbol = next(iter(self.monitors), None)
         return self.snapshot()
 
     def snapshot(self):

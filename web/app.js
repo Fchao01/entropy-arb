@@ -167,22 +167,22 @@ async function refresh() {
 
 function renderTriple() {
   const candidates = state.tri.candidates || [];
-  const compatible = candidates.filter((row) => row.compatible);
   const select = element("tri-symbol");
-  const current = select.value;
-  select.innerHTML = compatible.length
-    ? compatible.map((row) => `<option value="${escapeHtml(row.symbol)}">${escapeHtml(row.symbol)} · ${escapeHtml(row.label)}</option>`).join("")
-    : '<option value="">暂无三市场共同币种</option>';
+  const current = state.tri.selectedSymbol || select.value;
+  select.innerHTML = candidates.length
+    ? candidates.map((row) => `<option value="${escapeHtml(row.symbol)}">${escapeHtml(row.symbol)} · ${escapeHtml(row.label)}</option>`).join("")
+    : '<option value="">暂无双市场共同币种</option>';
   if (candidates.some((row) => row.symbol === current)) select.value = current;
   const snapshot = state.tri.snapshot;
-  if (!state.tri.selectedSymbol) state.tri.selectedSymbol = snapshot?.selected_symbol || compatible[0]?.symbol || null;
-  const details = snapshot?.selected || (state.tri.selectedSymbol ? snapshot?.symbols?.[state.tri.selectedSymbol] : null);
+  state.tri.selectedSymbol = select.value || snapshot?.selected_symbol || null;
+  const details = snapshot?.symbols?.[state.tri.selectedSymbol] || null;
   const running = Boolean(snapshot?.running);
   element("tri-monitor-status").textContent = running ? `运行中 · ${snapshot.count || 1} 个币种` : "未启动";
   element("tri-monitor-status").className = `badge ${running ? "running" : ""}`;
   element("tri-start").disabled = !select.value;
   element("tri-stop").disabled = !running;
-  element("tri-candidates").innerHTML = candidates.length ? `<div class="overview-heading"><b>脚本适配币种</b><small>${compatible.length} 个 · RH 主腿 / Arcus、Entropy 可对冲</small></div><div class="tri-candidate-grid">${candidates.map((row) => `<article class="tri-candidate ${row.compatible ? "compatible" : "incompatible"}"><b>${escapeHtml(row.symbol)}</b><span>${row.compatible ? "可接入脚本" : "暂不可接入"}</span><small>${row.compatible ? "三市场活跃，数量步长和最小下单规格可验证" : escapeHtml((row.warnings || []).join("；"))}</small></article>`).join("")}</div>` : '<div class="empty-state"><h3>没有共同活跃市场</h3><p>刷新后重试；共同币种为空时不会启动监控。</p></div>';
+  const marketLabels = {lighter_rh: "RH", entropy: "Entropy", arcus: "Arcus"};
+  element("tri-candidates").innerHTML = candidates.length ? `<div class="overview-heading"><b>可监控币种</b><small>${candidates.length} 个 · 至少两个市场支持，不按交易规格筛选</small></div><div class="tri-candidate-grid">${candidates.map((row) => `<article class="tri-candidate compatible"><b>${escapeHtml(row.symbol)}</b><span>${escapeHtml(Object.keys(row.venues || {}).map((key) => marketLabels[key] || key).join(" / "))}</span><small>仅展示价差，不代表可直接交易</small></article>`).join("")}</div>` : '<div class="empty-state"><h3>没有双市场共同币种</h3><p>刷新后重试；至少两个市场都有行情才能计算价差。</p></div>';
   const overview = snapshot?.symbols || {};
   const pairFor = (row, names) => row.pairs?.find((pair) => new Set([pair.left, pair.right]).size === 2 && names.every((name) => [pair.left, pair.right].includes(name)));
   const overviewCell = (pair) => {
@@ -191,7 +191,7 @@ function renderTriple() {
     const buy = pair.buy_left_sell_right_bps == null ? "—" : `买${pair.left}/卖${pair.right} ${signed(pair.buy_left_sell_right_bps)}`;
     return `<b>${signed(pair.mid_spread_bps)} bps</b><small>${escapeHtml(`${sell} · ${buy}`)}</small>`;
   };
-  element("tri-overview").innerHTML = Object.keys(overview).length ? `<div class="overview-heading"><b>全部币种实时价差</b><small>${Object.keys(overview).length} 个共同活跃市场 · 点击币种查看三边盘口</small></div><div class="table-scroll"><table class="tri-overview-table"><thead><tr><th>币种</th><th>RH ↔ Entropy</th><th>RH ↔ Arcus</th><th>Arcus ↔ Entropy</th><th>行情</th></tr></thead><tbody>${Object.entries(overview).map(([symbol, row]) => `<tr data-tri-symbol="${escapeHtml(symbol)}"><td><button class="text-button tri-symbol-link" type="button">${escapeHtml(symbol)}</button></td><td>${overviewCell(pairFor(row, ["RH", "ENTROPY"]))}</td><td>${overviewCell(pairFor(row, ["RH", "ARCUS"]))}</td><td>${overviewCell(pairFor(row, ["ARCUS", "ENTROPY"]))}</td><td><span class="badge ${row.venues?.every((venue) => venue.fresh) ? "" : "stale"}">${row.venues?.every((venue) => venue.fresh) ? "正常" : "等待 / 过期"}</span></td></tr>`).join("")}</tbody></table></div>` : "";
+  element("tri-overview").innerHTML = Object.keys(overview).length ? `<div class="overview-heading"><b>全部币种实时价差</b><small>${Object.keys(overview).length} 个币种 · 点击查看可用盘口，缺失市场显示 —</small></div><div class="table-scroll"><table class="tri-overview-table"><thead><tr><th>币种</th><th>RH ↔ Entropy</th><th>RH ↔ Arcus</th><th>Arcus ↔ Entropy</th><th>行情</th></tr></thead><tbody>${Object.entries(overview).map(([symbol, row]) => `<tr data-tri-symbol="${escapeHtml(symbol)}"><td><button class="text-button tri-symbol-link" type="button">${escapeHtml(symbol)}</button></td><td>${overviewCell(pairFor(row, ["RH", "ENTROPY"]))}</td><td>${overviewCell(pairFor(row, ["RH", "ARCUS"]))}</td><td>${overviewCell(pairFor(row, ["ARCUS", "ENTROPY"]))}</td><td><span class="badge ${row.venues?.every((venue) => venue.fresh) ? "" : "stale"}">${row.venues?.every((venue) => venue.fresh) ? "正常" : "等待 / 过期"}</span></td></tr>`).join("")}</tbody></table></div>` : "";
   element("tri-venues").innerHTML = details?.venues?.length ? details.venues.map((venue) => `<article class="venue-card"><div class="venue-top"><div><b>${escapeHtml(venue.name)}</b><small>${escapeHtml(venue.symbol)}</small></div><span class="badge ${venue.fresh ? "" : "stale"}">${venue.fresh ? `正常 · ${number(venue.age_sec, 1)}s` : "等待行情"}</span></div><div class="venue-values"><div><span>买一 / 卖一</span><strong class="number">${number(venue.bid, 5)} / ${number(venue.ask, 5)}</strong></div><div><span>中间价</span><strong>${number(venue.mid, 5)}</strong></div></div></article>`).join("") : "";
   element("tri-pairs").innerHTML = details?.pairs?.length ? details.pairs.map((pair) => `<article class="tri-pair"><div class="tri-pair-head"><b>${escapeHtml(pair.left)} ⇄ ${escapeHtml(pair.right)}</b><span class="badge ${pair.script_compatible ? "" : "stale"}">${pair.script_compatible ? "脚本可对冲" : "仅价差监控"}</span></div><div class="tri-pair-grid"><div><small>中间价差</small><strong>${signed(pair.mid_spread_bps)} bps</strong></div><div><small>卖左 / 买右</small><strong>${signed(pair.sell_left_buy_right_bps)} <em>可成交差价</em></strong></div><div><small>买左 / 卖右</small><strong>${signed(pair.buy_left_sell_right_bps)} <em>可成交差价</em></strong></div></div></article>`).join("") : "";
 }
@@ -212,11 +212,15 @@ async function refreshTriple() {
 }
 
 element("tri-refresh").addEventListener("click", () => loadTripleCandidates());
+element("tri-symbol").addEventListener("change", () => {
+  state.tri.selectedSymbol = element("tri-symbol").value;
+  renderTriple();
+});
 element("tri-start").addEventListener("click", async () => {
   const symbol = element("tri-symbol").value;
   if (!symbol) return;
   element("tri-start").disabled = true;
-  element("tri-monitor-error").textContent = "正在连接三个公开盘口…";
+  element("tri-monitor-error").textContent = "正在连接可用的公开盘口…";
   try {state.tri.snapshot = await api("/api/market-monitor/start", "POST", {symbol, all: true}); const errors = Object.values(state.tri.snapshot.errors || {}); element("tri-monitor-error").textContent = errors.length ? `部分币种未连接：${errors.join("；")}` : ""; renderTriple();}
   catch (error) {element("tri-monitor-error").textContent = error.message; renderTriple();}
 });

@@ -306,6 +306,62 @@ def test_login_templates_do_not_depend_on_user_strategy_files(tmp_path, source_s
     asyncio.run(scenario())
 
 
+@pytest.mark.parametrize("all_symbols", [True, False])
+def test_market_monitor_api_accepts_two_market_coin_without_trading_specs(tmp_path, monkeypatch, all_symbols):
+    from entropy_arb import web as web_console
+
+    candidate = {"symbol": "BTC", "compatible": False, "monitorable": True,
+                 "venues": {"lighter_rh": {"symbol": "BTC"}, "arcus": {"symbol": "BTC-USD"}}}
+
+    async def discover(session):
+        return {"symbols": [candidate], "errors": {"entropy": "unavailable"}}
+
+    class PublicMonitor:
+        def __init__(self):
+            self.errors = {}
+            self.candidates = []
+
+        async def start(self, row, rules):
+            self.candidates = [row]
+
+        async def start_all(self, rows, rules):
+            self.candidates = rows
+
+        def snapshot(self):
+            return {"count": len(self.candidates), "errors": self.errors}
+
+    monkeypatch.setattr(web_console, "discover_candidates", discover)
+
+    async def scenario():
+        manager = manager_at(tmp_path)
+        monitor = PublicMonitor()
+
+        async def monitor_instance(profile="default"):
+            return monitor
+
+        monkeypatch.setattr(manager, "monitor_instance", monitor_instance)
+        client = TestClient(TestServer(create_app(manager, "test-password-long")),
+                            cookie_jar=aiohttp.CookieJar(unsafe=True))
+        await client.start_server()
+        headers = {"X-Web-Request": "1"}
+        try:
+            assert (await client.get("/api/market-monitor/candidates")).status == 401
+            await client.post("/api/login", json={"password": "test-password-long"}, headers=headers)
+            listed = await (await client.get("/api/market-monitor/candidates")).json()
+            assert listed["symbols"] == [candidate]
+            response = await client.post("/api/market-monitor/start",
+                                         json={"symbol": "BTC", "all": all_symbols}, headers=headers)
+            assert response.status == 200
+            result = await response.json()
+            assert result["count"] == 1
+            assert result["errors"] == {"market-list/entropy": "unavailable"}
+            assert monitor.candidates == [candidate]
+        finally:
+            await client.close()
+
+    asyncio.run(scenario())
+
+
 def test_csv_tail_is_bounded_and_handles_partial_rows(tmp_path):
     path = tmp_path / "minutes.csv"
     path.write_text("minute_ts,premium_close_bps\n" + "".join(f"{index},{index / 10}\n" for index in range(200)) + "partial\n")
