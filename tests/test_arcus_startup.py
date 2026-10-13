@@ -133,7 +133,8 @@ def test_startup_failure_never_starts_execution_or_corrective_hedging(tmp_path, 
                 conf=vc, kind=vc.kind, name=vc.label, position=0,
                 size_decimals=4, min_base=.001, min_quote=10, fee_bps=vc.fee_bps,
                 init_signer=Mock(), load_market=AsyncMock(),
-                verify_live_credentials=AsyncMock(), start_tasks=Mock(), send_taker=AsyncMock())
+                verify_live_credentials=AsyncMock(), close=AsyncMock(),
+                start_tasks=Mock(), send_taker=AsyncMock())
         arcus, rh = venues["entropy"], venues["hedge"]
         e._make_venue = lambda vc: venues[vc.key]
         e._reconcile_positions = AsyncMock()
@@ -150,6 +151,8 @@ def test_startup_failure_never_starts_execution_or_corrective_hedging(tmp_path, 
         rh.start_tasks.assert_not_called()
         arcus.send_taker.assert_not_awaited()
         rh.send_taker.assert_not_awaited()
+        arcus.close.assert_awaited_once()
+        rh.close.assert_awaited_once()
         e._hedge.assert_not_awaited()
         if failure == "authorization":
             e._reconcile_positions.assert_not_awaited()

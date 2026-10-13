@@ -187,10 +187,50 @@ class Engine:
 
     async def _run_inner(self) -> None:
         cfg = self.cfg
+        tasks: List[asyncio.Task] = []
+        try:
+            await self._run_markets(tasks)
+        finally:
+            self.stop.set()
+            if self._exec_tasks:  # let in-flight executions settle, never cancel
+                log.info("waiting for %d in-flight execution(s) to settle",
+                         len(self._exec_tasks))
+                await asyncio.wait(self._exec_tasks,
+                                   timeout=cfg.shutdown_grace_sec)
+                if self._exec_tasks:
+                    self.halted = True
+                    log.critical("shutdown execution still unresolved; check exchange open orders and positions")
+            self._feed_stop.set()
+            for t in tasks:
+                t.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            results = await asyncio.gather(*(v.close() for v in self.venues.values()),
+                                           return_exceptions=True)
+            for result in results:
+                if isinstance(result, BaseException):
+                    log.error("venue cleanup failed: %s", result)
+            if self._telegram_tasks:
+                await asyncio.gather(*self._telegram_tasks, return_exceptions=True)
+            try:
+                await self.telegram.close()
+            except Exception:
+                log.exception("telegram cleanup failed")
+            log.info("shutdown — %d trades, %d hedges, exp edge $%.4f, "
+                     "fill edge $%.4f", self.trades, self.hedges,
+                     self.total_exp_edge, self.total_fill_edge)
+        if cfg.primary_order_type == "maker" and (self.active_maker is not None or self._exec_tasks):
+            raise RuntimeError("maker shutdown unconfirmed; check exchange orders and positions")
+
+    async def _run_markets(self, tasks: List[asyncio.Task]) -> None:
+        cfg = self.cfg
         self.entropy = self._make_venue(cfg.entropy)
+        self.venues = {"entropy": self.entropy}
         self.hedge = self._make_venue(cfg.hedge)
-        self.venues = {"entropy": self.entropy, "hedge": self.hedge}
-        await asyncio.gather(self.entropy.load_market(), self.hedge.load_market())
+        self.venues["hedge"] = self.hedge
+        loads = [asyncio.create_task(v.load_market(), name="load-market")
+                 for v in self.venues.values()]
+        tasks.extend(loads)
+        await asyncio.gather(*loads)
         self.markets_ready = True
 
         live = not self.record_only
@@ -246,7 +286,6 @@ class Engine:
             if self.bps_strategy:
                 self.bps_strategy.restore()
 
-        tasks: List[asyncio.Task] = []
         for v in self.venues.values():
             # Account/order streams must stay alive while a stop is canceling
             # a resting maker order and hedging its last fills.
@@ -274,28 +313,6 @@ class Engine:
                                              name="reconcile"))
 
         await self.stop.wait()
-        if self._exec_tasks:  # let in-flight executions settle, never cancel
-            log.info("waiting for %d in-flight execution(s) to settle",
-                     len(self._exec_tasks))
-            await asyncio.wait(self._exec_tasks,
-                               timeout=cfg.shutdown_grace_sec)
-            if self._exec_tasks:
-                self.halted = True
-                log.critical("shutdown execution still unresolved; check exchange open orders and positions")
-        self._feed_stop.set()
-        for t in tasks:
-            t.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
-        for v in self.venues.values():
-            await v.close()
-        if self._telegram_tasks:
-            await asyncio.gather(*self._telegram_tasks, return_exceptions=True)
-        await self.telegram.close()
-        log.info("shutdown — %d trades, %d hedges, exp edge $%.4f, "
-                 "fill edge $%.4f", self.trades, self.hedges,
-                 self.total_exp_edge, self.total_fill_edge)
-        if cfg.primary_order_type == "maker" and (self.active_maker is not None or self._exec_tasks):
-            raise RuntimeError("maker shutdown unconfirmed; check exchange orders and positions")
 
     # --------------------------------------------------------------- signals
 
@@ -465,9 +482,7 @@ class Engine:
             return
         now = time.time()
         exiting = self.bps_strategy and self.bps_strategy.entries and (
-            self.bps_strategy.closing or (self.premium_bps() is not None and (
-                self.premium_bps() >= self.bps_strategy.locked_exit if self.bps_strategy.long
-                else self.premium_bps() <= self.bps_strategy.locked_exit)))
+            self.bps_strategy.closing or self.bps_strategy.exit_reached(self.premium_bps()))
         if not exiting and now - self.last_trade_ts < cfg.cooldown_sec:
             self._schedule_poke(cfg.cooldown_sec - (now - self.last_trade_ts))
             return

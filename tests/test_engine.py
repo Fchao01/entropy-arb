@@ -6,6 +6,7 @@ import asyncio
 import os
 import sys
 import tempfile
+import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -230,3 +231,58 @@ if __name__ == "__main__":
         if name.startswith("test_"):
             fn()
             print(f"{name:40s} OK")
+
+
+@pytest.mark.parametrize('failure_stage', ['market', 'signer', 'position', 'bps_restore'])
+def test_startup_failure_closes_sdk_and_engine_sessions(tmp_path, failure_stage):
+    from unittest.mock import AsyncMock
+    import aiohttp
+    from entropy_arb.bps_strategy import BpsStrategy
+    from entropy_arb.config import LighterCreds
+
+    async def scenario():
+        eng = make_engine()
+        eng.cfg.primary_venue = 'lighter-rh'
+        eng.cfg.primary.kind = eng.cfg.hedge.kind = 'lighter'
+        eng.cfg.primary.lighter_creds = LighterCreds(1, 1, 'fixture')
+        eng.cfg.hedge.lighter_creds = LighterCreds(2, 1, 'fixture')
+        eng.cfg.log_file = str(tmp_path / 'engine.log')
+        eng.cfg.bps_levels = 'manual'
+        created = []
+        if failure_stage == 'bps_restore':
+            eng.cfg.strategy_mode = 'bps'
+            eng.bps_strategy = BpsStrategy(eng)
+            eng.bps_strategy.path.write_text('{"pending":true}')
+        def make(conf):
+            venue = StubVenue(conf.key, conf.key)
+            venue.kind, venue.conf, venue.client = 'lighter', conf, None
+            async def load():
+                if failure_stage == 'market' and conf.key == 'entropy':
+                    raise RuntimeError('market failed')
+            venue.load_market = load
+            def init():
+                venue.client = aiohttp.ClientSession()
+                if failure_stage == 'signer' and conf.key == 'entropy':
+                    raise RuntimeError('signer failed')
+            venue.init_signer = init
+            async def position():
+                if failure_stage == 'position':
+                    raise RuntimeError('position failed')
+                return 1 if conf.key == 'entropy' else -1
+            venue.fetch_position = position
+            async def close():
+                if venue.client:
+                    await venue.client.close()
+            venue.close = AsyncMock(side_effect=close)
+            created.append(venue)
+            return venue
+        eng._make_venue = make
+        with pytest.raises(RuntimeError):
+            await eng.run()
+        assert eng.session.closed and eng._feed_stop.is_set()
+        for venue in created:
+            venue.close.assert_awaited_once()
+            assert venue.client is None or venue.client.closed
+        assert not [task for task in asyncio.all_tasks()
+                    if task.get_name() == 'load-market' and not task.done()]
+    asyncio.run(scenario())

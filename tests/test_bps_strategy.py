@@ -178,6 +178,11 @@ def test_restart_restores_frozen_levels_but_rejects_unconfirmed_or_foreign_posit
             BpsStrategy(eng).restore()  # flat may still have a resting unknown order
         restored.path.unlink()
         eng.entropy.position, eng.hedge.position = 1, -1
+        adopted = BpsStrategy(eng)
+        adopted.restore()
+        assert adopted.entries == 1 and adopted.adopted_position
+        assert adopted.locked_exit == -6
+        eng.entropy.position, eng.hedge.position = 2, -2
         with pytest.raises(RuntimeError, match='旧仓位'):
             BpsStrategy(eng).restore()
     asyncio.run(scenario())
@@ -366,8 +371,9 @@ def test_net_tolerance_does_not_reclassify_small_paired_positions_as_flat(tmp_pa
     eng.cfg.net_tolerance_base = .001
     eng.entropy.position, eng.hedge.position = .0009, -.0009
     assert not eng.bps_strategy.flat()
-    with pytest.raises(RuntimeError, match='旧仓位'):
-        eng.bps_strategy.restore()
+    eng.bps_strategy.restore()
+    assert eng.bps_strategy.entries == 1
+    assert eng.bps_strategy.adopted_position
 
 
 def test_unmatched_fill_below_legacy_net_tolerance_is_not_a_paired_cycle(tmp_path):
@@ -399,3 +405,73 @@ def test_close_depth_repricing_leaves_a_tradable_tail(tmp_path):
     assert plan.qty < 1
     residual = 1 - plan.qty
     assert residual * eng.entropy.book.best_bid() * (1 - 20 / 1e4) >= eng.entropy.min_quote
+
+
+@pytest.mark.parametrize('long', [True, False])
+def test_missing_checkpoint_adopts_paired_old_positions_and_closes_reduce_only(tmp_path, long):
+    async def scenario():
+        eng = engine_at(tmp_path, long=long)
+        eng.ensure_async_state()
+        sign = 1 if long else -1
+        eng.entropy.position, eng.hedge.position = sign, -sign
+        eng.bps_strategy.restore()
+        strategy = eng.bps_strategy
+        assert strategy.adopted_position and strategy.entries == 1
+        assert strategy.locked_exit == (-6 if long else 6)
+        # Above the opening point but before the exit point: existing pair is held.
+        books(eng, -7 if long else 7)
+        assert eng._scan(time.time()) is None
+        books(eng, -5 if long else 5)
+        candidate = eng._scan(time.time())
+        assert candidate[2].action == 'bps_close'
+        await execute(eng, candidate)
+        assert strategy.flat() and not strategy.adopted_position
+        for venue in eng.venues.values():
+            assert venue.send_taker.call_count == 1
+            assert venue.send_taker.call_args.kwargs['reduce_only'] is True
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize('positions', [(1, 0), (1, -.5), (-1, 1), (1, 1)])
+def test_unpaired_or_opposite_old_positions_are_not_silently_adopted(tmp_path, positions):
+    eng = engine_at(tmp_path)
+    eng.entropy.position, eng.hedge.position = positions
+    with pytest.raises(RuntimeError, match='未配对或方向'):
+        eng.bps_strategy.restore()
+    assert not eng.bps_strategy.path.exists()
+
+
+def test_adopted_rolling_positions_wait_for_data_then_freeze_exit_across_restart(tmp_path):
+    async def scenario():
+        eng = engine_at(tmp_path)
+        eng.ensure_async_state()
+        eng.cfg.bps_levels = 'rolling'
+        strategy = eng.bps_strategy = BpsStrategy(eng)
+        eng.entropy.position, eng.hedge.position = 1, -1
+        strategy.restore()
+        assert strategy.awaiting_levels and strategy.locked_exit is None
+        books(eng, 1)  # Must not use the arbitrary configured manual exit while waiting.
+        assert eng._scan(time.time()) is None
+        restored = BpsStrategy(eng)
+        restored.restore()
+        assert restored.awaiting_levels
+        eng.bps_strategy = restored
+        now = int(time.time() // 60) * 60
+        with open(eng.cfg.recorder_csv, 'w') as handle:
+            writer = csv.writer(handle)
+            writer.writerow(['minute_ts', 'premium_close_bps', 'samples'])
+            for index in range(30):
+                writer.writerow([now - (30 - index) * 60, -10 if index < 15 else -4, 60])
+        async def stop_after_refresh(awaitable, timeout):
+            awaitable.close()
+            eng.stop.set()
+        with patch('entropy_arb.bps_strategy.asyncio.wait_for', side_effect=stop_after_refresh):
+            await restored.refresh_loop()
+        assert not restored.awaiting_levels and restored.locked_exit == -4
+        second_restart = BpsStrategy(eng)
+        second_restart.restore()
+        assert second_restart.locked_exit == -4 and not second_restart.awaiting_levels
+        eng.bps_strategy = second_restart
+        books(eng, -3)
+        assert eng._scan(time.time())[2].action == 'bps_close'
+    asyncio.run(scenario())

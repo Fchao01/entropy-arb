@@ -113,6 +113,8 @@ class BpsStrategy:
         self.locked_entry = self.locked_exit = None
         self.closing = False
         self.pending = False
+        self.adopted_position = False
+        self.awaiting_levels = False
         self.last_entry_at = 0.0
         self.reason = '等待数据' if self.entry is None else '等待开仓点位'
         self.path = Path(self.cfg.log_file).with_suffix('.bps-state.json')
@@ -140,6 +142,38 @@ class BpsStrategy:
     def tolerance(self):
         return max(1e-12, min(self.cfg.net_tolerance_base, self.engine._step / 2))
 
+    def exit_reached(self, premium):
+        return (premium is not None and self.locked_exit is not None
+                and (premium >= self.locked_exit if self.long else premium <= self.locked_exit))
+
+    def _check_paired_positions(self):
+        primary, hedge = self.engine.entropy.position, self.engine.hedge.position
+        sign = 1 if self.long else -1
+        if (not all(math.isfinite(value) for value in (primary, hedge))
+                or primary * sign <= 0 or hedge * sign >= 0
+                or abs(primary + hedge) > self.tolerance):
+            raise RuntimeError('bps 旧仓位未配对或方向与 bps.direction 不一致，请核对两腿数量及配置方向')
+
+    def _adopt_positions(self):
+        self._check_paired_positions()
+        self.entries = 1  # Historical batch count is unknown; represent the existing pair once.
+        self.adopted_position = True
+        self.last_entry_at = time.time()
+        if self.cfg.bps_levels == 'manual':
+            self.locked_entry, self.locked_exit = self.entry, self.exit
+        else:
+            self.awaiting_levels = True
+        self.reason = '旧仓已接管，等待滚动点位' if self.awaiting_levels else '旧仓已接管，等待平仓点位'
+        try:
+            self.save()
+        except OSError as error:
+            raise RuntimeError('bps 接管旧仓的状态无法保存，已停止启动；请检查日志目录写入权限') from error
+        log.warning('[BPS] 已接管配对旧仓 %s=%+.8g %s=%+.8g；历史批次未知，计为 1 批；'
+                    '点位来源=%s，平仓点位=%s；历史成本不计作本次已知开仓成本',
+                    self.engine.entropy.name, self.engine.entropy.position,
+                    self.engine.hedge.name, self.engine.hedge.position,
+                    self.cfg.bps_levels, self.locked_exit)
+
     def restore(self):
         state = None
         if self.path.exists():
@@ -154,6 +188,10 @@ class BpsStrategy:
         if self.flat():
             self.path.unlink(missing_ok=True)
             return
+        self._check_paired_positions()
+        if state is None:
+            self._adopt_positions()
+            return
         try:
             if not isinstance(state, dict):
                 raise ValueError('missing checkpoint')
@@ -164,18 +202,28 @@ class BpsStrategy:
                 raise ValueError('checkpoint mismatch or unfinished execution')
             for key in ('entries', 'locked_entry', 'locked_exit', 'closing', 'last_entry_at'):
                 setattr(self, key, state[key])
-            if (self.entries < 1 or not all(math.isfinite(x) for x in (self.locked_entry, self.locked_exit))
+            self.adopted_position = state.get('adopted_position', False)
+            self.awaiting_levels = state.get('awaiting_levels', False)
+            waiting = (self.adopted_position and self.awaiting_levels and not self.closing
+                       and self.locked_entry is None and self.locked_exit is None)
+            if (self.entries < 1 or (not waiting and not all(
+                    math.isfinite(x) for x in (self.locked_entry, self.locked_exit)))
                     or self.engine.entropy.position * (1 if self.long else -1) <= 0):
                 raise ValueError('invalid cycle')
         except (OSError, ValueError, KeyError, TypeError) as error:
             raise RuntimeError('bps 策略发现无法确认归属的旧仓位或未完成订单，已拒绝启动；请核对订单和仓位后处理') from error
-        log.info('[BPS] restored cycle entries=%s frozen_exit=%+.3f closing=%s',
-                 self.entries, self.locked_exit, self.closing)
+        if waiting and self.cfg.bps_levels == 'manual':
+            self.locked_entry, self.locked_exit = self.entry, self.exit
+            self.awaiting_levels = False
+            self.save()
+        log.info('[BPS] restored cycle entries=%s frozen_exit=%s closing=%s awaiting_levels=%s',
+                 self.entries, self.locked_exit, self.closing, self.awaiting_levels)
 
     def save(self):
         self.path.parent.mkdir(parents=True, exist_ok=True)
         data = {key: getattr(self, key) for key in
-                ('entries', 'locked_entry', 'locked_exit', 'closing', 'pending', 'last_entry_at')}
+                ('entries', 'locked_entry', 'locked_exit', 'closing', 'pending', 'last_entry_at',
+                 'adopted_position', 'awaiting_levels')}
         data.update(identity=self.identity, positions={v.key: v.position for v in self.engine.venues.values()})
         temp = self.path.with_suffix('.tmp')
         temp.write_text(json.dumps(data, allow_nan=False))
@@ -192,6 +240,16 @@ class BpsStrategy:
                         rolling_levels, self.cfg, time.time(), include_coverage=True)
                     self.entry, self.exit, self.window_end = entry, exit, end
                     self.coverage = coverage
+                    if self.awaiting_levels:
+                        self.locked_entry, self.locked_exit = entry, exit
+                        self.awaiting_levels = False
+                        try:
+                            self.save()
+                        except OSError:
+                            self.engine.halted = True
+                            self.reason = '接管旧仓点位无法保存，暂停交易；请核对仓位'
+                            raise
+                        log.info('[BPS] 旧仓点位已锁定 entry=%+.3f exit=%+.3f', entry, exit)
                     previous = minute
                     last_error = None
                     self.reason = '持仓中' if self.entries else '等待开仓点位'
@@ -225,6 +283,7 @@ class BpsStrategy:
                     window_minutes=self.cfg.bps_window_minutes, window_end=self.window_end,
                     min_valid_minutes=self.cfg.bps_min_valid_minutes, coverage=self.coverage,
                     entries=self.entries, max_entries=self.cfg.bps_max_entries,
+                    adopted_position=self.adopted_position, awaiting_levels=self.awaiting_levels,
                     closing=self.closing, reason=self.reason,
                     data_path=self.cfg.recorder_csv)
 
@@ -313,7 +372,7 @@ class BpsStrategy:
         premium = eng.premium_bps()
         if premium is None:
             return None
-        if self.entries and (self.closing or (premium >= self.locked_exit if self.long else premium <= self.locked_exit)):
+        if self.entries and (self.closing or self.exit_reached(premium)):
             if not self.closing:
                 self.closing = True  # latch across partial fills and restarts
                 try:
@@ -374,6 +433,7 @@ class BpsStrategy:
         if self.flat():
             self.entries = 0
             self.locked_entry = self.locked_exit = None
+            self.adopted_position = self.awaiting_levels = False
             self.closing = False
             self.last_entry_at = time.time()
             for key in eng._armed:
