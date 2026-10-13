@@ -21,3 +21,4 @@ body{font-size:15px}
 #execution-statistics{margin-top:24px}.execution-table{min-width:1050px}.execution-table td small{display:block;color:#77858b;font-size:10px;line-height:1.8}.execution-table td:not(:first-child){white-space:nowrap}.execution-table th{white-space:nowrap}#execution-statistics .panel-footer{align-items:flex-start;gap:18px;flex-wrap:wrap;line-height:1.8}#execution-statistics .panel-footer>span{max-width:650px}
 
 .execution-table th:first-child,.execution-table td:first-child{position:sticky;left:0;z-index:1;background:#fff}
+.signal-table{min-width:790px}.signal-table td:not(:first-child){white-space:nowrap}.signal-table td small{display:block;margin-top:5px;color:#77858b;font-size:10px}#signal-panel{margin-bottom:22px}#signal-panel .panel-footer{line-height:1.8}

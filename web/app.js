@@ -250,11 +250,38 @@ function renderMonitor() {
   element("monitor-summary").innerHTML = `<div><strong>${escapeHtml(task.symbol)}</strong><span>${escapeHtml(venues[task.primary])} ⇄ ${escapeHtml(venues[task.hedge])}</span><span class="badge ${task.mode}">${task.mode === "live" ? "LIVE · 实盘" : "DATA · 采集"}</span>${badge(task)}</div><small>${fresh ? "实时快照" : "最后快照"} ${timeLabel(metrics?.updated_at)} · ${escapeHtml(orderMode)}${escapeHtml(makerLabel)}${escapeHtml(strategyLabel)}${telegramLabel} ${task.exit_code == null ? "" : ` · 退出码 ${task.exit_code}`}</small>`;
   element("monitor-stats").innerHTML = stat("双腿中间价溢价", signed(metrics?.premium_bps), metricNote, "⇄", "bps") + stat("净敞口", metrics?.net_delta == null ? "—" : signed(metrics.net_delta, 6), "双腿基础币数量合计", "⊞") + stat("会话盈亏 · MTM", metrics?.session_pnl == null ? "—" : `$${signed(metrics.session_pnl)}`, "按盘口标记的会话估值变化，非已实现收益", "↗") + stat("套利执行 / 对冲", `${metrics?.trades ?? 0} / ${metrics?.hedges ?? 0}`, `当前会话记录 ${metrics?.minute_rows ?? 0} 条分钟数据`, "▥") + stat("总成交额 · 双腿合计", money(metrics?.session_volume_usd), "实际成交名义金额，不是账户权益", "⇄") + stat("净损益 · 已实现", money(metrics?.execution_stats?.net_realized_usd, 4), "已平仓价差减全部成交手续费，浮盈见交易统计", "↗") + stat("总手续费", money(metrics?.session_fees_usd, 4), "两条腿及后续对冲手续费", "▥");
   element("venue-cards").innerHTML = metrics?.venues?.length ? metrics.venues.map((venue) => `<article class="venue-card"><div class="venue-top"><div><b>${escapeHtml(venue.name)}</b><small>${escapeHtml(venue.symbol)}</small></div><span class="badge ${fresh && venue.fresh && !venue.down ? "" : "stale"}">${!fresh ? "非实时" : venue.down ? "连接异常" : venue.fresh ? `正常 · ${number(venue.age_sec, 1)}s` : "行情过期"}</span></div><div class="venue-values"><div><span>买一 / 卖一</span><strong class="number">${number(venue.bid, 5)} / ${number(venue.ask, 5)}</strong></div><div><span>持仓数量</span><strong>${signed(venue.position, 6)}</strong></div><div><span>持仓金额 · USD</span><strong>${money(venue.position_usd)}</strong></div><div><span>账户权益 / 可用</span><strong>${money(venue.equity)} / ${money(venue.free)}</strong></div><div><span>会话成交额 · USD</span><strong>${money(venue.volume_usd)}</strong></div></div></article>`).join("") : `<div class="empty-state"><h3>等待市场连接</h3><p>启动任务后将展示真实双腿盘口。启动失败请查看下方日志。</p></div>`;
+  renderSignals(metrics, fresh);
   drawChart(state.detail.minutes);
   renderLogs();
   const base = `/api/tasks/${task.id}/download/`;
   element("download-minutes").href = base + "minutes";
   element("download-logs").href = base + state.logTab;
+}
+
+function renderSignals(metrics, fresh) {
+  const signal = metrics?.execution_signals;
+  if (!signal?.rows?.length) {
+    element("signal-summary").textContent = "等待市场连接或新版状态快照";
+    element("signal-rows").innerHTML = `<tr><td colspan="6" class="table-empty">暂无信号数据</td></tr>`;
+    element("signal-note").textContent = "展示信号，不改变交易规则。";
+    return;
+  }
+  const bps = signal.mode === "bps";
+  const levels = metrics.bps_strategy;
+  const thresholds = metrics.thresholds;
+  const summary = bps ? `溢价 bps 策略 · 中间价溢价 ${signed(metrics.premium_bps)} bps · 开仓 ${signed(levels?.entry_bps)} / 平仓 ${signed(levels?.exit_bps)} bps${levels?.entries ? " · 本轮点位已锁定" : ""}` : `套利阈值策略 · 中间价溢价 ${signed(metrics.premium_bps)} bps · 中线 ${signed(thresholds?.midline_bps)} · 区间 [${signed(thresholds ? thresholds.midline_bps - thresholds.lower_bps : null)} … ${signed(thresholds ? thresholds.midline_bps + thresholds.upper_bps : null)}]`;
+  element("signal-summary").textContent = `${fresh ? "当前快照" : "最后快照 · 非实时"} · ${summary}`;
+  element("signal-rows").innerHTML = signal.rows.map((row) => {
+    const prefix = row.action === "open" ? "开仓 · " : row.action === "close" ? "平仓 · " : "";
+    const direction = prefix + (row.primary_buy ? `买 ${row.buy} → 卖 ${row.sell}` : `卖 ${row.sell} → 买 ${row.buy}`);
+    const stale = !fresh || !metrics.venues?.length || metrics.venues.some((venue) => !venue.fresh || venue.down);
+    const reached = row.gap_bps != null && row.gap_bps >= 0;
+    const status = stale ? "行情非实时" : row.action === "close" && !row.has_position ? "未持仓 · 参考点位" : row.action === "close" && row.closing ? "平仓中" : row.gap_bps == null ? "等待点位" : reached ? "已达到点位" : "未达到点位";
+    const tone = !stale && row.gap_bps != null ? reached ? "positive" : "negative" : "";
+    return `<tr><td>${escapeHtml(direction)}<small>${row.order_type === "maker" ? "主腿挂单 / 对冲腿吃单" : "双腿吃单"}</small></td><td class="number">${signed(row.executable_premium_bps)}</td><td class="number">${signed(row.trigger_premium_bps)}</td><td class="number">${escapeHtml(row.comparison === "<=" ? "≤" : "≥")} ${signed(row.hurdle_bps)}</td><td class="number ${tone}">${signed(row.gap_bps)}</td><td>${status}</td></tr>`;
+  }).join("");
+  element("signal-note").textContent = bps ? "触发指标与门槛均为主腿相对对冲腿的中间价溢价；≤ 条件的 gap = 门槛 − 指标，≥ 条件的 gap = 指标 − 门槛。可成交溢价另按卖腿价格 / 买腿价格计算，不参与上述差值。" : "触发指标为可成交溢价；门槛包含当前方向阈值、配置手续费和仓位附加值。gap = 可成交溢价 − 门槛。";
+  element("signal-note").textContent += " gap ≥ 0 仅表示达到点位，不代表已下单或净利润；下单仍受盘口深度、信号持续时间、仓位上限及暂停状态等条件限制。可成交溢价按最优报价计算，不代表整笔实际成交价。";
 }
 
 function drawChart(rows) {
