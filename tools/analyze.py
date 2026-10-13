@@ -31,9 +31,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 from entropy_arb.thresholds import (SHANGHAI, ThresholdDataError, daily_window,
-                                   load_window_rows, threshold_values)
-
-CANDIDATES = [1.0, 1.5, 2.0, 3.0, 4.0, 5.0, 6.0, 8.0, 10.0, 15.0, 20.0]
+                                   analysis_report, load_window_rows, threshold_values)
 
 
 class ChineseHelpFormatter(argparse.HelpFormatter):
@@ -54,18 +52,6 @@ class ChineseArgumentParser(argparse.ArgumentParser):
             message = message.replace(source, translated)
         self.print_usage(sys.stderr)
         self.exit(2, f"参数错误：{message}\n")
-
-
-def pctl(sorted_vals: list, q: float) -> float:
-    """Linear-interpolated percentile of a pre-sorted list, q in [0, 100]."""
-    if not sorted_vals:
-        return float("nan")
-    k = (len(sorted_vals) - 1) * q / 100.0
-    lo = math.floor(k)
-    hi = math.ceil(k)
-    if lo == hi:
-        return sorted_vals[int(k)]
-    return sorted_vals[lo] * (hi - k) + sorted_vals[hi] * (k - lo)
 
 
 def load_rows(path: str, hours: float, min_samples: int) -> list:
@@ -175,13 +161,9 @@ def main() -> None:
             sys.exit(1)
 
     span_h = (rows[-1]["ts"] - rows[0]["ts"]) / 3600.0 + 1 / 60.0
-    prem = sorted(r["prem"] for r in rows)
-    mean = sum(prem) / len(prem)
-    var = sum((x - mean) ** 2 for x in prem) / len(prem)
-    median = pctl(prem, 50)
-
     try:
         midline, sug_upper, sug_lower = threshold_values(rows, fees)
+        report = analysis_report(rows, fees)
     except ThresholdDataError as error:
         p.error(str(error))
     if args.json:
@@ -192,6 +174,7 @@ def main() -> None:
             "window_end": window.end_ts if window else None,
             "fees_bps": fees, "min_samples": args.min_samples,
             "rows": len(rows), "span_hours": span_h,
+            "analysis": report,
             "suggested": {"midline_bps": midline, "upper_bps": sug_upper, "lower_bps": sug_lower},
         }, ensure_ascii=False))
         return
@@ -205,30 +188,20 @@ def main() -> None:
         print("分析范围：最近指定小时" if args.hours else "分析范围：全部历史；网页使用 --daily 的 08:00–08:00 窗口")
     print(f"有效数据：{len(rows)} 个分钟；首尾时间跨度：{span_h:.1f} 小时\n")
     print("主腿相对对冲腿的溢价分布（分钟结束时的中间价，单位：bps）：")
-    print(f"  平均值 {mean:+.2f}   标准差 {math.sqrt(var):.2f}   "
-          f"中位数 {median:+.2f}")
-    print(f"  5%分位数 {pctl(prem, 5):+.2f}   25%分位数 {pctl(prem, 25):+.2f}")
-    print(f"  75%分位数 {pctl(prem, 75):+.2f}   95%分位数 {pctl(prem, 95):+.2f}")
-
-    # room beyond the midline that was actually executable each minute, net
-    # of taker fees (config thresholds are net-of-fee: the engine adds fees
-    # on top, and recorded edges are pre-fee)
-    sell_room = sorted((r["sell_max"] - midline - fees for r in rows),
-                       reverse=True)
-    buy_room = sorted((r["buy_max"] + midline - fees for r in rows),
-                      reverse=True)
+    distribution = report["distribution"]
+    print(f"  平均值 {distribution['mean_bps']:+.2f}   标准差 {distribution['std_bps']:.2f}   "
+          f"中位数 {distribution['median_bps']:+.2f}")
+    print(f"  5%分位数 {distribution['p5_bps']:+.2f}   25%分位数 {distribution['p25_bps']:+.2f}")
+    print(f"  75%分位数 {distribution['p75_bps']:+.2f}   95%分位数 {distribution['p95_bps']:+.2f}")
 
     print(f"\n中线 midline_bps = {midline:+.1f}（中位数）；"
-          f"每次双腿交易的吃单手续费合计：{fees:.1f} bps。")
+          f"每次双腿交易的配置手续费合计：{fees:.1f} bps。")
     print("各档净阈值达到条件的分钟数：")
     print("  净阈值(bps) |        卖出主腿        |        买入主腿")
     print("              | 达标分钟数  折合每日数 | 达标分钟数  折合每日数")
-    per_day = 24.0 / span_h if span_h > 0 else 0.0
-    for t in CANDIDATES:
-        s_hits = sum(1 for x in sell_room if x >= t)
-        b_hits = sum(1 for x in buy_room if x >= t)
-        print(f"  {t:>11.1f} | {s_hits:>10} {s_hits * per_day:>10.1f} | "
-              f"{b_hits:>10} {b_hits * per_day:>10.1f}")
+    for band in report["bands"]:
+        print(f"  {band['band_bps']:>11.1f} | {band['sell_minutes']:>10} {band['sell_per_day']:>10.1f} | "
+              f"{band['buy_minutes']:>10} {band['buy_per_day']:>10.1f}")
 
     # default suggestion: the band that fired in ~10% of minutes (p90 of the
     # fee-adjusted executable room), floored at 1 bps — tune from the table

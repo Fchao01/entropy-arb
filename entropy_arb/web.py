@@ -32,7 +32,7 @@ from .config import ConfigError, HEDGE_VENUES, PRIMARY_VENUES, _SCHEMA, _validat
 from .market_monitor import MonitorRules, MultiVenueMonitor, discover_candidates
 from .privacy import PrivateLogCapture
 from .thresholds import (ThresholdDataError, ThresholdSuggestion, daily_window,
-                         load_window_rows, prune_csv, suggest)
+                         analysis_report, load_window_rows, prune_csv, suggest)
 from .telegram import TelegramNotifier, test_message
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -358,7 +358,7 @@ class TaskManager:
         })
         return yaml.safe_dump(raw, allow_unicode=True, sort_keys=False)
 
-    def _threshold_suggestion(self, task_id):
+    def _threshold_suggestion(self, task_id, *, include_analysis=False):
         """Calculate a threshold proposal without changing the task."""
         task = self.get(task_id)
         directory = self.directory(task_id)
@@ -379,12 +379,16 @@ class TaskManager:
         except ThresholdDataError as error:
             raise ConsoleError(str(error)) from error
         current = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
-        return task, window, suggestion, dict(current.get("thresholds", {}))
+        result = task, window, suggestion, dict(current.get("thresholds", {}))
+        if include_analysis:
+            return (*result, analysis_report(rows, cfg.primary_fee_bps + cfg.hedge.fee_bps))
+        return result
 
     async def manual_threshold(self, task_id, apply=False, confirm_live=False,
                                thresholds=None):
         """Preview or apply a threshold proposal requested from the UI."""
-        task, window, suggestion, old = self._threshold_suggestion(task_id)
+        result = self._threshold_suggestion(task_id, include_analysis=not apply)
+        task, window, suggestion, old = result[:4]
         if not apply:
             cfg = load_config(str(self.ensure_task_config(task)), symbol=task["symbol"],
                               primary_venue=task["primary"], hedge_venue=task["hedge"],
@@ -397,6 +401,7 @@ class TaskManager:
                 "fees_bps": cfg.primary_fee_bps + cfg.hedge.fee_bps,
                 "primary_order_type": cfg.primary_order_type,
                 "rows": suggestion.rows, "span_hours": suggestion.span_hours,
+                "analysis": result[4],
                 "current": old,
                 "suggested": {"midline_bps": suggestion.midline_bps,
                               "upper_bps": suggestion.upper_bps,

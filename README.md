@@ -293,6 +293,13 @@ tests/                   python3 -m pytest tests/
 Use at your own risk. This is trading software operating with real money;
 nothing here is investment advice. Start with tiny position caps.
 
+### 溢价 bps 的滚动历史数据
+
+滚动策略读取 YAML 的 `recorder.csv`，只使用最近 `bps.window_minutes` 分钟内的已完成分钟，允许缺口，不用更早的数据补齐。默认 `bps.min_valid_minutes: 30`，窗口不足 30 分钟时要求填满该窗口；每条记录仍须至少 10 次有效采样。旧版 `min_coverage_pct` 字段为兼容保留，不再拦截计算。有效记录数是滚动窗口内的去重数量，不是本次运行的累计写入行数；新记录进入、旧记录移出时，数量可以不变。
+
+网页“阈值”弹窗显示完整溢价分布和各档净带宽的买卖触发分钟数、折合每日数。它与 `tools/analyze.py --daily` 使用同一计算方法；数据路径及费率以 YAML 为准。弹窗使用最近完成的上海时间 08:00–08:00 窗口，命令端不加 `--daily` 则分析全部历史。触发表固定使用参考中线，修改三个输入框不会重算表格。历史达标分钟数不等于实际成交笔数或交易收益。
+
+
 ## License
 
 [MIT](LICENSE)

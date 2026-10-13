@@ -366,7 +366,7 @@ async function refreshDetail() {
   renderMonitor();
 }
 
-const fieldMap = {"strategy-mode": ["strategy", "mode", "threshold"], "bps-levels": ["bps", "levels", "rolling"], "bps-direction": ["bps", "direction", "long_primary"], "bps-window": ["bps", "window_minutes", 120], "bps-min-coverage": ["bps", "min_coverage_pct", 80], "bps-entry-percentile": ["bps", "entry_percentile", 10], "bps-exit-percentile": ["bps", "exit_percentile", 75], "bps-entry": ["bps", "entry_bps", -9], "bps-exit": ["bps", "exit_bps", -6], "bps-max-entries": ["bps", "max_entries", 1], "bps-add-interval": ["bps", "add_interval_sec", 60], "bps-position-cap": ["bps", "max_position_usd", 1000], "primary-order-type": ["execution", "primary_order_type", "taker"], "maker-timeout": ["execution", "maker_timeout_sec", 5], "primary-maker-fee": ["primary", "maker_fee_bps", 0], "midline": ["thresholds", "midline_bps", 0], "upper": ["thresholds", "upper_bps", 4], "lower": ["thresholds", "lower_bps", 4], "order-cap": ["sizing", "max_order_notional_usd", 500], "primary-cap": ["primary", "max_position_usd", 1000], "hedge-cap": ["hedge", "max_position_usd", 1000], "primary-fee": ["primary", "taker_fee_bps", 0], "hedge-fee": ["hedge", "taker_fee_bps", 2.25], "primary-symbol": ["primary", "symbol", ""], "hedge-symbol": ["hedge", "symbol", ""]};
+const fieldMap = {"strategy-mode": ["strategy", "mode", "threshold"], "bps-levels": ["bps", "levels", "rolling"], "bps-direction": ["bps", "direction", "long_primary"], "bps-window": ["bps", "window_minutes", 120], "bps-min-valid": ["bps", "min_valid_minutes", 30], "bps-entry-percentile": ["bps", "entry_percentile", 10], "bps-exit-percentile": ["bps", "exit_percentile", 75], "bps-entry": ["bps", "entry_bps", -9], "bps-exit": ["bps", "exit_bps", -6], "bps-max-entries": ["bps", "max_entries", 1], "bps-add-interval": ["bps", "add_interval_sec", 60], "bps-position-cap": ["bps", "max_position_usd", 1000], "primary-order-type": ["execution", "primary_order_type", "taker"], "maker-timeout": ["execution", "maker_timeout_sec", 5], "primary-maker-fee": ["primary", "maker_fee_bps", 0], "midline": ["thresholds", "midline_bps", 0], "upper": ["thresholds", "upper_bps", 4], "lower": ["thresholds", "lower_bps", 4], "order-cap": ["sizing", "max_order_notional_usd", 500], "primary-cap": ["primary", "max_position_usd", 1000], "hedge-cap": ["hedge", "max_position_usd", 1000], "primary-fee": ["primary", "taker_fee_bps", 0], "hedge-fee": ["hedge", "taker_fee_bps", 2.25], "primary-symbol": ["primary", "symbol", ""], "hedge-symbol": ["hedge", "symbol", ""]};
 
 function sectionLines(text, section) {
   const lines = text.split("\n");
@@ -410,7 +410,7 @@ function refreshStrategyFields() {
   const rolling = element("bps-levels").value === "rolling";
   element("bps-settings").hidden = !bps;
   for (const id of ["midline", "upper", "lower"]) element(id).closest("label").hidden = bps;
-  for (const id of ["bps-window", "bps-min-coverage", "bps-entry-percentile", "bps-exit-percentile"]) element(id).closest("label").hidden = !rolling;
+  for (const id of ["bps-window", "bps-min-valid", "bps-entry-percentile", "bps-exit-percentile"]) element(id).closest("label").hidden = !rolling;
   for (const id of ["bps-entry", "bps-exit"]) element(id).closest("label").hidden = rolling;
 }
 
@@ -564,11 +564,18 @@ async function openThreshold(task) {
   element("threshold-dialog").showModal();
   try {
     const result = await api(`/api/tasks/${task.id}/threshold`);
-    element("threshold-window").textContent = `${result.window} · ${result.rows} 条有效分钟数据 · 覆盖 ${number(result.span_hours, 1)} 小时 · ${result.primary_order_type === "maker" ? "主腿挂单 / 对冲吃单" : "双腿吃单"} · 手续费合计 ${number(result.fees_bps, 2)} bps · 数据：${result.data_path || "—"} · 配置：${result.config_path || "—"}`;
+    const windowTime = (timestamp) => new Date(timestamp * 1000).toLocaleString("zh-CN", {timeZone: "Asia/Shanghai", hour12: false});
+    element("threshold-window").textContent = `${windowTime(result.window_start)} → ${windowTime(result.window_end)}（上海时间，左闭右开） · ${result.rows} 条有效分钟数据 · 首尾跨度 ${number(result.span_hours, 1)} 小时 · ${result.primary_order_type === "maker" ? "主腿挂单 / 对冲吃单" : "双腿吃单"} · 配置手续费合计 ${number(result.fees_bps, 2)} bps · 数据：${result.data_path || "—"} · 配置：${result.config_path || "—"}`;
     element("threshold-current").textContent = `当前：中线 ${number(result.current.midline_bps, 1)} / 上带 ${number(result.current.upper_bps, 1)} / 下带 ${number(result.current.lower_bps, 1)} bps`;
     element("threshold-midline").value = result.suggested.midline_bps;
     element("threshold-upper").value = result.suggested.upper_bps;
     element("threshold-lower").value = result.suggested.lower_bps;
+    element("threshold-suggested").textContent = `建议：中线 ${signed(result.suggested.midline_bps, 1)} / 卖主腿带宽 ${number(result.suggested.upper_bps, 1)} / 买主腿带宽 ${number(result.suggested.lower_bps, 1)} bps。目标为两边各约 10% 的分钟达标，四舍五入和最小带宽会影响比例。`;
+    const report = result.analysis;
+    const stats = [["mean_bps", "平均值"], ["std_bps", "标准差"], ["median_bps", "中位数"], ["p5_bps", "5% 分位数"], ["p25_bps", "25% 分位数"], ["p75_bps", "75% 分位数"], ["p95_bps", "95% 分位数"]];
+    element("threshold-distribution").innerHTML = stats.map(([key, label]) => `<div class="threshold-stat"><span>${label}</span><strong>${key === "std_bps" ? number(report.distribution[key], 2) : signed(report.distribution[key], 2)}</strong></div>`).join("");
+    element("threshold-band-basis").textContent = `参考中线 ${signed(report.midline_bps, 1)} bps；已扣除配置手续费 ${number(report.fees_bps, 2)} bps。`;
+    element("threshold-bands").innerHTML = report.bands.map((band) => `<tr><td>${number(band.band_bps, 1)}</td><td>${number(band.sell_minutes, 0)}</td><td>${number(band.sell_per_day, 1)}</td><td>${number(band.buy_minutes, 0)}</td><td>${number(band.buy_per_day, 1)}</td></tr>`).join("");
     element("threshold-result").hidden = false;
     element("threshold-apply").disabled = false;
     element("threshold-error").textContent = "";
@@ -578,6 +585,7 @@ async function openThreshold(task) {
 element("threshold-cancel").addEventListener("click", () => element("threshold-dialog").close());
 element("threshold-apply").addEventListener("click", () => {
   if (!thresholdTask) return;
+  if (!element("threshold-dialog").querySelector("form").reportValidity()) return;
   const task = thresholdTask;
   element("threshold-dialog").close();
   const apply = () => operateThreshold(task);

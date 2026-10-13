@@ -35,6 +35,7 @@ def rolling_levels(cfg, now, *, include_coverage=False):
     end = int(now // 60) * 60
     start = end - cfg.bps_window_minutes * 60
     points = {}
+    present, low_samples, invalid_premium, before_source = set(), set(), set(), set()
     with open(cfg.recorder_csv, newline='') as handle:
         header = next(csv.reader(handle))
         metadata = prepare_recorder_source(cfg.recorder_csv, recorder_source(cfg))
@@ -49,17 +50,44 @@ def rolling_levels(cfg, now, *, include_coverage=False):
             row = dict(zip(header, values))
             try:
                 ts = float(row['minute_ts'])
-                value = float(row['premium_close_bps'])
-                samples = int(row['samples'])
-                if (math.isfinite(ts) and ts % 60 == 0 and start <= ts < end and ts >= since
-                        and math.isfinite(value) and samples >= 10):
+                if not (math.isfinite(ts) and ts % 60 == 0 and start <= ts < end):
+                    continue
+                present.add(int(ts))
+                if ts < since:
+                    before_source.add(int(ts))
+                    continue
+                try:
+                    samples = int(row['samples'])
+                except (KeyError, ValueError, TypeError):
+                    low_samples.add(int(ts))
+                    continue
+                try:
+                    value = float(row['premium_close_bps'])
+                except (KeyError, ValueError, TypeError):
+                    invalid_premium.add(int(ts))
+                    continue
+                if samples < 10:
+                    low_samples.add(int(ts))
+                elif not math.isfinite(value):
+                    invalid_premium.add(int(ts))
+                else:
                     points[int(ts)] = value
-            except (KeyError, ValueError, OverflowError):
+            except (KeyError, ValueError, TypeError, OverflowError):
                 continue
-    required = max(2, math.ceil(cfg.bps_window_minutes * cfg.bps_min_coverage_pct / 100))
+    # min_coverage_pct is accepted for old YAMLs, but no longer gates signals.
+    required = min(cfg.bps_window_minutes, cfg.bps_min_valid_minutes)
+    coverage = dict(valid_minutes=len(points), required_minutes=required,
+                    coverage_pct=len(points) / cfg.bps_window_minutes * 100,
+                    missing_minutes=cfg.bps_window_minutes - len(present),
+                    low_sample_minutes=len(low_samples - points.keys()),
+                    invalid_premium_minutes=len(invalid_premium - points.keys()),
+                    source_filtered_minutes=len(before_source - points.keys()))
     if len(points) < required:
         raise ValueError(f'等待有效分钟数据 {len(points)}/{cfg.bps_window_minutes}；'
-                         f'至少 {required} 条（最低覆盖率 {cfg.bps_min_coverage_pct:g}%）；'
+                         f'至少 {required} 条；缺行 {coverage["missing_minutes"]} 分钟，'
+                         f'采样不足 {coverage["low_sample_minutes"]} 分钟，'
+                         f'无效溢价 {coverage["invalid_premium_minutes"]} 分钟，'
+                         f'来源过滤 {coverage["source_filtered_minutes"]} 分钟；'
                          f'允许缺口，读取 {cfg.recorder_csv}')
     values = list(points.values())
     entry = percentile(values, cfg.bps_entry_percentile)
@@ -69,8 +97,7 @@ def rolling_levels(cfg, now, *, include_coverage=False):
         raise ValueError('窗口内溢价波动不足，开平仓点位重合')
     result = entry, exit, end
     if include_coverage:
-        return (*result, dict(valid_minutes=len(points), required_minutes=required,
-                              coverage_pct=len(points) / cfg.bps_window_minutes * 100))
+        return (*result, coverage)
     return result
 
 
@@ -169,10 +196,13 @@ class BpsStrategy:
                     last_error = None
                     self.reason = '持仓中' if self.entries else '等待开仓点位'
                     log.info('[BPS LEVELS] csv=%s window=%d valid=%d/%d coverage=%.1f%% '
-                             'min_coverage=%.1f%% entry=%+.3f exit=%+.3f bps frozen_exit=%s',
+                             'required=%d missing=%d low_samples=%d invalid_premium=%d source_filtered=%d '
+                             'entry=%+.3f exit=%+.3f bps frozen_exit=%s',
                              self.cfg.recorder_csv, self.cfg.bps_window_minutes,
                              coverage['valid_minutes'], self.cfg.bps_window_minutes,
-                             coverage['coverage_pct'], self.cfg.bps_min_coverage_pct,
+                             coverage['coverage_pct'], coverage['required_minutes'],
+                             coverage['missing_minutes'], coverage['low_sample_minutes'],
+                             coverage['invalid_premium_minutes'], coverage['source_filtered_minutes'],
                              entry, exit, self.locked_exit)
                 except (OSError, ValueError, StopIteration, KeyError, TypeError, csv.Error) as error:
                     self.entry = self.exit = None
@@ -193,7 +223,7 @@ class BpsStrategy:
                     entry_bps=self.locked_entry if self.entries else self.entry,
                     exit_bps=self.locked_exit if self.entries else self.exit,
                     window_minutes=self.cfg.bps_window_minutes, window_end=self.window_end,
-                    min_coverage_pct=self.cfg.bps_min_coverage_pct, coverage=self.coverage,
+                    min_valid_minutes=self.cfg.bps_min_valid_minutes, coverage=self.coverage,
                     entries=self.entries, max_entries=self.cfg.bps_max_entries,
                     closing=self.closing, reason=self.reason,
                     data_path=self.cfg.recorder_csv)

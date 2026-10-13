@@ -8,7 +8,7 @@ bps:
   levels: rolling
   direction: long_primary
   window_minutes: 120
-  min_coverage_pct: 80   # 允许缺失分钟；120 分钟内至少 96 条有效记录
+  min_valid_minutes: 30   # 允许缺口；最近窗口内至少 30 条，窗口不足 30 分钟时要求填满
   entry_percentile: 10
   exit_percentile: 75
   max_entries: 1

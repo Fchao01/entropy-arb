@@ -4,6 +4,8 @@ import csv
 import fcntl
 import json
 import os
+import subprocess
+import sys
 
 import aiohttp
 import pytest
@@ -442,9 +444,22 @@ def test_thresholds_read_yaml_csv_and_update_linked_yaml(tmp_path, absolute):
                                          samples=60, premium_close_bps=7,
                                          sell_edge_max_bps=20, buy_edge_max_bps=1))
             (manager.directory(task["id"]) / "minutes.csv").write_text("wrong data\n")
+            config_before = snapshot_path.read_text()
             preview = await manager.manual_threshold(task["id"])
             assert preview["data_path"] == str(expected)
             assert preview["suggested"]["midline_bps"] == 7
+            assert preview["analysis"]["distribution"]["mean_bps"] == 7
+            assert preview["analysis"]["distribution"]["std_bps"] == 0
+            assert len(preview["analysis"]["bands"]) == 11
+            assert preview["analysis"]["bands"][0]["sell_minutes"] == 40
+            assert preview["analysis"]["fees_bps"] == 2.25
+            cli = json.loads(subprocess.check_output(
+                [sys.executable, str(ROOT / "tools/analyze.py"), "--csv", str(expected),
+                 "--daily", "--date", window.label, "--fees-bps", "2.25", "--json"],
+                text=True))
+            assert cli["analysis"] == preview["analysis"]
+            assert cli["suggested"] == preview["suggested"]
+            assert snapshot_path.read_text() == config_before
             await manager.auto_update_task(task["id"], window)
             updated = yaml.safe_load(manager.strategy("sndk.yaml"))
             assert updated["thresholds"]["midline_bps"] == 7

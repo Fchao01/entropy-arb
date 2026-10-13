@@ -315,7 +315,9 @@ def test_web_bps_skips_daily_threshold_without_restart_or_prune(tmp_path):
                                    '  window_minutes: 1', '  max_entries: 0',
                                    '  cost_buffer_bps: -1', '  exit_percentile: .nan',
                                    '  min_coverage_pct: 0', '  min_coverage_pct: -1',
-                                   '  min_coverage_pct: 101', '  min_coverage_pct: .nan'])
+                                   '  min_coverage_pct: 101', '  min_coverage_pct: .nan',
+                                   '  min_valid_minutes: 1', '  min_valid_minutes: 10081',
+                                   '  min_valid_minutes: .nan', '  min_valid_minutes: 2.5'])
 def test_config_rejects_invalid_bps(tmp_path, extra):
     path = tmp_path / 'strategy.yaml'
     path.write_text('strategy:\n  mode: bps\nbps:\n  levels: manual\n' + extra + '\n')

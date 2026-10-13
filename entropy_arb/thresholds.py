@@ -18,6 +18,7 @@ from zoneinfo import ZoneInfo
 
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
+CANDIDATE_BANDS = (1.0, 1.5, 2.0, 3.0, 4.0, 5.0, 6.0, 8.0, 10.0, 15.0, 20.0)
 HEADER = [
     "minute_ts", "time_utc", "entropy_bid", "entropy_ask", "hedge_bid",
     "hedge_ask", "premium_open_bps", "premium_high_bps", "premium_low_bps",
@@ -138,6 +139,34 @@ def suggest(rows: Iterable[dict], fees_bps: float, window: ThresholdWindow,
     first, last = rows[0]["ts"], rows[-1]["ts"]
     span_hours = max(0.0, (last - first) / 3600.0 + 1 / 60.0)
     return ThresholdSuggestion(midline, upper, lower, len(rows), span_hours, window)
+
+
+def analysis_report(rows: Iterable[dict], fees_bps: float) -> dict:
+    """Historical distribution and band hits, shared by CLI and web preview.
+
+    Counts use minute maximum executable edges, with the suggested rounded
+    median and configured fees. They are not fill counts or realized profits.
+    """
+    rows = list(rows)
+    midline, _, _ = threshold_values(rows, fees_bps)
+    premiums = [row["prem"] for row in rows]
+    mean = sum(premiums) / len(premiums)
+    span_hours = (max(row["ts"] for row in rows) - min(row["ts"] for row in rows)) / 3600 + 1 / 60
+    per_day = 24 / span_hours
+    sell_room = [row["sell_max"] - midline - fees_bps for row in rows]
+    buy_room = [row["buy_max"] + midline - fees_bps for row in rows]
+    bands = []
+    for band in CANDIDATE_BANDS:
+        sell = sum(value >= band for value in sell_room)
+        buy = sum(value >= band for value in buy_room)
+        bands.append(dict(band_bps=band, sell_minutes=sell, buy_minutes=buy,
+                          sell_per_day=sell * per_day, buy_per_day=buy * per_day))
+    return dict(
+        distribution=dict(mean_bps=mean,
+                          std_bps=math.sqrt(sum((value - mean) ** 2 for value in premiums) / len(premiums)),
+                          median_bps=_pctl(premiums, 50),
+                          **{f"p{q}_bps": _pctl(premiums, q) for q in (5, 25, 75, 95)}),
+        midline_bps=midline, fees_bps=fees_bps, bands=bands)
 
 
 def prune_csv(path: str | Path, window: ThresholdWindow) -> int:
