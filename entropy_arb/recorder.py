@@ -47,6 +47,46 @@ HEADER = ["minute_ts", "time_utc",
           "buy_edge_mean_bps", "buy_edge_max_bps", "samples"]
 
 
+def prepare_recorder_source(path: str, source: dict, *, reset=False, allow_change=False):
+    """Adopt YAML-selected legacy history; preserve known source boundaries."""
+    metadata_path = Path(str(path) + '.source.json')
+    try:
+        metadata = json.loads(metadata_path.read_text())
+        if not isinstance(metadata, dict):
+            raise ValueError('invalid source record')
+    except FileNotFoundError:
+        metadata = None
+    except (ValueError, TypeError) as error:
+        raise ValueError('CSV 来源记录损坏，请核对历史数据来源') from error
+    if metadata is not None and not reset:
+        try:
+            valid = (isinstance(metadata, dict) and isinstance(metadata.get('source'), dict)
+                     and metadata.get('version', 1) in (1, 2)
+                     and math.isfinite(float(metadata['since'])) and float(metadata['since']) >= 0)
+        except (KeyError, ValueError, TypeError):
+            valid = False
+        if not valid:
+            raise ValueError('CSV 来源记录无效，请核对历史数据来源')
+        if metadata['source'] != source and not allow_change:
+            raise ValueError('分钟 CSV 的主腿/对冲腿来源与 YAML 不一致，等待重新采集')
+    changed = isinstance(metadata, dict) and metadata.get('source') != source
+    if reset or changed:
+        metadata = {'version': 2, 'source': source, 'since': time.time()}
+        message = 'CSV source changed; rolling signals use data since %.0f: %s'
+    elif metadata is None or metadata.get('version', 1) == 1:
+        # Version 1 recorded the upgrade time even for an unchanged legacy CSV.
+        # The user-selected YAML path is the authority for that unlabelled history.
+        metadata = {'version': 2, 'source': source, 'since': 0}
+        message = 'CSV legacy history reused from YAML path (assumed same venues and roles), since %.0f: %s'
+    else:
+        return metadata
+    temporary = metadata_path.with_suffix('.tmp')
+    temporary.write_text(json.dumps(metadata))
+    os.replace(temporary, metadata_path)
+    log.info(message, metadata['since'], path)
+    return metadata
+
+
 class _MinuteAgg:
     __slots__ = ("minute", "n", "p_open", "p_high", "p_low", "p_close",
                  "p_sum", "p_sumsq", "s_sum", "s_max", "b_sum", "b_max",
@@ -127,22 +167,7 @@ class MinuteRecorder:
                     os.replace(self.path, self.path + ".old")
         new = not os.path.exists(self.path) or os.path.getsize(self.path) == 0
         if self.source:
-            metadata_path = Path(str(self.path) + '.source.json')
-            try:
-                metadata = json.loads(metadata_path.read_text())
-                if not isinstance(metadata, dict) or not math.isfinite(float(metadata.get('since', math.nan))):
-                    metadata = {}
-            except (OSError, ValueError, TypeError):
-                metadata = {}
-            if new or not isinstance(metadata, dict) or metadata.get('source') != self.source:
-                # Old CSVs have no venue identity. Do not relabel old history
-                # when swapping the primary/hedge roles or reusing its path.
-                metadata = {'source': self.source, 'since': time.time()}
-                temporary = metadata_path.with_suffix('.tmp')
-                temporary.write_text(json.dumps(metadata))
-                os.replace(temporary, metadata_path)
-                log.info('CSV source changed; rolling signals use data since %.0f: %s',
-                         metadata['since'], self.path)
+            prepare_recorder_source(self.path, self.source, reset=new, allow_change=True)
         self._fh = open(self.path, "a", newline="")
         self._writer = csv.writer(self._fh)
         if new:

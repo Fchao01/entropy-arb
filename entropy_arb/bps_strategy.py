@@ -12,6 +12,7 @@ import time
 from pathlib import Path
 
 from .book import ArbPlan, floor_step, walk_depth
+from .recorder import prepare_recorder_source
 
 log = logging.getLogger('bps')
 
@@ -33,17 +34,11 @@ def rolling_levels(cfg, now):
     """Require one valid, completed bar per minute; never use future bars."""
     end = int(now // 60) * 60
     start = end - cfg.bps_window_minutes * 60
-    metadata = json.loads(Path(cfg.recorder_csv + '.source.json').read_text())
-    if not isinstance(metadata, dict):
-        raise ValueError('CSV 来源记录无效')
-    if metadata.get('source') != recorder_source(cfg):
-        raise ValueError('分钟 CSV 的主腿/对冲腿来源与 YAML 不一致，等待重新采集')
-    since = float(metadata['since'])
-    if not math.isfinite(since):
-        raise ValueError('CSV 来源时间无效')
     points = {}
     with open(cfg.recorder_csv, newline='') as handle:
         header = next(csv.reader(handle))
+        metadata = prepare_recorder_source(cfg.recorder_csv, recorder_source(cfg))
+        since = float(metadata['since'])
         # Read a bounded tail in the background, even for long-running CSVs.
         size = os.fstat(handle.fileno()).st_size
         offset = max(0, size - cfg.bps_window_minutes * 2048 - 8192)

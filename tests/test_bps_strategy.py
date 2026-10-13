@@ -226,6 +226,68 @@ def test_recorder_marks_source_change_without_relabelling_old_bars(tmp_path):
         rolling_levels(cfg, time.time())
 
 
+@pytest.mark.parametrize('legacy_marker', [False, True])
+def test_rolling_reuses_recent_legacy_history_without_recorder_warmup(tmp_path, legacy_marker):
+    from pathlib import Path
+    cfg = engine_at(tmp_path).cfg
+    cfg.bps_window_minutes = 4
+    cfg.bps_entry_percentile, cfg.bps_exit_percentile = 0, 100
+    now = 6000
+    csv_path = Path(cfg.recorder_csv)
+    csv_path.write_text('minute_ts,premium_close_bps,samples\n'
+                        '5760,-10,60\n5820,-9,60\n5880,-7,60\n5940,-6,60\n')
+    original_csv = csv_path.read_bytes()
+    metadata_path = Path(cfg.recorder_csv + '.source.json')
+    if legacy_marker:
+        # The previous release discarded all pre-upgrade history at startup.
+        metadata_path.write_text(json.dumps(dict(source=recorder_source(cfg), since=now)))
+    assert rolling_levels(cfg, now + 20) == (-10, -6, now)
+    assert json.loads(metadata_path.read_text()) == dict(version=2, source=recorder_source(cfg), since=0)
+    assert csv_path.read_bytes() == original_csv
+    # Historical rows outside the configured wall-clock window are not backfilled.
+    with pytest.raises(ValueError, match='0/4'):
+        rolling_levels(cfg, now + 300)
+
+
+def test_rolling_preserves_known_source_boundary_across_restart(tmp_path):
+    from pathlib import Path
+    from entropy_arb.recorder import MinuteRecorder
+    eng = engine_at(tmp_path)
+    cfg = eng.cfg
+    cfg.bps_window_minutes = 4
+    csv_path = Path(cfg.recorder_csv)
+    from entropy_arb.recorder import HEADER
+    csv_path.write_text(','.join(HEADER) + '\n')
+    source = recorder_source(cfg)
+    previous_source = dict(source, primary='other_venue')
+    metadata_path = Path(cfg.recorder_csv + '.source.json')
+    metadata_path.write_text(json.dumps(dict(version=2, source=previous_source, since=0)))
+    with patch('entropy_arb.recorder.time.time', return_value=6000):
+        recorder = MinuteRecorder(cfg.recorder_csv, eng.entropy.book, eng.hedge.book, 60, source=source)
+        recorder._open()
+        recorder.close()
+    expected = dict(version=2, source=source, since=6000)
+    assert json.loads(metadata_path.read_text()) == expected
+    csv_path.write_text('minute_ts,premium_close_bps,samples\n'
+                        '5760,-10,60\n5820,-9,60\n5880,-7,60\n5940,-6,60\n')
+    for now in (6020, 6080):
+        with pytest.raises(ValueError, match='0/4'):
+            rolling_levels(cfg, now)
+        assert json.loads(metadata_path.read_text()) == expected
+
+
+@pytest.mark.parametrize('marker', ['{invalid json', 'null', '[]', '{}', '{"source": {}, "since": "nan"}'])
+def test_rolling_rejects_corrupt_source_marker_instead_of_adopting_history(tmp_path, marker):
+    from pathlib import Path
+    cfg = engine_at(tmp_path).cfg
+    Path(cfg.recorder_csv).write_text('minute_ts,premium_close_bps,samples\n')
+    metadata_path = Path(cfg.recorder_csv + '.source.json')
+    metadata_path.write_text(marker)
+    with pytest.raises(ValueError, match='来源记录'):
+        rolling_levels(cfg, 6000)
+    assert metadata_path.read_text() == marker
+
+
 def test_web_bps_skips_daily_threshold_without_restart_or_prune(tmp_path):
     from test_web import manager_at, payload
     from entropy_arb.thresholds import daily_window
