@@ -183,7 +183,7 @@ def test_restart_restores_frozen_levels_but_rejects_unconfirmed_or_foreign_posit
     asyncio.run(scenario())
 
 
-def test_rolling_reads_yaml_csv_only_completed_consecutive_minutes(tmp_path):
+def test_rolling_reads_yaml_csv_only_completed_minutes_and_checks_coverage(tmp_path):
     eng = engine_at(tmp_path)
     cfg = eng.cfg
     cfg.bps_window_minutes = 4
@@ -313,7 +313,9 @@ def test_web_bps_skips_daily_threshold_without_restart_or_prune(tmp_path):
 
 @pytest.mark.parametrize('extra', ['  direction: long_primary\n  entry_bps: -6\n  exit_bps: -9',
                                    '  window_minutes: 1', '  max_entries: 0',
-                                   '  cost_buffer_bps: -1', '  exit_percentile: .nan'])
+                                   '  cost_buffer_bps: -1', '  exit_percentile: .nan',
+                                   '  min_coverage_pct: 0', '  min_coverage_pct: -1',
+                                   '  min_coverage_pct: 101', '  min_coverage_pct: .nan'])
 def test_config_rejects_invalid_bps(tmp_path, extra):
     path = tmp_path / 'strategy.yaml'
     path.write_text('strategy:\n  mode: bps\nbps:\n  levels: manual\n' + extra + '\n')

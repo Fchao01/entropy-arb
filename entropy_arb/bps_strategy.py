@@ -30,8 +30,8 @@ def percentile(values, percent):
     return values[lo] + (values[hi] - values[lo]) * (offset - lo)
 
 
-def rolling_levels(cfg, now):
-    """Require one valid, completed bar per minute; never use future bars."""
+def rolling_levels(cfg, now, *, include_coverage=False):
+    """Use valid completed bars inside the time window, allowing data gaps."""
     end = int(now // 60) * 60
     start = end - cfg.bps_window_minutes * 60
     points = {}
@@ -56,15 +56,22 @@ def rolling_levels(cfg, now):
                     points[int(ts)] = value
             except (KeyError, ValueError, OverflowError):
                 continue
-    if len(points) != cfg.bps_window_minutes:
-        raise ValueError(f'等待连续分钟数据 {len(points)}/{cfg.bps_window_minutes}；读取 {cfg.recorder_csv}')
+    required = max(2, math.ceil(cfg.bps_window_minutes * cfg.bps_min_coverage_pct / 100))
+    if len(points) < required:
+        raise ValueError(f'等待有效分钟数据 {len(points)}/{cfg.bps_window_minutes}；'
+                         f'至少 {required} 条（最低覆盖率 {cfg.bps_min_coverage_pct:g}%）；'
+                         f'允许缺口，读取 {cfg.recorder_csv}')
     values = list(points.values())
     entry = percentile(values, cfg.bps_entry_percentile)
     exit = percentile(values, cfg.bps_exit_percentile)
     if (cfg.bps_direction == 'long_primary' and entry >= exit
             or cfg.bps_direction == 'short_primary' and entry <= exit):
         raise ValueError('窗口内溢价波动不足，开平仓点位重合')
-    return entry, exit, end
+    result = entry, exit, end
+    if include_coverage:
+        return (*result, dict(valid_minutes=len(points), required_minutes=required,
+                              coverage_pct=len(points) / cfg.bps_window_minutes * 100))
+    return result
 
 
 class BpsStrategy:
@@ -74,6 +81,7 @@ class BpsStrategy:
         self.entry = self.cfg.bps_entry if self.cfg.bps_levels == 'manual' else None
         self.exit = self.cfg.bps_exit if self.cfg.bps_levels == 'manual' else None
         self.window_end = None
+        self.coverage = None
         self.entries = 0
         self.locked_entry = self.locked_exit = None
         self.closing = False
@@ -148,21 +156,31 @@ class BpsStrategy:
 
     async def refresh_loop(self):
         previous = None
+        last_error = None
         while not self.engine.stop.is_set():
             minute = int(time.time() // 60)
             if self.cfg.bps_levels == 'rolling' and minute != previous:
                 try:
-                    entry, exit, end = await asyncio.to_thread(rolling_levels, self.cfg, time.time())
+                    entry, exit, end, coverage = await asyncio.to_thread(
+                        rolling_levels, self.cfg, time.time(), include_coverage=True)
                     self.entry, self.exit, self.window_end = entry, exit, end
+                    self.coverage = coverage
                     previous = minute
+                    last_error = None
                     self.reason = '持仓中' if self.entries else '等待开仓点位'
-                    log.info('[BPS LEVELS] csv=%s window=%d entry=%+.3f exit=%+.3f bps frozen_exit=%s',
-                             self.cfg.recorder_csv, self.cfg.bps_window_minutes, entry, exit, self.locked_exit)
+                    log.info('[BPS LEVELS] csv=%s window=%d valid=%d/%d coverage=%.1f%% '
+                             'min_coverage=%.1f%% entry=%+.3f exit=%+.3f bps frozen_exit=%s',
+                             self.cfg.recorder_csv, self.cfg.bps_window_minutes,
+                             coverage['valid_minutes'], self.cfg.bps_window_minutes,
+                             coverage['coverage_pct'], self.cfg.bps_min_coverage_pct,
+                             entry, exit, self.locked_exit)
                 except (OSError, ValueError, StopIteration, KeyError, TypeError, csv.Error) as error:
                     self.entry = self.exit = None
+                    self.coverage = None
                     reason = str(error)
-                    if reason != self.reason:
+                    if reason != last_error:
                         log.info('[BPS LEVELS] %s', reason)
+                    last_error = reason
                     self.reason = reason
                 self.engine._update_evt.set()
             try:
@@ -175,6 +193,7 @@ class BpsStrategy:
                     entry_bps=self.locked_entry if self.entries else self.entry,
                     exit_bps=self.locked_exit if self.entries else self.exit,
                     window_minutes=self.cfg.bps_window_minutes, window_end=self.window_end,
+                    min_coverage_pct=self.cfg.bps_min_coverage_pct, coverage=self.coverage,
                     entries=self.entries, max_entries=self.cfg.bps_max_entries,
                     closing=self.closing, reason=self.reason,
                     data_path=self.cfg.recorder_csv)

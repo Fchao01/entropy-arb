@@ -246,7 +246,8 @@ function renderMonitor() {
   const maker = metrics?.active_maker;
   const makerLabel = maker ? ` · 挂单${maker.state === "unresolved" ? "状态未确认" : maker.state === "canceling" ? "撤单确认中" : "跟踪中"} · 已成交 ${number(maker.filled, 6)} / 已对冲 ${number(maker.hedged, 6)}` : "";
   const bps = metrics?.bps_strategy;
-  const strategyLabel = bps ? ` · bps ${bps.levels === "rolling" ? "滚动" : "固定"}：开仓 ${signed(bps.entry_bps)} / 平仓 ${signed(bps.exit_bps)} · ${bps.entries}/${bps.max_entries} 批 · ${bps.reason}` : "";
+  const coverageLabel = bps?.coverage ? ` · 有效数据 ${bps.coverage.valid_minutes}/${bps.window_minutes}（${number(bps.coverage.coverage_pct, 1)}%）` : "";
+  const strategyLabel = bps ? ` · bps ${bps.levels === "rolling" ? "滚动" : "固定"}：开仓 ${signed(bps.entry_bps)} / 平仓 ${signed(bps.exit_bps)} · ${bps.entries}/${bps.max_entries} 批 · ${bps.reason}${coverageLabel}` : "";
   const telegram = metrics?.telegram;
   const telegramState = !metrics ? "" : !metrics.telegram_enabled ? "未配置" : telegram?.status === "failed" ? "发送失败" : `已启用 · 已发 ${telegram?.sent ?? 0}`;
   const telegramProfile = telegram?.profile ? ` · ${escapeHtml(telegram.profile)}` : "";
@@ -365,7 +366,7 @@ async function refreshDetail() {
   renderMonitor();
 }
 
-const fieldMap = {"strategy-mode": ["strategy", "mode", "threshold"], "bps-levels": ["bps", "levels", "rolling"], "bps-direction": ["bps", "direction", "long_primary"], "bps-window": ["bps", "window_minutes", 120], "bps-entry-percentile": ["bps", "entry_percentile", 10], "bps-exit-percentile": ["bps", "exit_percentile", 75], "bps-entry": ["bps", "entry_bps", -9], "bps-exit": ["bps", "exit_bps", -6], "bps-max-entries": ["bps", "max_entries", 1], "bps-add-interval": ["bps", "add_interval_sec", 60], "bps-position-cap": ["bps", "max_position_usd", 1000], "primary-order-type": ["execution", "primary_order_type", "taker"], "maker-timeout": ["execution", "maker_timeout_sec", 5], "primary-maker-fee": ["primary", "maker_fee_bps", 0], "midline": ["thresholds", "midline_bps", 0], "upper": ["thresholds", "upper_bps", 4], "lower": ["thresholds", "lower_bps", 4], "order-cap": ["sizing", "max_order_notional_usd", 500], "primary-cap": ["primary", "max_position_usd", 1000], "hedge-cap": ["hedge", "max_position_usd", 1000], "primary-fee": ["primary", "taker_fee_bps", 0], "hedge-fee": ["hedge", "taker_fee_bps", 2.25], "primary-symbol": ["primary", "symbol", ""], "hedge-symbol": ["hedge", "symbol", ""]};
+const fieldMap = {"strategy-mode": ["strategy", "mode", "threshold"], "bps-levels": ["bps", "levels", "rolling"], "bps-direction": ["bps", "direction", "long_primary"], "bps-window": ["bps", "window_minutes", 120], "bps-min-coverage": ["bps", "min_coverage_pct", 80], "bps-entry-percentile": ["bps", "entry_percentile", 10], "bps-exit-percentile": ["bps", "exit_percentile", 75], "bps-entry": ["bps", "entry_bps", -9], "bps-exit": ["bps", "exit_bps", -6], "bps-max-entries": ["bps", "max_entries", 1], "bps-add-interval": ["bps", "add_interval_sec", 60], "bps-position-cap": ["bps", "max_position_usd", 1000], "primary-order-type": ["execution", "primary_order_type", "taker"], "maker-timeout": ["execution", "maker_timeout_sec", 5], "primary-maker-fee": ["primary", "maker_fee_bps", 0], "midline": ["thresholds", "midline_bps", 0], "upper": ["thresholds", "upper_bps", 4], "lower": ["thresholds", "lower_bps", 4], "order-cap": ["sizing", "max_order_notional_usd", 500], "primary-cap": ["primary", "max_position_usd", 1000], "hedge-cap": ["hedge", "max_position_usd", 1000], "primary-fee": ["primary", "taker_fee_bps", 0], "hedge-fee": ["hedge", "taker_fee_bps", 2.25], "primary-symbol": ["primary", "symbol", ""], "hedge-symbol": ["hedge", "symbol", ""]};
 
 function sectionLines(text, section) {
   const lines = text.split("\n");
@@ -409,7 +410,7 @@ function refreshStrategyFields() {
   const rolling = element("bps-levels").value === "rolling";
   element("bps-settings").hidden = !bps;
   for (const id of ["midline", "upper", "lower"]) element(id).closest("label").hidden = bps;
-  for (const id of ["bps-window", "bps-entry-percentile", "bps-exit-percentile"]) element(id).closest("label").hidden = !rolling;
+  for (const id of ["bps-window", "bps-min-coverage", "bps-entry-percentile", "bps-exit-percentile"]) element(id).closest("label").hidden = !rolling;
   for (const id of ["bps-entry", "bps-exit"]) element(id).closest("label").hidden = rolling;
 }
 
