@@ -77,6 +77,12 @@ ARCUS_API_SIGNING_KEY=你的64位十六进制API签名种子
 公钥由种子推导，无须另填。网络、主钱包地址、子账户编号和已授权密钥必须
 对应；子账户编号范围为 0–9。主腿凭据按所选交易所填写，例如 RH 用 LIGHTER_*，
 Entropy 用 HL_*。
+Arcus 交换主腿和对冲腿时保持 `ARCUS_*` 整组不变；基础组完全未设置时才使用
+`PRIMARY_ARCUS_*` 整组。实盘启动前通过公开只读的
+[API key 查询](https://docs.arcus.xyz/api-reference/onboarding/get-api-keys)
+校验推导公钥是否对所选钱包及子账户处于有效授权状态。无法确认则拒绝启动，
+不会先下单试探。账户、子账户、密钥指纹会写入启动日志；不记录私钥。
+两边旧仓不平衡时也拒绝启动，不会自动平掉旧仓。
 账户也需要 Arcus 的访问权限及足够保证金。不要将密钥写入 YAML 或提交到 Git。
 
 安装 `requirements-live.txt` 后，去掉 `--record-only` 就会运行真实交易。

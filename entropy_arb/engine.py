@@ -18,6 +18,7 @@ import asyncio
 import csv
 import json
 import logging
+import math
 import os
 import time
 from collections import deque
@@ -198,6 +199,9 @@ class Engine:
                     "请用 --record-only")
             self.entropy.init_signer()
             self.hedge.init_signer()
+            for v in self.venues.values():
+                if v.kind == "arcus":
+                    await v.verify_live_credentials()
             if self.entropy.kind == self.hedge.kind == "hl":
                 self.entropy.share_nonces_with(self.hedge)
         if (self.entropy.kind == self.hedge.kind == "hl"
@@ -234,6 +238,7 @@ class Engine:
                      " ".join(f"{v.name}={v.position:+.6g}"
                               for v in self.venues.values()),
                      sum(v.position for v in self.venues.values()))
+            self._check_starting_positions()
 
         tasks: List[asyncio.Task] = []
         for v in self.venues.values():
@@ -719,6 +724,13 @@ class Engine:
             "prem_bps": plan.marginal_premium_bps,
             "exp": plan.exp_edge_usd, "fill": fill_edge, "status": status,
             "ok": ok})
+
+    def _check_starting_positions(self) -> None:
+        net = sum(v.position for v in self.venues.values())
+        if not math.isfinite(net) or abs(net) > self.cfg.net_tolerance_base:
+            raise RuntimeError(
+                f"startup positions are unbalanced (net {net:+.8g}); no orders sent / "
+                "启动时已有仓位不平衡，已拒绝启动，不会自动平仓；请核对两边账户和旧仓位")
 
     async def _maybe_hedge(self) -> None:
         if self.active_maker is not None:

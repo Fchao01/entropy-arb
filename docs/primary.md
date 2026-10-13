@@ -54,8 +54,13 @@ Arcus 适配器会尝试将裸名 ETH 解析为 ETH-USD。
 - HL：`PRIMARY_HL_PRIVATE_KEY`、`PRIMARY_HL_ACCOUNT_ADDRESS`。
 - Lighter：`PRIMARY_LIGHTER_ACCOUNT_INDEX`、`PRIMARY_LIGHTER_API_KEY_INDEX`、
   `PRIMARY_LIGHTER_API_PRIVATE_KEY`。
-- Arcus：`PRIMARY_ARCUS_ACCOUNT_ADDRESS`、`PRIMARY_ARCUS_ACCOUNT_INDEX`、
-  `PRIMARY_ARCUS_API_SIGNING_KEY`。
+
+Arcus 在主腿和对冲腿都优先使用同一整组 `ARCUS_*`。只有这组完全未设置时，
+才使用兼容的 `PRIMARY_ARCUS_ACCOUNT_ADDRESS`、`PRIMARY_ARCUS_ACCOUNT_INDEX`、
+`PRIMARY_ARCUS_API_SIGNING_KEY` 整组；不会把另一组的签名密钥拼到所选账户。
+只填了部分字段会报缺少凭据，而不会换账户。Arcus 实盘启动前通过只读
+`GET /v1/apiKeys` 检查密钥、钱包地址、子账户及有效期，日志记录凭据组、
+子账户和账户/公钥指纹，不记录私钥或完整钱包地址。
 
 只有一条 Lighter/RH 腿时，无论它是主腿还是对冲腿，都使用同一套凭据：
 配置了任意 `PRIMARY_LIGHTER_*` 字段时选用这一整组，否则使用 `LIGHTER_*`。
@@ -68,6 +73,10 @@ Arcus 适配器会尝试将裸名 ETH 解析为 ETH-USD。
 HL 腿共用 nonce 分配器和去重后的账户权益统计。
 
 ## 阈值与日志
+
+实盘启动时先核对两边旧仓位。如果净数量超过 `execution.net_tolerance_base`，
+进程拒绝启动，不下新单也不自动平掉已有单边仓位。先核对原账户和交易所持仓；
+已匹配的多空旧仓可以恢复运行。这个保护适用于挂单和吃单模式。
 
 吃单模式下，主腿是价差基准，两个场所并行发单。挂单模式下，主腿先挂单，对冲腿按实际新增成交量吃单。
 

@@ -189,6 +189,8 @@ def test_rh_arcus_credentials_stay_with_venue_when_roles_swap():
         "LIGHTER_API_PRIVATE_KEY": "other-deployment-key",
         "ARCUS_ACCOUNT_ADDRESS": "base-arcus-account",
         "ARCUS_ACCOUNT_INDEX": "0", "ARCUS_API_SIGNING_KEY": "base-arcus-key",
+        "PRIMARY_ARCUS_ACCOUNT_ADDRESS": "another-arcus-account",
+        "PRIMARY_ARCUS_ACCOUNT_INDEX": "3", "PRIMARY_ARCUS_API_SIGNING_KEY": "another-key",
     }
     path = write_tmp(MINIMAL + '\nprimary:\n  taker_fee_bps: 2.25\nhedge:\n  taker_fee_bps: 2.25\n')
     forward = load_config(path, symbol="QQQ", primary_venue="lighter-rh",
@@ -197,6 +199,8 @@ def test_rh_arcus_credentials_stay_with_venue_when_roles_swap():
                           hedge_venue="lighter-rh", credential_env=values)
     assert reverse.hedge.lighter_creds == forward.primary.lighter_creds
     assert reverse.primary.arcus_creds == forward.hedge.arcus_creds
+    assert reverse.primary.arcus_creds.account_address == "base-arcus-account"
+    assert reverse.primary.arcus_creds.signing_key == "base-arcus-key"
     assert reverse.hedge.lighter_profile == forward.primary.lighter_profile
 
 

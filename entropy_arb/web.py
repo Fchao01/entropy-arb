@@ -178,10 +178,11 @@ def missing_credentials(config) -> list[str]:
                 missing.append(prefix + "LIGHTER_API_PRIVATE_KEY")
         elif venue.kind == "arcus":
             credentials = venue.arcus_creds
+            prefix = credentials.env_prefix if credentials else ""
             if not credentials or not credentials.account_address:
-                missing.append("ARCUS_ACCOUNT_ADDRESS")
+                missing.append(prefix + "ARCUS_ACCOUNT_ADDRESS")
             if not credentials or not credentials.signing_key:
-                missing.append("ARCUS_API_SIGNING_KEY")
+                missing.append(prefix + "ARCUS_API_SIGNING_KEY")
     return list(dict.fromkeys(missing))
 
 

@@ -9,6 +9,7 @@ in the official API reference. No spot router or EVM wallet signing is used.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import math
@@ -25,6 +26,7 @@ from .book import OrderBook
 from .config import ARCUS_ENDPOINTS, VenueConf
 from .feeds import ws_connect
 from .maker import MakerOrder
+from .privacy import PrivateLogCapture
 
 log = logging.getLogger("arcus")
 REQUEST_TIMEOUT_SEC = 10.0
@@ -167,6 +169,55 @@ class ArcusVenue:
         self._signer = Ed25519PrivateKey.from_private_bytes(bytes.fromhex(seed))
         self._api_key = self._signer.public_key().public_bytes(
             serialization.Encoding.Raw, serialization.PublicFormat.Raw).hex()
+
+    async def verify_live_credentials(self) -> None:
+        """Public read only: verify the signed key before trusting positions."""
+        data = await self._get("/v1/apiKeys", address=self.address, limit=1000)
+        rows = data.get("apiKeys")
+        if not isinstance(rows, list):
+            raise RuntimeError("[ARCUS] API key authorization response invalid; no orders sent")
+        matches = [row for row in rows if isinstance(row, dict)
+                   and str(row.get("apiKey", "")).lower().removeprefix("0x") == self._api_key]
+        authorized = False
+        for row in matches:
+            address = str(row.get("address", "")).lower().removeprefix("0x")
+            if address != self.address.removeprefix("0x") or row.get("status") != "ACTIVE":
+                continue
+            try:
+                expiry = int(row["validUntil"])
+                scoped = (row.get("allSubaccounts") is True
+                          or int(row["accountIndex"]) == self.account_index)
+            except (KeyError, TypeError, ValueError):
+                continue
+            if scoped and (expiry == 0 or expiry > time.time() * 1000):
+                authorized = True
+                break
+        creds = self.conf.arcus_creds
+        if not authorized:
+            raise RuntimeError(
+                f"[ARCUS] API key not authorized for selected account/subaccount "
+                f"(credentials={creds.env_prefix}ARCUS_*, account_index={self.account_index}); "
+                "no orders sent / Arcus 密钥授权与所选账户不匹配、已失效或无法确认，已拒绝启动")
+        identity = f"{self.conf.arcus_network}:{self.address}:{self.account_index}"
+        log.info("[ARCUS] API key authorization verified: credentials=%sARCUS_* "
+                 "account_index=%d account_fingerprint=%s key_fingerprint=%s",
+                 creds.env_prefix, self.account_index,
+                 hashlib.sha256(identity.encode()).hexdigest()[:12],
+                 hashlib.sha256(self._api_key.encode()).hexdigest()[:12])
+
+    def _gateway_rejection(self, code, error) -> str:
+        # Preserve useful diagnostics without dumping a signed request or key.
+        details = {key: error[key] for key in ("errorType", "message", "reason", "source")
+                   if isinstance(error.get(key), (str, int, float, bool))}
+        creds = self.conf.arcus_creds
+        raw = json.dumps(details, ensure_ascii=False)
+        redact = PrivateLogCapture({"ARCUS_API_SIGNING_KEY": creds.signing_key,
+                                   "ARCUS_ACCOUNT_ADDRESS": creds.account_address,
+                                   "ARCUS_API_PRIVATE_KEY": self._api_key})
+        safe = redact.redact(raw.encode()).decode(errors="replace")[:1024]
+        return (f"Arcus gateway rejected order ({code}) "
+                f"credentials={creds.env_prefix}ARCUS_* account_index={self.account_index} "
+                f"details={safe}")
 
     def _tick_at(self, price: Decimal) -> Decimal:
         for tier in self.tick_tiers:
@@ -440,7 +491,7 @@ class ArcusVenue:
                 "OrderSizeTooLarge", "MarketPriceSlippageToleranceTooHigh"}
             if not order.order_id and (code in (401, 403, 429, 503) or invalid
                     or (code == 502 and error.get("errorType") == "Transmission")):
-                order.rejected, order.err = True, f"Arcus gateway rejected order ({code})"
+                order.rejected, order.err = True, self._gateway_rejection(code, error)
         except Exception:
             pass  # client ID retained: query/cancel a potentially accepted order
         return order
@@ -523,7 +574,7 @@ class ArcusVenue:
                     self._rate_limited_until = time.monotonic() + retry_sec
                 return {"status": "rejected", "filled_base": 0.0, "avg_px": None,
                         "err": ("RATE_LIMITED: " if code == 429 else "")
-                               + f"Arcus gateway rejected order ({code})",
+                               + self._gateway_rejection(code, error),
                         "unresolved": False}
         except asyncio.CancelledError:
             raise

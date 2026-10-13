@@ -99,6 +99,23 @@ def test_cancel_ack_without_terminal_state_halts_and_blocks_corrective_orders():
     asyncio.run(run())
 
 
+def test_rejected_primary_does_not_hedge_or_close_balanced_old_positions():
+    async def run():
+        e, buy, sell, plan = setup_engine()
+        e.entropy.position, e.hedge.position = -8.035, 8.035
+        e._check_starting_positions()
+        e.entropy.place_maker.return_value = MakerOrder(
+            "rejected", 100, time.time(), rejected=True, err="Forbidden")
+        e._notify_trade = lambda *args: None
+        await e._execute(buy, sell, plan)
+        await e._maybe_hedge()
+        e.hedge.send_taker.assert_not_awaited()
+        e.entropy.cancel_maker.assert_not_awaited()
+        assert e.entropy.position == -8.035 and e.hedge.position == 8.035
+        assert e.trades == 0 and e.hedges == 0
+    asyncio.run(run())
+
+
 def test_unknown_hedge_does_not_send_duplicate_after_more_primary_fills():
     async def run():
         e, buy, sell, plan = setup_engine()

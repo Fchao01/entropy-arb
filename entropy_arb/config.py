@@ -93,6 +93,7 @@ class ArcusCreds:
     account_address: Optional[str]
     account_index: int
     signing_key: Optional[str]
+    env_prefix: str = ""
 
     @property
     def complete(self) -> bool:
@@ -332,6 +333,14 @@ def _build_venue(raw: dict, section: str, venue: str, key: str, symbol: str,
         return _env_s(name)
 
     lighter_prefix = None
+    arcus_prefix = None
+    if venue == "arcus":
+        # Arcus is a single venue in a pair. Its historical ARCUS_* group
+        # stays authoritative when roles swap; a legacy PRIMARY_* group is
+        # used only if the base group is entirely absent. Never mix fields.
+        names = ("ARCUS_ACCOUNT_ADDRESS", "ARCUS_ACCOUNT_INDEX", "ARCUS_API_SIGNING_KEY")
+        arcus_prefix = "" if any(get_env(name) for name in names) else (
+            "PRIMARY_" if any(get_env("PRIMARY_" + name) for name in names) else "")
     if venue in LIGHTER_PROFILES:
         if separate_lighter_keys:
             lighter_prefix = "PRIMARY_" if is_primary else ""
@@ -345,6 +354,8 @@ def _build_venue(raw: dict, section: str, venue: str, key: str, symbol: str,
                 get_env("PRIMARY_" + name) for name in lighter_names) else ""
 
     def env_s(name, fallback=None):
+        if arcus_prefix is not None:
+            return get_env(arcus_prefix + name)
         if lighter_prefix is not None:
             return get_env(lighter_prefix + name)
         if is_primary:
@@ -358,7 +369,9 @@ def _build_venue(raw: dict, section: str, venue: str, key: str, symbol: str,
         try:
             return int(value) if value is not None else None
         except ValueError as e:
-            prefix = lighter_prefix if lighter_prefix is not None else ("PRIMARY_" if is_primary else "")
+            prefix = (arcus_prefix if arcus_prefix is not None else
+                      lighter_prefix if lighter_prefix is not None else
+                      "PRIMARY_" if is_primary else "")
             raise ConfigError(f"{prefix + name} must be an integer") from e
 
     default_fee = 1.0 if venue == "tradexyz" else 0.0
@@ -399,7 +412,7 @@ def _build_venue(raw: dict, section: str, venue: str, key: str, symbol: str,
             raise ConfigError("ARCUS_ACCOUNT_INDEX must be in [0, 9]")
         return VenueConf(**common, kind="arcus", label="ARCUS", arcus_network=network,
                          arcus_creds=ArcusCreds(env_s("ARCUS_ACCOUNT_ADDRESS"), index,
-                                                env_s("ARCUS_API_SIGNING_KEY")))
+                                                env_s("ARCUS_API_SIGNING_KEY"), arcus_prefix))
     return VenueConf(**common, kind="lighter", label="LIGHTER" if venue == "lighter" else "RH",
                      lighter_profile=LIGHTER_PROFILES[venue],
                      lighter_creds=LighterCreds(env_i("LIGHTER_ACCOUNT_INDEX"),

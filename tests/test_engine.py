@@ -131,6 +131,7 @@ def test_live_non_hl_primary_initializes_without_hl_methods():
         v.kind, v.conf = conf.kind, conf
         v.load_market = AsyncMock()
         v.init_signer = Mock()
+        v.verify_live_credentials = AsyncMock()
         v.fetch_position = AsyncMock(return_value=0.0)
         v.close = AsyncMock()
         def start(stop, notify, live):
@@ -149,6 +150,10 @@ def test_live_non_hl_primary_initializes_without_hl_methods():
     assert len(created) == 2
     for v in created:
         v.init_signer.assert_called_once()
+        if v.kind == "arcus":
+            v.verify_live_credentials.assert_awaited_once()
+        else:
+            v.verify_live_credentials.assert_not_awaited()
         v.fetch_position.assert_awaited_once()
         v.close.assert_awaited_once()
 
