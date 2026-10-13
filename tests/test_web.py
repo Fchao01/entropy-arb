@@ -687,3 +687,44 @@ def test_redaction_across_chunks_and_oversized_lines():
     assert b"private-tail" not in text
     assert b"status normal" in text and b"LOG LINE OMITTED" in text
     assert b"[REDACTED]" in text
+
+@pytest.mark.parametrize("problem", ["halted", "unconfirmed", "failed-exit", "missing-snapshot"])
+def test_daily_update_does_not_restart_unresolved_maker_task(tmp_path, problem):
+    from unittest.mock import AsyncMock
+    from entropy_arb.thresholds import ThresholdSuggestion
+    async def scenario():
+        manager = manager_at(tmp_path)
+        try:
+            task = await manager.put({**payload(), "config": STRATEGY + "execution:\n  primary_order_type: maker\n"})
+            task = manager.get(task["id"])
+            task["mode"] = "live"
+            directory = manager.directory(task["id"])
+            old = (directory / "config.yaml").read_text()
+            completed = asyncio.get_running_loop().create_future()
+            completed.set_result(None)
+            manager.running[task["id"]] = {"watcher": completed, "grace": .1}
+            status = {"updated_at": 1, "halted": problem == "halted", "active_maker": None}
+            (directory / "status.json").write_text(json.dumps(status))
+            async def stopped(*args):
+                if problem == "unconfirmed":
+                    status["active_maker"] = {"state": "unresolved"}
+                    (directory / "status.json").write_text(json.dumps(status))
+                elif problem == "failed-exit":
+                    task["exit_code"] = 1
+                elif problem == "missing-snapshot":
+                    (directory / "status.json").unlink()
+            manager.pause = AsyncMock()
+            manager.stop = AsyncMock(side_effect=stopped)
+            manager.start = AsyncMock()
+            window = daily_window()
+            suggestion = ThresholdSuggestion(1, 4, 4, 40, 1, window)
+            with pytest.raises(ConsoleError, match="不会"):
+                await manager.auto_update_task(task["id"], window, suggestion)
+            assert (directory / "config.yaml").read_text() == old
+            manager.start.assert_not_awaited()
+            if problem == "halted":
+                manager.pause.assert_not_awaited()
+        finally:
+            manager.running.clear()
+            await manager.close()
+    asyncio.run(scenario())

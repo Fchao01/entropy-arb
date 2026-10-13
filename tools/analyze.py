@@ -104,7 +104,7 @@ def main() -> None:
     p.add_argument("--csv", default=None, metavar="文件路径",
                    help="CSV 文件路径；优先于 --symbol 指定的路径")
     p.add_argument("--config", metavar="YAML路径",
-                   help="从 YAML 的 recorder.csv 读取数据，并使用双腿 taker_fee_bps；需指定 --symbol 和 --hedge")
+                   help="从 YAML 的 recorder.csv 读取数据，并使用当前成交方式对应的双腿手续费；需指定 --symbol 和 --hedge")
     p.add_argument("--primary", help="主腿交易所（默认读取 YAML primary.venue）")
     p.add_argument("--hedge", help="对冲交易所，与运行任务的选择一致")
     p.add_argument("--daily", action="store_true",
@@ -144,7 +144,7 @@ def main() -> None:
             p.error(str(error))
         output = Path(cfg.recorder_csv)
         csv_path = (output if output.is_absolute() else ROOT / output).resolve()
-        fees = cfg.entropy.fee_bps + cfg.hedge.fee_bps
+        fees = cfg.primary_fee_bps + cfg.hedge.fee_bps
     else:
         csv_path = Path(args.csv or (f"logs/{args.symbol}/minutes.csv"
                                     if args.symbol else "logs/minutes.csv")).resolve()

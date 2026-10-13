@@ -377,7 +377,7 @@ class TaskManager:
             raise ConsoleError("还没有分钟行情数据，先运行采集任务")
         rows = load_window_rows(csv_path, window, AUTO_THRESHOLD_MIN_SAMPLES)
         try:
-            suggestion = suggest(rows, cfg.entropy.fee_bps + cfg.hedge.fee_bps,
+            suggestion = suggest(rows, cfg.primary_fee_bps + cfg.hedge.fee_bps,
                                  window, AUTO_THRESHOLD_MIN_ROWS)
         except ThresholdDataError as error:
             raise ConsoleError(str(error)) from error
@@ -397,7 +397,8 @@ class TaskManager:
                 "config_path": str(self.directory(task_id) / "config.yaml"),
                 "data_path": str(self.minute_path(task)),
                 "window_start": window.start_ts, "window_end": window.end_ts,
-                "fees_bps": cfg.entropy.fee_bps + cfg.hedge.fee_bps,
+                "fees_bps": cfg.primary_fee_bps + cfg.hedge.fee_bps,
+                "primary_order_type": cfg.primary_order_type,
                 "rows": suggestion.rows, "span_hours": suggestion.span_hours,
                 "current": old,
                 "suggested": {"midline_bps": suggestion.midline_bps,
@@ -436,7 +437,7 @@ class TaskManager:
         csv_path = self.configured_path(cfg.recorder_csv)
         if suggestion is None:
             rows = load_window_rows(csv_path, window, AUTO_THRESHOLD_MIN_SAMPLES)
-            suggestion = suggest(rows, cfg.entropy.fee_bps + cfg.hedge.fee_bps,
+            suggestion = suggest(rows, cfg.primary_fee_bps + cfg.hedge.fee_bps,
                                  window, AUTO_THRESHOLD_MIN_ROWS)
         current_raw = yaml.safe_load(config_path.read_text(encoding="utf-8"))
         old_thresholds = dict(current_raw.get("thresholds", {}))
@@ -465,6 +466,9 @@ class TaskManager:
         runtime = self.running.get(task_id)
         restart = running and task["mode"] == "live"
         if restart:
+            status = self.view(task).get("status") or {}
+            if cfg.primary_order_type == "maker" and status.get("halted"):
+                raise ConsoleError("挂单任务已 HALTED，不会自动更新并重启；请先核对未成交订单与持仓")
             await self.pause(task_id, True)
             await self.stop(task_id)
             try:
@@ -472,6 +476,10 @@ class TaskManager:
                                        timeout=runtime["grace"])
             except asyncio.TimeoutError:
                 raise ConsoleError("等待实盘优雅退出超时，未更新阈值；请核对持仓")
+            status = self.view(task).get("status") or {}
+            if task.get("exit_code") not in (None, 0) or (cfg.primary_order_type == "maker"
+                    and (not status or status.get("active_maker") is not None or status.get("halted"))):
+                raise ConsoleError("实盘未安全结算，不会更新阈值或自动重启；请核对未成交订单与持仓")
 
         old_text = config_path.read_text(encoding="utf-8")
         new_text = self._render_threshold_config(old_text, suggestion)
@@ -990,7 +998,7 @@ class TaskManager:
                         exit_code=None, manual_paused=False)
             runtime = dict(process=process, markets=markets, signers=signers,
                            recorder_path=self.configured_path(cfg.recorder_csv),
-                           grace=cfg.settle_timeout_sec + 20,
+                           grace=cfg.shutdown_grace_sec + 20,
                            log_capture=PrivateLogCapture(credentials))
             self.running[task_id] = runtime
             runtime["watcher"] = asyncio.create_task(self.watch(task_id, runtime))

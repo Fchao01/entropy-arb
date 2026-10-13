@@ -135,7 +135,8 @@ def test_live_non_hl_primary_initializes_without_hl_methods():
         v.close = AsyncMock()
         def start(stop, notify, live):
             assert live
-            stop.set()
+            assert stop is eng._feed_stop and stop is not eng.stop
+            eng.stop.set()
             return []
         v.start_tasks = start
         created.append(v)

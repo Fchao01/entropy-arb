@@ -229,11 +229,14 @@ function renderMonitor() {
   const metrics = task.status;
   const fresh = active(task) && !task.status_stale;
   const metricNote = fresh ? "当前运行会话" : metrics ? "最后快照 · 当前非实时" : "等待首次状态快照";
+  const orderMode = metrics?.primary_order_type === "maker" ? `主腿挂单 · 等待 ${number(metrics.maker_timeout_sec, 1)}s` : "主腿吃单";
+  const maker = metrics?.active_maker;
+  const makerLabel = maker ? ` · 挂单${maker.state === "unresolved" ? "状态未确认" : maker.state === "canceling" ? "撤单确认中" : "跟踪中"} · 已成交 ${number(maker.filled, 6)} / 已对冲 ${number(maker.hedged, 6)}` : "";
   const telegram = metrics?.telegram;
   const telegramState = !metrics ? "" : !metrics.telegram_enabled ? "未配置" : telegram?.status === "failed" ? "发送失败" : `已启用 · 已发 ${telegram?.sent ?? 0}`;
   const telegramProfile = telegram?.profile ? ` · ${escapeHtml(telegram.profile)}` : "";
   const telegramLabel = task.mode === "live" && metrics ? ` · Telegram${telegramProfile} ${telegramState}` : "";
-  element("monitor-summary").innerHTML = `<div><strong>${escapeHtml(task.symbol)}</strong><span>${escapeHtml(venues[task.primary])} ⇄ ${escapeHtml(venues[task.hedge])}</span><span class="badge ${task.mode}">${task.mode === "live" ? "LIVE · 实盘" : "DATA · 采集"}</span>${badge(task)}</div><small>${fresh ? "实时快照" : "最后快照"} ${timeLabel(metrics?.updated_at)}${telegramLabel} ${task.exit_code == null ? "" : ` · 退出码 ${task.exit_code}`}</small>`;
+  element("monitor-summary").innerHTML = `<div><strong>${escapeHtml(task.symbol)}</strong><span>${escapeHtml(venues[task.primary])} ⇄ ${escapeHtml(venues[task.hedge])}</span><span class="badge ${task.mode}">${task.mode === "live" ? "LIVE · 实盘" : "DATA · 采集"}</span>${badge(task)}</div><small>${fresh ? "实时快照" : "最后快照"} ${timeLabel(metrics?.updated_at)} · ${escapeHtml(orderMode)}${escapeHtml(makerLabel)}${telegramLabel} ${task.exit_code == null ? "" : ` · 退出码 ${task.exit_code}`}</small>`;
   element("monitor-stats").innerHTML = stat("双腿中间价溢价", signed(metrics?.premium_bps), metricNote, "⇄", "bps") + stat("净敞口", metrics?.net_delta == null ? "—" : signed(metrics.net_delta, 6), "双腿基础币数量合计", "⊞") + stat("会话盈亏 · MTM", metrics?.session_pnl == null ? "—" : `$${signed(metrics.session_pnl)}`, "按盘口标记的会话估值变化，非已实现收益", "↗") + stat("套利执行 / 对冲", `${metrics?.trades ?? 0} / ${metrics?.hedges ?? 0}`, `当前会话记录 ${metrics?.minute_rows ?? 0} 条分钟数据`, "▥") + stat("总成交额 · 双腿合计", money(metrics?.session_volume_usd), "实际成交名义金额，不是账户权益", "⇄") + stat("总利润 · 已实现", money(metrics?.session_profit_usd, 4), "匹配成交净利润，已扣手续费", "↗") + stat("总手续费", money(metrics?.session_fees_usd, 4), "两条腿及后续对冲手续费", "▥");
   element("venue-cards").innerHTML = metrics?.venues?.length ? metrics.venues.map((venue) => `<article class="venue-card"><div class="venue-top"><div><b>${escapeHtml(venue.name)}</b><small>${escapeHtml(venue.symbol)}</small></div><span class="badge ${fresh && venue.fresh && !venue.down ? "" : "stale"}">${!fresh ? "非实时" : venue.down ? "连接异常" : venue.fresh ? `正常 · ${number(venue.age_sec, 1)}s` : "行情过期"}</span></div><div class="venue-values"><div><span>买一 / 卖一</span><strong class="number">${number(venue.bid, 5)} / ${number(venue.ask, 5)}</strong></div><div><span>持仓数量</span><strong>${signed(venue.position, 6)}</strong></div><div><span>持仓金额 · USD</span><strong>${money(venue.position_usd)}</strong></div><div><span>账户权益 / 可用</span><strong>${money(venue.equity)} / ${money(venue.free)}</strong></div><div><span>会话成交额 · USD</span><strong>${money(venue.volume_usd)}</strong></div></div></article>`).join("") : `<div class="empty-state"><h3>等待市场连接</h3><p>启动任务后将展示真实双腿盘口。启动失败请查看下方日志。</p></div>`;
   drawChart(state.detail.minutes);
@@ -320,7 +323,7 @@ async function refreshDetail() {
   renderMonitor();
 }
 
-const fieldMap = {"midline": ["thresholds", "midline_bps", 0], "upper": ["thresholds", "upper_bps", 4], "lower": ["thresholds", "lower_bps", 4], "order-cap": ["sizing", "max_order_notional_usd", 500], "primary-cap": ["primary", "max_position_usd", 1000], "hedge-cap": ["hedge", "max_position_usd", 1000], "primary-fee": ["primary", "taker_fee_bps", 0], "hedge-fee": ["hedge", "taker_fee_bps", 2.25], "primary-symbol": ["primary", "symbol", ""], "hedge-symbol": ["hedge", "symbol", ""]};
+const fieldMap = {"primary-order-type": ["execution", "primary_order_type", "taker"], "maker-timeout": ["execution", "maker_timeout_sec", 5], "primary-maker-fee": ["primary", "maker_fee_bps", 0], "midline": ["thresholds", "midline_bps", 0], "upper": ["thresholds", "upper_bps", 4], "lower": ["thresholds", "lower_bps", 4], "order-cap": ["sizing", "max_order_notional_usd", 500], "primary-cap": ["primary", "max_position_usd", 1000], "hedge-cap": ["hedge", "max_position_usd", 1000], "primary-fee": ["primary", "taker_fee_bps", 0], "hedge-fee": ["hedge", "taker_fee_bps", 2.25], "primary-symbol": ["primary", "symbol", ""], "hedge-symbol": ["hedge", "symbol", ""]};
 
 function sectionLines(text, section) {
   const lines = text.split("\n");
@@ -360,7 +363,10 @@ function setYaml(section, key, value, remove = false) {
 }
 
 function syncFields() {
-  for (const [id, [section, key, fallback]] of Object.entries(fieldMap)) element(id).value = yamlValue(element("config-yaml").value, section, key, fallback);
+  for (const [id, [section, key, fallback]] of Object.entries(fieldMap)) {
+    const defaultValue = id === "primary-maker-fee" ? yamlValue(element("config-yaml").value, "primary", "taker_fee_bps", 0) : fallback;
+    element(id).value = yamlValue(element("config-yaml").value, section, key, defaultValue);
+  }
   const primary = yamlValue(element("config-yaml").value, "primary", "venue", element("task-primary").value);
   if (state.meta.primary_venues.includes(primary)) element("task-primary").value = primary;
 }
@@ -426,7 +432,8 @@ element("task-strategy").addEventListener("change", () => applyStrategy().catch(
 for (const [id, [section, key]] of Object.entries(fieldMap)) {
   element(id).addEventListener("input", () => {
     const value = element(id).value;
-    if (id.endsWith("symbol")) setYaml(section, key, value.trim(), !value.trim());
+    if (id === "primary-order-type") setYaml(section, key, value);
+    else if (id.endsWith("symbol")) setYaml(section, key, value.trim(), !value.trim());
     else if (value !== "" && Number.isFinite(Number(value))) setYaml(section, key, Number(value));
   });
 }
@@ -490,7 +497,7 @@ async function openThreshold(task) {
   element("threshold-dialog").showModal();
   try {
     const result = await api(`/api/tasks/${task.id}/threshold`);
-    element("threshold-window").textContent = `${result.window} · ${result.rows} 条有效分钟数据 · 覆盖 ${number(result.span_hours, 1)} 小时 · 手续费合计 ${number(result.fees_bps, 2)} bps · 数据：${result.data_path || "—"} · 配置：${result.config_path || "—"}`;
+    element("threshold-window").textContent = `${result.window} · ${result.rows} 条有效分钟数据 · 覆盖 ${number(result.span_hours, 1)} 小时 · ${result.primary_order_type === "maker" ? "主腿挂单 / 对冲吃单" : "双腿吃单"} · 手续费合计 ${number(result.fees_bps, 2)} bps · 数据：${result.data_path || "—"} · 配置：${result.config_path || "—"}`;
     element("threshold-current").textContent = `当前：中线 ${number(result.current.midline_bps, 1)} / 上带 ${number(result.current.upper_bps, 1)} / 下带 ${number(result.current.lower_bps, 1)} bps`;
     element("threshold-midline").value = result.suggested.midline_bps;
     element("threshold-upper").value = result.suggested.upper_bps;

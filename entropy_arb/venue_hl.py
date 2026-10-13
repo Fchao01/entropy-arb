@@ -25,6 +25,7 @@ import aiohttp
 from .book import OrderBook
 from .config import VenueConf
 from .feeds import HLBookFeed
+from .maker import MakerOrder
 
 log = logging.getLogger("hl")
 
@@ -185,6 +186,87 @@ class HLVenue:
         from hyperliquid.utils.types import Cloid
         self._cloid += 1
         return Cloid.from_int(self._cloid)
+
+    def _signed_action(self, action):
+        nonce = self.account.nonces.next()
+        sig = self._signing.sign_l1_action(self.account.wallet, action, None, nonce,
+                                         None, self.account.is_mainnet)
+        return {"action": action, "nonce": nonce, "signature": sig,
+                "vaultAddress": None, "expiresAfter": None}
+
+    async def place_maker(self, *, is_buy: bool, qty: float, limit_px: float):
+        order = MakerOrder(self._next_cloid(), limit_px, time.time())
+        try:
+            req = {"coin": self.coin, "is_buy": is_buy, "sz": round(qty, 8),
+                   "limit_px": limit_px, "order_type": {"limit": {"tif": "Alo"}},
+                   "reduce_only": False, "cloid": order.client_id}
+            wire = self._signing.order_request_to_order_wire(req, self.asset_id)
+            payload = self._signed_action(self._signing.order_wires_to_order_action([wire]))
+        except Exception:
+            order.rejected, order.err = True, "Hyperliquid local signing failed"
+            return order
+        try:
+            body, err, unknown = await asyncio.wait_for(
+                self._post_exchange(payload), timeout=self.settle_timeout)
+            if err:
+                order.rejected, order.err = True, err
+            elif not unknown:
+                if body.get("status") == "err":
+                    order.rejected, order.err = True, str(body.get("response"))
+                else:
+                    status = body["response"]["data"]["statuses"][0]
+                    if "error" in status:
+                        order.rejected = True
+                        # Post-only crossing due to a book race is an ordinary no-fill.
+                        message = str(status["error"])
+                        order.err = None if "post only" in message.lower() else message
+                    elif "resting" in status:
+                        order.order_id = status["resting"]["oid"]
+        except Exception:
+            pass  # query/cancel by the retained cloid
+        return order
+
+    async def maker_state(self, order):
+        data = await self._info({"type": "orderStatus", "user": self.account.query_address,
+                                 "oid": order.client_id.to_raw()})
+        if data.get("status") != "order":
+            raise RuntimeError("Hyperliquid maker state unknown")
+        outer = data["order"]
+        row, status = outer["order"], str(outer["status"])
+        order.order_id = row["oid"]
+        original = float(row["origSz"])
+        rejected = status == "rejected" or status.endswith("Rejected")
+        terminal = (status in {"filled", "canceled", "rejected", "scheduledCancel"}
+                    or status.endswith("Canceled") or status.endswith("Rejected"))
+        filled = 0.0 if rejected else original - float(row["sz"])
+        avg = None
+        if not rejected and (filled > 0 or terminal):
+            fills = await self._info({"type": "userFillsByTime",
+                                     "user": self.account.query_address,
+                                     "startTime": max(0, int(order.sent_at * 1000) - 1000)})
+            fills = [f for f in fills if f.get("oid") == order.order_id]
+            total = sum(float(f["sz"]) for f in fills)
+            # Use actual executions, not a disappearance from open orders.
+            # A lagging fills response cannot prove a terminal zero fill.
+            expected = original if status == "filled" else filled
+            if total < expected - 1e-10 or total > original + 1e-10:
+                raise RuntimeError("Hyperliquid maker fills not reconciled")
+            filled = total
+            if total:
+                avg = sum(float(f["sz"]) * float(f["px"]) for f in fills) / total
+        err = status if rejected and status != "badAloPxRejected" else None
+        return {"status": status, "filled_base": filled, "avg_px": avg,
+                "err": err, "terminal": terminal}
+
+    async def cancel_maker(self, order):
+        action = {"type": "cancelByCloid", "cancels": [
+            {"asset": self.asset_id, "cloid": order.client_id.to_raw()}]}
+        body, err, unknown = await self._post_exchange(self._signed_action(action))
+        if err or unknown or not body or body.get("status") != "ok":
+            raise RuntimeError("Hyperliquid cancellation rejected")
+        statuses = body.get("response", {}).get("data", {}).get("statuses", [])
+        if any(isinstance(item, dict) and "error" in item for item in statuses):
+            raise RuntimeError("Hyperliquid cancellation rejected")
 
     async def send_taker(self, *, is_buy: bool, qty: float, limit_px: float,
                          reduce_only: bool = False) -> dict:

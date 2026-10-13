@@ -69,7 +69,7 @@ HL 腿共用 nonce 分配器和去重后的账户权益统计。
 
 ## 阈值与日志
 
-主腿只是价差基准，不是固定先下单的一边。两个场所仍然并行发单。
+吃单模式下，主腿是价差基准，两个场所并行发单。挂单模式下，主腿先挂单，对冲腿按实际新增成交量吃单。
 
 ```text
 premium_bps = (主腿价格 / 对冲腿价格 - 1) × 10000
@@ -96,3 +96,47 @@ python3 tools/analyze.py --csv logs/lighter-rh-arcus/ETH/minutes.csv --fees-bps 
 
 这项改动仍是双腿套利，不会自动增加第三条腿。真实成交验证范围也没有因此扩大；
 Arcus 实盘仍需授权账户、正确签名密钥及实际订单验证。
+
+## 主腿吃单 / 挂单
+
+网页任务配置提供「主腿成交方式」「挂单等待时间」和「主腿挂单手续费」。
+也可以在任务实际使用的 YAML 中设置：
+
+```yaml
+primary:
+  venue: arcus
+  taker_fee_bps: 2.25  # 示例，按实际账户费率填写
+  maker_fee_bps: 0.0   # 示例，必须核对实际挂单费率
+execution:
+  primary_order_type: maker  # taker / maker；默认 taker
+  maker_timeout_sec: 5.0     # 大于 0 且不超过 60 秒
+```
+
+此片段只展示新增字段，其余阈值、仓位、对冲费率等保留原配置。
+RH / Lighter、Arcus、Entropy / trade.xyz 均支持主腿 Post-only。
+买入挂主腿买一，卖出挂主腿卖一；报价固定，撤单后下一次信号重新取盘口。
+Post-only 因盘口变化而被拒绝时不会转为吃单。对冲腿始终吃单。
+
+最长等待时间从提交主腿订单时开始计算。超时、价差失效、行情过期、人工暂停
+或正常停止都会撤单，并继续核对最终累计成交量。每次新增成交只对冲一次；
+不足交易所最小数量或金额的部分先累计，到达最低要求再对冲。最终仍有残余时
+尝试减少敞口；超过 `net_tolerance_base` 的残余无法消除时停止继续开单。
+撤单 ACK 不是最终撤单状态，撤单途中发生的成交也会对冲。订单或对冲结果
+无法确认时进入 `HALTED`，核对交易所未成交订单与持仓后才能重启。
+
+`primary.maker_fee_bps` 未填写时沿用主腿吃单费，避免默认假定挂单免费。
+挂单信号、成交费用、网页每日阈值分析和 `tools/analyze.py --config ...`
+使用主腿挂单费 + 对冲腿吃单费。分钟数据仍采集真实 bid/ask 和吃单可成交价差；
+历史数据没有队列位置、成交概率或撤单延迟，阈值建议不能保证挂单成交或收益。
+切换模式后需按实际成交情况校准阈值。
+
+引擎日志使用 `[MAKER]` / `[MAKER-HEDGE]` 记录报价、累计成交和撤单状态，
+网页监控展示成交方式及当前挂单的已成交 / 已对冲数量。当前挂单期间的会话
+持仓、成交额和费用在该挂单结算后统一计入。
+
+正常停止会保留订单订阅，等待撤单与最后成交确认。强杀进程、主机故障或网络
+中断可能留下交易所挂单；此版本没有服务器端断线自动撤单。
+Arcus 不会因 WebSocket 断开撤单，且订单到期时间必须至少约一个月后；恢复前
+必须检查未成交订单。协议参见 [Arcus WebSocket 文档](https://docs.arcus.xyz/api-reference/websocket)、
+[Lighter 官方 SDK](https://github.com/elliottech/lighter-python) 和
+[Hyperliquid 订单状态](https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/info-endpoint)。

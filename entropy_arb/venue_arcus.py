@@ -24,6 +24,7 @@ import aiohttp
 from .book import OrderBook
 from .config import ARCUS_ENDPOINTS, VenueConf
 from .feeds import ws_connect
+from .maker import MakerOrder
 
 log = logging.getLogger("arcus")
 REQUEST_TIMEOUT_SEC = 10.0
@@ -347,12 +348,12 @@ class ArcusVenue:
             return None  # query authoritative state instead of fabricating a fill price
         reason = order.get("rejectionReason")
         # Zero-fill IOC is an ordinary outcome, including REJECTED / IOC_CANCELED.
-        err = reason if reason and reason not in {"IOC_CANCELED", "COULD_NOT_FILL"} else None
+        err = reason if reason and reason not in {"IOC_CANCELED", "COULD_NOT_FILL", "POST_ONLY_WOULD_CROSS"} else None
         return {"status": status or state, "filled_base": filled, "avg_px": avg,
                 "err": err, "unresolved": False}
 
     def _place_request(self, *, is_buy: bool, qty: float, limit_px: float,
-                       reduce_only: bool, client_id: str) -> dict:
+                       reduce_only: bool, client_id: str, post_only: bool = False) -> dict:
         if self._signer is None or self.market_id < 0:
             raise ValueError("[ARCUS] signer/market not initialized")
         quantity = format(qty, f".{self.size_decimals}f")
@@ -371,10 +372,10 @@ class ArcusVenue:
         payload = {"ad": self.address, "ai": self.account_index, "c": client_id,
                    "ct": ts, "g": good_til_us * 1000, "m": self.market_id,
                    "op": 1, "p": p, "q": q, "r": int(reduce_only),
-                   "s": 0 if is_buy else 1, "t": 2, "v": 1}
+                   "s": 0 if is_buy else 1, "t": 3 if post_only else 2, "v": 1}
         body = {"address": self.address, "accountIndex": self.account_index,
                 "marketId": self.market_id, "orderSide": "BUY" if is_buy else "SELL",
-                "orderType": "LIMIT", "timeInForce": "IOC",
+                "orderType": "LIMIT", "timeInForce": "ALO" if post_only else "IOC",
                 "quantity": quantity, "price": price, "reduceOnly": reduce_only,
                 "goodTilTime": str(good_til_us), "clientId": client_id, "timestamp": ts}
         return {"type": "placeOrder", "payload": body, "apiKey": self._api_key,
@@ -416,6 +417,75 @@ class ArcusVenue:
                 if row.get("clientId") == client_id:
                     self._remember_order(row)
                     break
+
+    async def place_maker(self, *, is_buy: bool, qty: float, limit_px: float):
+        order = MakerOrder(uuid.uuid4().hex, limit_px, time.time())
+        try:
+            if not self.ready_to_trade():
+                raise ValueError("Arcus not ready")
+            request = self._place_request(is_buy=is_buy, qty=qty, limit_px=limit_px,
+                                          reduce_only=False, client_id=order.client_id,
+                                          post_only=True)
+        except Exception:
+            order.rejected, order.err = True, "Arcus local signing/grid/readiness validation failed"
+            return order
+        order.sent_at = int(request["timestamp"]) / 1e9
+        try:
+            ack = await asyncio.wait_for(self._rpc(request), self.settle_timeout)
+            order.order_id = (ack.get("result") or {}).get("orderId")
+            code = int(ack.get("status", 0))
+            error = ack.get("error") or {}
+            invalid = code == 400 and error.get("errorType") in {
+                "InvalidRequest", "Tick", "OracleDeviation", "ReduceOnly",
+                "OrderSizeTooLarge", "MarketPriceSlippageToleranceTooHigh"}
+            if not order.order_id and (code in (401, 403, 429, 503) or invalid
+                    or (code == 502 and error.get("errorType") == "Transmission")):
+                order.rejected, order.err = True, f"Arcus gateway rejected order ({code})"
+        except Exception:
+            pass  # client ID retained: query/cancel a potentially accepted order
+        return order
+
+    async def maker_state(self, order):
+        oid = order.order_id or self._clients.get(order.client_id)
+        if (not self._orders_ready or oid not in self._orders
+                or time.monotonic() - getattr(order, "last_query", 0) > 1):
+            await self._lookup_order(order.client_id, oid, int(order.sent_at * 1e9))
+            order.last_query = time.monotonic()
+            oid = oid or self._clients.get(order.client_id)
+        row = self._orders.get(oid)
+        if row is None:
+            raise RuntimeError("Arcus maker state unknown")
+        order.order_id = oid
+        final = self._terminal_result(row)
+        if final is not None:
+            return {**final, "terminal": True}
+        if row.get("status") in TERMINAL_STATUSES or row.get("state") in TERMINAL_STATUSES:
+            raise RuntimeError("Arcus final fill quantities unavailable")
+        if "filledSize" in row:
+            filled = float(row["filledSize"])
+        else:
+            filled = float(Decimal(row["originalSize"]) - Decimal(row["remainingSize"]))
+        avg = float(row["avgFillPrice"]) if row.get("avgFillPrice") else None
+        if filled and (avg is None or not math.isfinite(avg) or avg <= 0):
+            raise RuntimeError("Arcus maker fill price unavailable")
+        return {"status": row.get("status") or row.get("state"), "filled_base": filled,
+                "avg_px": avg, "err": None, "terminal": False}
+
+    def _cancel_request(self, client_id):
+        ts = time.time_ns()
+        payload = {"ad": self.address, "ai": self.account_index, "c": client_id,
+                   "ct": ts, "m": self.market_id, "op": 2, "v": 1}
+        return {"type": "cancelOrder", "payload": {
+            "address": self.address, "accountIndex": self.account_index,
+            "marketId": self.market_id, "clientId": client_id, "timestamp": ts},
+            "apiKey": self._api_key, "timestamp": str(ts),
+            "signature": self._signer.sign(canonical(payload)).hex()}
+
+    async def cancel_maker(self, order):
+        # A gateway ACK is not proof of cancellation; maker_state confirms it.
+        ack = await self._rpc(self._cancel_request(order.client_id))
+        if int(ack.get("status", 0)) not in (200, 202):
+            raise RuntimeError("Arcus cancel acknowledgement unavailable")
 
     async def send_taker(self, *, is_buy: bool, qty: float, limit_px: float,
                          reduce_only: bool = False) -> dict:

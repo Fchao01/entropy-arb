@@ -117,6 +117,7 @@ class VenueConf:
     # Arcus perpetuals (Ed25519 API Signing Key, not an EVM private key)
     arcus_network: str = "mainnet"
     arcus_creds: Optional[ArcusCreds] = None
+    maker_fee_bps: float = 0.0
 
 
 @dataclass
@@ -162,10 +163,23 @@ class Config:
     hl_api_url: str = HL_API_URL
     hl_ws_url: str = HL_WS_URL
     primary_venue: str = DEFAULT_PRIMARY_VENUE
+    primary_order_type: str = "taker"
+    maker_timeout_sec: float = 5.0
 
     @property
     def primary(self) -> VenueConf:
         return self.entropy  # legacy field retained for API/CSV compatibility
+
+    @property
+    def primary_fee_bps(self) -> float:
+        return (self.primary.maker_fee_bps if self.primary_order_type == "maker"
+                else self.primary.fee_bps)
+
+    @property
+    def shutdown_grace_sec(self) -> float:
+        if self.primary_order_type == "maker":
+            return self.maker_timeout_sec + 8 * self.settle_timeout_sec + 20
+        return self.settle_timeout_sec + 2
 
     @property
     def creds_complete(self) -> bool:
@@ -189,6 +203,7 @@ _SCHEMA: Dict[str, Any] = {
         "symbol": str,
         "dex": str,
         "taker_fee_bps": float,
+        "maker_fee_bps": float,
         "max_position_usd": float,
         "max_orders_per_min": int,
     },
@@ -201,6 +216,7 @@ _SCHEMA: Dict[str, Any] = {
         "symbol": str,
         "dex": str,
         "taker_fee_bps": float,
+        "maker_fee_bps": float,
         "max_position_usd": float,
         "max_orders_per_min": int,
     },
@@ -224,6 +240,8 @@ _SCHEMA: Dict[str, Any] = {
         "floor_frac": float,
     },
     "execution": {
+        "primary_order_type": str,
+        "maker_timeout_sec": float,
         "premium_persist_sec": float,
         "cooldown_sec": float,
         "settle_timeout_sec": float,
@@ -347,8 +365,12 @@ def _build_venue(raw: dict, section: str, venue: str, key: str, symbol: str,
     fee = float(params.get("taker_fee_bps", default_fee))
     if not math.isfinite(fee) or fee < 0:
         raise ConfigError(f"{section}.taker_fee_bps must be finite and >= 0")
+    maker_fee = float(params.get("maker_fee_bps", fee))
+    if not math.isfinite(maker_fee) or maker_fee < 0:
+        raise ConfigError(f"{section}.maker_fee_bps must be finite and >= 0")
     default_budget = 120 if venue in ("entropy", "tradexyz") else 30
     common = dict(key=key, symbol=symbol, fee_bps=fee,
+                  maker_fee_bps=maker_fee,
                   cap_usd=float(params.get("max_position_usd", 1000.0)),
                   orders_per_min=int(params.get("max_orders_per_min", default_budget)))
     if venue in ("entropy", "tradexyz"):
@@ -464,11 +486,19 @@ def load_config(config_file: str = "config.yaml", env_file: str = ".env", *,
     hedge_slippage_bps = float(_get(raw, "execution", "hedge_slippage_bps", 20.0))
     if leg_slippage_bps < 0 or hedge_slippage_bps < 0:
         raise ConfigError("execution slippage limits must be >= 0")
+    primary_order_type = _get(raw, "execution", "primary_order_type", "taker")
+    if primary_order_type not in ("taker", "maker"):
+        raise ConfigError("execution.primary_order_type must be taker or maker / 主腿成交方式必须为 taker 或 maker")
+    maker_timeout_sec = float(_get(raw, "execution", "maker_timeout_sec", 5.0))
+    if not math.isfinite(maker_timeout_sec) or not 0 < maker_timeout_sec <= 60:
+        raise ConfigError("execution.maker_timeout_sec must be in (0, 60] / 挂单等待时间必须大于 0 且不超过 60 秒")
 
     return Config(
         symbol=symbol,
         hedge_venue=hedge_venue,
         primary_venue=primary_venue,
+        primary_order_type=primary_order_type,
+        maker_timeout_sec=maker_timeout_sec,
         entropy=entropy,
         hedge=hedge,
         midline_bps=midline,

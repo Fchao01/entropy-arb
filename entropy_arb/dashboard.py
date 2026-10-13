@@ -314,7 +314,14 @@ class Dashboard:
         inventory surcharge included)."""
         eng = self.eng
         ba, sb = buy.book.best_ask(), sell.book.best_bid()
-        hurdle = (hurdle_bps + buy.fee_bps + sell.fee_bps
+        if eng.cfg.primary_order_type == "maker":
+            if buy is eng.entropy:
+                ba = buy.book.best_bid()
+            else:
+                sb = sell.book.best_ask()
+        primary_fee = eng.cfg.primary_fee_bps
+        hedge_fee = eng.hedge.fee_bps
+        hurdle = (hurdle_bps + primary_fee + hedge_fee
                   + eng._inv_add_bps(buy, sell))
         if not (ba and sb):
             t.add_row(label, Text("—", style="dim"),

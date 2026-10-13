@@ -25,7 +25,8 @@ from typing import Dict, List, Optional
 
 import aiohttp
 
-from .book import ArbPlan, floor_step, plan_arb
+from .book import ArbPlan, OrderBook, floor_step, plan_arb
+from .maker import execute_primary_maker
 from .config import Config
 from .recorder import MinuteRecorder
 from .venue_hl import HLVenue
@@ -73,6 +74,8 @@ class Engine:
         self._exec_tasks: set = set()
         self.halted = False
         self.manual_paused = False
+        self.active_maker = None
+        self._feed_stop = None
         self._control_state = None
         self.consec_errors = 0
         self.last_trade_ts = 0.0
@@ -117,6 +120,7 @@ class Engine:
             self.stop = asyncio.Event()
             self._update_evt = asyncio.Event()
             self._reconcile_evt = asyncio.Event()
+            self._feed_stop = asyncio.Event()
             if self._stop_requested:
                 self.stop.set()
 
@@ -211,11 +215,13 @@ class Engine:
                  "fees=%.2f+%.2f step=%g min_ntl=$%g",
                  self.entropy.name, self.entropy.conf.symbol, self.hedge.name,
                  self.hedge.conf.symbol, cfg.midline_bps, cfg.lower_bps,
-                 cfg.upper_bps, self.entropy.fee_bps, self.hedge.fee_bps,
+                 cfg.upper_bps, cfg.primary_fee_bps, self.hedge.fee_bps,
                  self._step, self._min_notional)
         log.info("strategy config=%s thresholds={midline_bps: %+.3f, upper_bps: %.3f, lower_bps: %.3f}",
                  self.config_path or "<in-memory>", cfg.midline_bps,
                  cfg.upper_bps, cfg.lower_bps)
+        log.info("primary execution=%s maker_timeout=%.2fs primary_fee=%.3fbps",
+                 cfg.primary_order_type, cfg.maker_timeout_sec, cfg.primary_fee_bps)
 
         if self.record_only:
             log.warning("RECORD-ONLY — collecting minute data, no strategy, "
@@ -231,7 +237,9 @@ class Engine:
 
         tasks: List[asyncio.Task] = []
         for v in self.venues.values():
-            tasks += v.start_tasks(self.stop, self._update_evt.set, live)
+            # Account/order streams must stay alive while a stop is canceling
+            # a resting maker order and hedging its last fills.
+            tasks += v.start_tasks(self._feed_stop, self._update_evt.set, live)
         if cfg.recorder_enabled or self.record_only:
             self.recorder = MinuteRecorder(cfg.recorder_csv, self.entropy.book,
                                            self.hedge.book, cfg.staleness_sec)
@@ -256,7 +264,11 @@ class Engine:
             log.info("waiting for %d in-flight execution(s) to settle",
                      len(self._exec_tasks))
             await asyncio.wait(self._exec_tasks,
-                               timeout=cfg.settle_timeout_sec + 2.0)
+                               timeout=cfg.shutdown_grace_sec)
+            if self._exec_tasks:
+                self.halted = True
+                log.critical("shutdown execution still unresolved; check exchange open orders and positions")
+        self._feed_stop.set()
         for t in tasks:
             t.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
@@ -268,6 +280,8 @@ class Engine:
         log.info("shutdown — %d trades, %d hedges, exp edge $%.4f, "
                  "fill edge $%.4f", self.trades, self.hedges,
                  self.total_exp_edge, self.total_fill_edge)
+        if cfg.primary_order_type == "maker" and (self.active_maker is not None or self._exec_tasks):
+            raise RuntimeError("maker shutdown unconfirmed; check exchange orders and positions")
 
     # --------------------------------------------------------------- signals
 
@@ -311,6 +325,14 @@ class Engine:
         return min(hb, hs)
 
     def _plan(self, buy, sell, cap_notional: float):
+        if self.cfg.primary_order_type == "maker":
+            primary_buy = buy is self.entropy
+            book = self.entropy.book
+            price = book.best_bid() if primary_buy else book.best_ask()
+            if price is None:
+                return None, "empty_book"
+            price = self.entropy.px_round(price, round_up=not primary_buy)
+            return self._maker_plan_at(buy, sell, cap_notional, price)
         return plan_arb(
             buy.book, sell.book,
             threshold_bps=self._eff_threshold(buy, sell),
@@ -321,6 +343,34 @@ class Engine:
             min_notional=self._min_notional,
             size_step=self._step,
         )
+
+    def _maker_plan_at(self, buy, sell, cap_notional, price):
+        if price <= 0:
+            return None, "empty_book"
+        # The maker quote provides a fixed price, not marketable primary depth.
+        # Hedge book depth, inventory caps and order size still limit the quote.
+        quote = OrderBook()
+        available = max(cap_notional / price, self._step) / self.cfg.take_fraction
+        quote.asks = {price: available}
+        quote.bids = {price: available}
+        primary_buy = buy is self.entropy
+        return plan_arb(
+            quote if primary_buy else buy.book,
+            sell.book if primary_buy else quote,
+            threshold_bps=self._eff_threshold(buy, sell),
+            buy_fee_bps=self.cfg.primary_fee_bps if primary_buy else buy.fee_bps,
+            sell_fee_bps=sell.fee_bps if primary_buy else self.cfg.primary_fee_bps,
+            take_fraction=self.cfg.take_fraction, cap_notional=cap_notional,
+            min_base=self._min_base, min_notional=self._min_notional, size_step=self._step)
+
+    def _maker_quote_valid(self, buy, sell, plan, price):
+        if (not self.entropy.book.is_fresh(self.cfg.staleness_sec)
+                or not self.hedge.book.is_fresh(self.cfg.staleness_sec)
+                or not self.entropy.ready_to_trade() or not self.hedge.ready_to_trade()
+                or self._venue_down):
+            return False
+        current, _ = self._maker_plan_at(buy, sell, plan.buy_notional, price)
+        return current is not None and current.qty >= plan.qty - self._step / 2
 
     # -------------------------------------------------------------- strategy
 
@@ -495,7 +545,7 @@ class Engine:
                                             limit_px=limit_px)
         except Exception as e:
             result = {"status": "send-failed", "filled_base": 0.0,
-                      "avg_px": None, "err": repr(e), "unresolved": False}
+                      "avg_px": None, "err": repr(e), "unresolved": True}
         return result, (time.perf_counter() - started) * 1000.0
 
     async def _execute(self, buy, sell, plan: ArbPlan) -> bool:
@@ -520,14 +570,17 @@ class Engine:
         slip = cfg.leg_slippage_bps / 1e4
         buy_bound = buy.px_round(plan.buy_limit * (1 + slip), round_up=False)
         sell_bound = sell.px_round(plan.sell_limit * (1 - slip), round_up=True)
-        self._record_send(buy)
-        self._record_send(sell)
         send_started = time.perf_counter()
-        (binfo, buy_send_ms), (sinfo, sell_send_ms) = await asyncio.gather(
-            self._timed_send(buy, is_buy=True, qty=plan.qty,
-                             limit_px=buy_bound),
-            self._timed_send(sell, is_buy=False, qty=plan.qty,
-                             limit_px=sell_bound))
+        if cfg.primary_order_type == "maker":
+            (binfo, buy_send_ms), (sinfo, sell_send_ms) = await execute_primary_maker(self, buy, sell, plan)
+        else:
+            self._record_send(buy)
+            self._record_send(sell)
+            (binfo, buy_send_ms), (sinfo, sell_send_ms) = await asyncio.gather(
+                self._timed_send(buy, is_buy=True, qty=plan.qty,
+                                 limit_px=buy_bound),
+                self._timed_send(sell, is_buy=False, qty=plan.qty,
+                                 limit_px=sell_bound))
         send_total_ms = (time.perf_counter() - send_started) * 1000.0
         for v, info, side in ((buy, binfo, "buy"), (sell, sinfo, "sell")):
             if info.get("err"):
@@ -595,9 +648,9 @@ class Engine:
                 log.critical("HALTED after %d consecutive execution problems "
                              "— flatten manually and restart / 连续执行异常，"
                              "引擎已停止，请手动平仓后重启", self.consec_errors)
-        if sent_ok:
+        if sent_ok and (cfg.primary_order_type == "taker" or bfill or sfill):
             self.trades += 1
-            self.total_exp_edge += plan.exp_edge_usd
+            self.total_exp_edge += plan.exp_edge_usd * (matched / plan.qty if cfg.primary_order_type == "maker" else 1)
         self._record_trade(direction, plan,
                            None if unresolved else fill_edge,
                            f"{binfo['status']}/{sinfo['status']}", sent_ok)
@@ -668,9 +721,15 @@ class Engine:
             "ok": ok})
 
     async def _maybe_hedge(self) -> None:
+        if self.active_maker is not None:
+            return  # unknown live order/hedge: position reads alone cannot resolve it
         net = sum(v.position for v in self.venues.values())
         if abs(net) > self.cfg.net_tolerance_base:
             await self._hedge(net)
+            remaining = sum(v.position for v in self.venues.values())
+            if self.cfg.primary_order_type == "maker" and abs(remaining) > self.cfg.net_tolerance_base:
+                self.halted = True
+                log.critical("[MAKER] residual base %.8g exceeds tolerance; stopped new quotes", remaining)
 
     async def _hedge(self, net: float) -> None:
         """Reduce the venue that carries the imbalance back toward net zero

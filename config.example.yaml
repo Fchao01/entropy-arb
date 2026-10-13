@@ -87,6 +87,8 @@ inventory:
 
 # ======================= EXECUTION / 执行参数 ==============================
 execution:
+  primary_order_type: taker   # taker 吃单 / maker 买一卖一只挂单
+  maker_timeout_sec: 5.0      # 挂单最长等待秒数，范围 (0, 60]
   premium_persist_sec: 0     # edge must persist this long before firing / 信号需持续时间
   cooldown_sec: 0.0            # min gap between executions / 两次执行的最小间隔
   settle_timeout_sec: 10.0      # wait for fill confirmation / 等待成交确认

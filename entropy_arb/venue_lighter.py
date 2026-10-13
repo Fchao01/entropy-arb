@@ -13,6 +13,7 @@ hides that behind the same result shape the HL venue returns:
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import logging
 import math
@@ -30,12 +31,16 @@ except ImportError:
 from .book import OrderBook
 from .config import VenueConf
 from .feeds import LighterBookFeed
+from .maker import MakerOrder
 
 log = logging.getLogger("lighter")
 
-OPEN_STATUSES = {"in-progress", "pending", "open"}
 AUTH_REFRESH_SEC = 8 * 60
 REST_TIMEOUT = 10.0
+
+
+def terminal_status(status: str) -> bool:
+    return status in {"filled", "expired", "rejected"} or status.startswith("canceled")
 
 
 class AccountOrdersFeed:
@@ -51,6 +56,7 @@ class AccountOrdersFeed:
         self.ready = asyncio.Event()
         self._pending: dict[int, asyncio.Future] = {}
         self._terminal: OrderedDict[int, dict] = OrderedDict()
+        self.latest: OrderedDict[int, dict] = OrderedDict()
 
     def watch(self, coi: int) -> asyncio.Future:
         fut: asyncio.Future = asyncio.get_running_loop().create_future()
@@ -77,11 +83,19 @@ class AccountOrdersFeed:
         for lst in (msg.get("orders") or {}).values():
             for o in lst or []:
                 status = str(o.get("status", ""))
-                if status in OPEN_STATUSES:
-                    continue
                 try:
                     coi = int(o.get("client_order_index"))
                 except (TypeError, ValueError):
+                    continue
+                old = self.latest.get(coi)
+                if old and (terminal_status(str(old.get("status", "")))
+                            or float(o.get("filled_base_amount") or 0) < float(old.get("filled_base_amount") or 0)):
+                    continue
+                self.latest[coi] = {**(old or {}), **o}
+                self.latest.move_to_end(coi)
+                while len(self.latest) > 1000:
+                    self.latest.popitem(last=False)
+                if not terminal_status(status):
                     continue
                 fb = float(o.get("filled_base_amount") or 0.0)
                 fq = float(o.get("filled_quote_amount") or 0.0)
@@ -287,6 +301,74 @@ class LighterVenue:
         self._coi += 1
         return self._coi
 
+    async def place_maker(self, *, is_buy: bool, qty: float, limit_px: float):
+        from lighter import SignerClient
+        order = MakerOrder(self._next_coi(), limit_px, time.time())
+        try:
+            _tx, resp, err = await asyncio.wait_for(self.signer.create_order(
+                market_index=self.market_id, client_order_index=order.client_id,
+                base_amount=int(round(qty * 10 ** self.size_decimals)),
+                price=int(round(limit_px * 10 ** self.price_decimals)), is_ask=not is_buy,
+                order_type=SignerClient.ORDER_TYPE_LIMIT,
+                time_in_force=SignerClient.ORDER_TIME_IN_FORCE_POST_ONLY,
+                reduce_only=False, order_expiry=SignerClient.DEFAULT_28_DAY_ORDER_EXPIRY),
+                timeout=self.settle_timeout)
+            if err is not None or (getattr(resp, "code", 200) or 200) != 200:
+                order.rejected, order.err = True, "Lighter maker transaction rejected"
+        except Exception:
+            pass  # ambiguous submission: resolve by client index, never resend
+        return order
+
+    async def _maker_lookup(self, order):
+        from lighter import OrderApi
+        api = OrderApi(self.signer.api_client)
+        auth, err = self.signer.create_auth_token_with_expiry()
+        if err:
+            raise RuntimeError("Lighter order lookup authentication unavailable")
+        for method in (api.account_active_orders, api.account_inactive_orders):
+            params = inspect.signature(method).parameters
+            kwargs = {"account_index": self.conf.lighter_creds.account_index,
+                      "market_id": self.market_id,
+                      "authorization" if "authorization" in params else "auth": auth}
+            if method == api.account_inactive_orders:
+                kwargs["limit"] = 100
+            response = await method(**kwargs)
+            for row in response.orders or []:
+                row = row.to_dict() if hasattr(row, "to_dict") else row
+                if int(row.get("client_order_index", -1)) == order.client_id:
+                    return row
+        raise RuntimeError("Lighter maker state unknown")
+
+    async def maker_state(self, order):
+        feed = self.orders_feed
+        row = feed.latest.get(order.client_id) if feed and feed.ready.is_set() else None
+        # Reconcile periodically even when the stream is connected.
+        if row is None or time.monotonic() - getattr(order, "last_query", 0) > 1:
+            row = await self._maker_lookup(order)
+            order.last_query = time.monotonic()
+            if feed:
+                feed._handle_orders({"orders": {str(self.market_id): [row]}})
+                row = feed.latest[order.client_id]
+        order.order_id = row.get("order_index")
+        filled = float(row["filled_base_amount"])
+        quote = float(row["filled_quote_amount"])
+        if filled and (not math.isfinite(quote) or quote <= 0):
+            raise RuntimeError("Lighter maker fill price unavailable")
+        status = str(row["status"])
+        return {"status": status, "filled_base": filled,
+                "avg_px": quote / filled if filled else None, "err": None,
+                "terminal": terminal_status(status)}
+
+    async def cancel_maker(self, order):
+        if order.order_id is None:
+            await self.maker_state(order)
+        if order.order_id is None:
+            raise RuntimeError("Lighter server order index unknown")
+        _tx, resp, err = await self.signer.cancel_order(
+            market_index=self.market_id, order_index=int(order.order_id))
+        if err or (getattr(resp, "code", 200) or 200) != 200:
+            raise RuntimeError("Lighter cancellation rejected")
+
     async def send_taker(self, *, is_buy: bool, qty: float, limit_px: float,
                          reduce_only: bool = False) -> dict:
         """Market order with avg-price protection; settle via account ws."""
@@ -315,7 +397,7 @@ class LighterVenue:
             if getattr(e, "status", None) == 429 or "(429)" in str(e):
                 msg = "RATE_LIMITED: " + msg
             return {"status": "send-failed", "filled_base": 0.0, "avg_px": None,
-                    "err": msg, "unresolved": False}
+                    "err": msg, "unresolved": True}
         if err is not None or (getattr(resp, "code", 200) or 200) != 200:
             if fut is not None:
                 self.orders_feed.unwatch(coi)
