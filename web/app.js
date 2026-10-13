@@ -84,13 +84,18 @@ function badge(task) {
   return `<span class="badge ${className}"><span class="mini-dot"></span>${escapeHtml(label)}</span>`;
 }
 
-function thresholdStatus(task) {
+function thresholdStatus(task, compact = false) {
   if (task.mode !== "live") return "";
-  if ((task.strategy_mode || task.status?.strategy_mode) === "bps") return `<small class="threshold-status ok">bps 开平仓 · ${escapeHtml(task.status?.bps_strategy?.reason || "独立点位")}</small>`;
+  if ((task.strategy_mode || task.status?.strategy_mode) === "bps") {
+    const reason = task.status?.bps_strategy?.reason || "独立点位";
+    const waiting = compact && reason.match(/^等待有效分钟数据 (\d+)\/\d+；至少 (\d+) 条/);
+    const summary = waiting ? `等待有效数据 ${waiting[1]}/${waiting[2]}` : compact ? reason.split(/[；;\n]/)[0] : reason;
+    return `<small class="threshold-status ok" title="${escapeHtml(reason)}">bps 开平仓 · ${escapeHtml(summary)}</small>`;
+  }
   const status = task.auto_threshold || {};
   const labels = {applied: "今日阈值已更新", unchanged: "今日已检查，阈值未变", failed: "今日阈值更新失败", pending: "今日阈值待更新", skipped: "今日阈值已跳过"};
   const label = labels[status.status] || labels.pending;
-  const extra = status.status === "failed" ? `：${status.reason || "请查看事件日志"}` : (status.window ? ` · ${status.window}` : "");
+  const extra = status.status === "failed" ? compact ? "" : `：${status.reason || "请查看事件日志"}` : (status.window ? ` · ${status.window}` : "");
   const cls = status.status === "failed" ? "failed" : status.status === "applied" || status.status === "unchanged" ? "ok" : "pending";
   return `<small class="threshold-status ${cls}" title="${escapeHtml(status.reason || label)}">${escapeHtml(label + extra)}</small>`;
 }
@@ -121,7 +126,7 @@ function renderTasks() {
       ? task.state === "stopping" ? `<button class="text-button stop" data-action="stop" ${disabled}>强制结束</button>`
         : `${task.mode === "live" ? `<button class="text-button ${paused ? "resume" : "pause"}" data-action="${paused ? "resume" : "pause"}" ${disabled}>${paused ? "恢复" : "暂停"}</button>` : ""}<button class="text-button stop" data-action="stop" ${disabled}>停止</button>`
       : `<button class="text-button" data-action="start" ${disabled}>启动</button><button class="text-button" data-action="edit" ${disabled}>配置</button>`;
-    return `<tr data-id="${task.id}"><td><div class="coin-cell"><span class="coin-icon">${escapeHtml(task.symbol.slice(0, 1))}</span><div><button class="text-button task-title" data-action="detail" aria-label="查看 ${escapeHtml(task.symbol)} 任务详情">${escapeHtml(task.symbol)}</button><small title="${escapeHtml(task.name)}">${escapeHtml(task.name)}</small></div></div></td><td class="route-cell"><b>${escapeHtml(venues[task.primary])}</b><span>⇄</span><b>${escapeHtml(venues[task.hedge])}</b></td><td><span class="badge ${task.mode}">${task.mode === "live" ? "LIVE · 实盘" : "DATA · 采集"}</span></td><td>${badge(task)}${thresholdStatus(task)}</td><td class="number ${premium == null ? "" : premium >= 0 ? "positive" : "negative"}">${signed(premium)}</td><td class="number">${duration(task)}</td><td>${taskStats}</td><td><div class="actions">${controls}<button class="text-button" data-action="threshold">阈值</button><button class="text-button" data-action="detail">详情</button><button class="text-button" data-action="monitor">监控 ↗</button>${!active(task) ? `<button class="icon-button" data-action="delete" aria-label="删除 ${escapeHtml(task.name)}" title="删除任务">×</button>` : ""}</div></td></tr>`;
+    return `<tr data-id="${task.id}"><td><div class="coin-cell"><span class="coin-icon">${escapeHtml(task.symbol.slice(0, 1))}</span><div><button class="text-button task-title" data-action="detail" aria-label="查看 ${escapeHtml(task.symbol)} 任务详情">${escapeHtml(task.symbol)}</button><small title="${escapeHtml(task.name)}">${escapeHtml(task.name)}</small></div></div></td><td class="route-cell"><b>${escapeHtml(venues[task.primary])}</b><span>⇄</span><b>${escapeHtml(venues[task.hedge])}</b></td><td><span class="badge ${task.mode}">${task.mode === "live" ? "LIVE · 实盘" : "DATA · 采集"}</span></td><td>${badge(task)}${thresholdStatus(task, true)}</td><td class="number ${premium == null ? "" : premium >= 0 ? "positive" : "negative"}">${signed(premium)}</td><td class="number">${duration(task)}</td><td>${taskStats}</td><td><div class="actions">${controls}<button class="text-button" data-action="threshold">阈值</button><button class="text-button" data-action="detail">详情</button><button class="text-button" data-action="monitor">监控 ↗</button>${!active(task) ? `<button class="icon-button" data-action="delete" aria-label="删除 ${escapeHtml(task.name)}" title="删除任务">×</button>` : ""}</div></td></tr>`;
   }).join("");
   const financialCell = (value, digits = 2, wear = false) => `<td class="number ${value == null ? "" : (wear ? value > 0 : value < 0) ? "negative" : "positive"}">${money(value, digits)}</td>`;
   const statTasks = tasks.filter((task) => task.mode === "live");
