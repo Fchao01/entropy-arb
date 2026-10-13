@@ -163,17 +163,13 @@ def signer_resources(venue) -> set:
 
 def missing_credentials(config) -> list[str]:
     missing = []
-    lighter_primary_separate = (
-        config.primary_venue in ("lighter", "lighter-rh")
-        and config.hedge.kind == "lighter"
-    )
     for venue in (config.entropy, config.hedge):
         if venue.kind == "hl":
             if not venue.hl_creds or not venue.hl_creds.private_key:
                 missing.append("HL_PRIVATE_KEY")
         elif venue.kind == "lighter":
-            prefix = "PRIMARY_" if venue.key == "entropy" and lighter_primary_separate else ""
             credentials = venue.lighter_creds
+            prefix = credentials.env_prefix if credentials else ""
             if not credentials or credentials.account_index is None:
                 missing.append(prefix + "LIGHTER_ACCOUNT_INDEX")
             if not credentials or credentials.api_key_index is None:

@@ -70,6 +70,7 @@ class LighterCreds:
     account_index: Optional[int]
     api_key_index: Optional[int]
     api_private_key: Optional[str]
+    env_prefix: str = ""
 
     @property
     def complete(self) -> bool:
@@ -312,7 +313,22 @@ def _build_venue(raw: dict, section: str, venue: str, key: str, symbol: str,
             return credential_env.get(name) or None
         return _env_s(name)
 
+    lighter_prefix = None
+    if venue in LIGHTER_PROFILES:
+        if separate_lighter_keys:
+            lighter_prefix = "PRIMARY_" if is_primary else ""
+        else:
+            # A single Lighter/RH venue keeps its account when the trading
+            # legs are reversed. Select the entire group, never combine a
+            # primary private key with a base account or API key index.
+            lighter_names = ("LIGHTER_ACCOUNT_INDEX", "LIGHTER_API_KEY_INDEX",
+                             "LIGHTER_API_PRIVATE_KEY")
+            lighter_prefix = "PRIMARY_" if any(
+                get_env("PRIMARY_" + name) for name in lighter_names) else ""
+
     def env_s(name, fallback=None):
+        if lighter_prefix is not None:
+            return get_env(lighter_prefix + name)
         if is_primary:
             value = get_env("PRIMARY_" + name)
             if value or separate_lighter_keys:
@@ -324,7 +340,8 @@ def _build_venue(raw: dict, section: str, venue: str, key: str, symbol: str,
         try:
             return int(value) if value is not None else None
         except ValueError as e:
-            raise ConfigError(f"{('PRIMARY_' if is_primary else '') + name} must be an integer") from e
+            prefix = lighter_prefix if lighter_prefix is not None else ("PRIMARY_" if is_primary else "")
+            raise ConfigError(f"{prefix + name} must be an integer") from e
 
     default_fee = 1.0 if venue == "tradexyz" else 0.0
     fee = float(params.get("taker_fee_bps", default_fee))
@@ -365,7 +382,8 @@ def _build_venue(raw: dict, section: str, venue: str, key: str, symbol: str,
                      lighter_profile=LIGHTER_PROFILES[venue],
                      lighter_creds=LighterCreds(env_i("LIGHTER_ACCOUNT_INDEX"),
                                                 env_i("LIGHTER_API_KEY_INDEX"),
-                                                env_s("LIGHTER_API_PRIVATE_KEY")))
+                                                env_s("LIGHTER_API_PRIVATE_KEY"),
+                                                env_prefix=lighter_prefix))
 
 
 # -------------------------------------------------------------------- loading
@@ -435,6 +453,8 @@ def load_config(config_file: str = "config.yaml", env_file: str = ".env", *,
                                                   and hedge_venue in LIGHTER_PROFILES),
                            credential_env=credential_env)
     hedge = _build_venue(raw, "hedge", hedge_venue, "hedge", hedge_symbol,
+                         separate_lighter_keys=(primary_venue in LIGHTER_PROFILES
+                                                and hedge_venue in LIGHTER_PROFILES),
                          credential_env=credential_env)
     if (primary_venue == hedge_venue
             or (entropy.kind == hedge.kind == "hl" and entropy.hl_dex == hedge.hl_dex)):

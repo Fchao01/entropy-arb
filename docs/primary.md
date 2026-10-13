@@ -57,7 +57,12 @@ Arcus 适配器会尝试将裸名 ETH 解析为 ETH-USD。
 - Arcus：`PRIMARY_ARCUS_ACCOUNT_ADDRESS`、`PRIMARY_ARCUS_ACCOUNT_INDEX`、
   `PRIMARY_ARCUS_API_SIGNING_KEY`。
 
-只有一条 Lighter 腿时可以沿用 `LIGHTER_*`。两条腿分别为 Lighter 主网和 RH 时，
+只有一条 Lighter/RH 腿时，无论它是主腿还是对冲腿，都使用同一套凭据：
+配置了任意 `PRIMARY_LIGHTER_*` 字段时选用这一整组，否则使用 `LIGHTER_*`。
+选中的账户编号、API Key 编号和私钥必须全部填写；不会混用两组字段。
+因此 RH + Arcus 交换两条腿后，RH 的账户及 API Key 不会随角色改变。
+启动日志和校验失败信息会显示实际读取的变量组及账户、API Key 编号。
+两条腿分别为 Lighter 主网和 RH 时，
 主腿必须使用 `PRIMARY_LIGHTER_*`，对冲腿使用 `LIGHTER_*`，不能复用错误网络
 的密钥。trade.xyz 默认沿用 `HL_*_XYZ`（未设置时沿用 `HL_*`），同账户的两条
 HL 腿共用 nonce 分配器和去重后的账户权益统计。

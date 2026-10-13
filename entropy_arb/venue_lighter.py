@@ -219,9 +219,13 @@ class LighterVenue:
         )
         err = signer.check_client()
         if err is not None:
-            raise RuntimeError(f"[{self.name}] API key check failed: {err}")
+            raise RuntimeError(
+                f"[{self.name}] API key check failed "
+                f"(account={c.account_index}, api_key_index={c.api_key_index}, "
+                f"credentials={c.env_prefix}LIGHTER_*, url={self.profile.api_url}): {err}")
         self.signer = signer
-        log.info("[%s] signer ready (account %d)", self.name, c.account_index)
+        log.info("[%s] signer ready (account %d, api_key_index %d, credentials %sLIGHTER_*)",
+                 self.name, c.account_index, c.api_key_index, c.env_prefix)
 
     def start_tasks(self, stop: asyncio.Event, notify, live: bool) -> list:
         tasks = [asyncio.create_task(

@@ -181,6 +181,53 @@ def test_two_lighter_deployments_use_separate_credentials(monkeypatch):
     assert not cfg.primary.lighter_creds.complete
 
 
+def test_rh_arcus_credentials_stay_with_venue_when_roles_swap():
+    values = {
+        "PRIMARY_LIGHTER_ACCOUNT_INDEX": "11", "PRIMARY_LIGHTER_API_KEY_INDEX": "3",
+        "PRIMARY_LIGHTER_API_PRIVATE_KEY": "working-rh-key",
+        "LIGHTER_ACCOUNT_INDEX": "22", "LIGHTER_API_KEY_INDEX": "4",
+        "LIGHTER_API_PRIVATE_KEY": "other-deployment-key",
+        "ARCUS_ACCOUNT_ADDRESS": "base-arcus-account",
+        "ARCUS_ACCOUNT_INDEX": "0", "ARCUS_API_SIGNING_KEY": "base-arcus-key",
+    }
+    path = write_tmp(MINIMAL + '\nprimary:\n  taker_fee_bps: 2.25\nhedge:\n  taker_fee_bps: 2.25\n')
+    forward = load_config(path, symbol="QQQ", primary_venue="lighter-rh",
+                          hedge_venue="arcus", credential_env=values)
+    reverse = load_config(path, symbol="QQQ", primary_venue="arcus",
+                          hedge_venue="lighter-rh", credential_env=values)
+    assert reverse.hedge.lighter_creds == forward.primary.lighter_creds
+    assert reverse.primary.arcus_creds == forward.hedge.arcus_creds
+    assert reverse.hedge.lighter_profile == forward.primary.lighter_profile
+
+
+def test_partial_primary_lighter_credentials_are_not_mixed_with_base():
+    path = write_tmp(MINIMAL + '\nprimary:\n  venue: arcus\n  taker_fee_bps: 2.25\n')
+    cfg = load_config(path, symbol="QQQ", hedge_venue="lighter-rh", credential_env={
+        "PRIMARY_LIGHTER_API_PRIVATE_KEY": "working-rh-key",
+        "LIGHTER_ACCOUNT_INDEX": "22", "LIGHTER_API_KEY_INDEX": "4",
+        "LIGHTER_API_PRIVATE_KEY": "other-deployment-key",
+    })
+    assert cfg.hedge.lighter_creds.api_private_key == "working-rh-key"
+    assert cfg.hedge.lighter_creds.account_index is None
+    assert cfg.hedge.lighter_creds.api_key_index is None
+    assert not cfg.hedge.lighter_creds.complete
+    from entropy_arb.web import missing_credentials
+    assert "PRIMARY_LIGHTER_ACCOUNT_INDEX" in missing_credentials(cfg)
+    assert "PRIMARY_LIGHTER_API_KEY_INDEX" in missing_credentials(cfg)
+
+
+def test_single_rh_leg_keeps_base_credentials_when_roles_swap():
+    path = write_tmp(MINIMAL + '\nprimary:\n  taker_fee_bps: 2.25\nhedge:\n  taker_fee_bps: 2.25\n')
+    values = {"LIGHTER_ACCOUNT_INDEX": "12", "LIGHTER_API_KEY_INDEX": "3",
+              "LIGHTER_API_PRIVATE_KEY": "base-rh-key"}
+    forward = load_config(path, symbol="QQQ", primary_venue="lighter-rh",
+                          hedge_venue="arcus", credential_env=values)
+    reverse = load_config(path, symbol="QQQ", primary_venue="arcus",
+                          hedge_venue="lighter-rh", credential_env=values)
+    assert forward.primary.lighter_creds == reverse.hedge.lighter_creds
+    assert reverse.hedge.lighter_creds.env_prefix == ""
+
+
 def test_all_venue_roles_build_with_explicit_fees():
     from entropy_arb.config import PRIMARY_VENUES
     for primary in PRIMARY_VENUES:
