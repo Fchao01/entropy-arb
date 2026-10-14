@@ -15,15 +15,16 @@ def main():
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8080)
     parser.add_argument("--data-dir", default=str(ROOT / "web-data"))
-    parser.add_argument("--max-running", type=int, default=12)
+    parser.add_argument("--max-running", type=int, default=0,
+                        help="最多同时运行的任务数；0 表示不限制（默认）")
     parser.add_argument("--secure-cookie", action="store_true", help="HTTPS 反向代理部署时启用")
     args = parser.parse_args()
     load_dotenv(ROOT / ".env.web")
     password = os.environ.get("WEB_PASSWORD", "")
     if len(password) < 12 or password == "replace-with-a-long-random-password":
         parser.error("请在 .env.web 设置至少 12 位的 WEB_PASSWORD（参见 .env.web.example）")
-    if not 1 <= args.max_running <= 50:
-        parser.error("--max-running 必须在 1–50 内")
+    if args.max_running < 0:
+        parser.error("--max-running 必须大于等于 0；0 表示不限制")
     try:
         manager = TaskManager(ROOT, Path(args.data_dir), args.max_running)
     except (ConsoleError, ValueError) as error:

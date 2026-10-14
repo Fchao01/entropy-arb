@@ -50,14 +50,14 @@ print('record complete')
 """
 
 
-def manager_at(tmp_path):
+def manager_at(tmp_path, max_running=0):
     root = tmp_path / "project"
     root.mkdir()
     (root / "main.py").write_text(FAKE_WORKER)
     (root / "config.example.yaml").write_text((ROOT / "config.example.yaml").read_text())
     (root / "configs").mkdir()
     (root / "configs/rh-arcus.yaml").write_text((ROOT / "configs/rh-arcus.yaml").read_text())
-    return TaskManager(root, tmp_path / "data")
+    return TaskManager(root, tmp_path / "data", max_running=max_running)
 
 
 def payload(symbol="ETH"):
@@ -126,6 +126,36 @@ def test_multiple_symbols_and_duplicate_combo(tmp_path):
         finally:
             await manager.close()
         assert not manager.running
+    asyncio.run(scenario())
+
+
+def test_default_allows_more_than_twelve_running_tasks(tmp_path):
+    async def scenario():
+        manager = manager_at(tmp_path)
+        try:
+            assert manager.max_running == 0
+            for index in range(13):
+                task = await manager.put(payload(f"COIN{index}"))
+                await manager.start(task["id"])
+            assert len(manager.running) == 13
+        finally:
+            await manager.close()
+        assert not manager.running
+    asyncio.run(scenario())
+
+
+def test_explicit_task_limit_is_still_enforced(tmp_path):
+    async def scenario():
+        manager = manager_at(tmp_path, max_running=2)
+        try:
+            tasks = [await manager.put(payload(symbol)) for symbol in ("ETH", "BTC", "QQQ")]
+            await manager.start(tasks[0]["id"])
+            await manager.start(tasks[1]["id"])
+            with pytest.raises(ConsoleError, match="最多同时运行 2 个任务"):
+                await manager.start(tasks[2]["id"])
+            assert len(manager.running) == 2
+        finally:
+            await manager.close()
     asyncio.run(scenario())
 
 

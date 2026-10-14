@@ -187,7 +187,9 @@ def missing_credentials(config) -> list[str]:
 
 
 class TaskManager:
-    def __init__(self, root: Path, data: Path, max_running=12):
+    def __init__(self, root: Path, data: Path, max_running=0):
+        if isinstance(max_running, bool) or not isinstance(max_running, int) or max_running < 0:
+            raise ValueError("max_running 必须是非负整数；0 表示不限制")
         self.root = root.resolve()
         self.data = data.resolve()
         self.data.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -944,7 +946,7 @@ class TaskManager:
             task = self.get(task_id)
             if task_id in self.running:
                 raise ConsoleError("任务已启动，请勿重复启动")
-            if len(self.running) >= self.max_running:
+            if self.max_running > 0 and len(self.running) >= self.max_running:
                 raise ConsoleError(f"最多同时运行 {self.max_running} 个任务")
             for previous_id in self.tasks:
                 if previous_id not in self.running and self.instance_locked(previous_id):

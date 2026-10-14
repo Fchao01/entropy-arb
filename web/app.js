@@ -111,7 +111,7 @@ function renderTasks() {
   const caps = live.reduce((sum, task) => sum + task.cap_usd, 0);
   element("nav-count").textContent = running.length;
   element("task-total").textContent = state.tasks.length;
-  element("dex-stats").innerHTML = stat("运行中的任务", running.length, `<span class="mini-dot"></span>运行上限 ${state.meta.max_running} 个实例`, "↗", "个") + stat("实盘交易", live.length, "独立实例 · 真实订单", "⇄", "个") + stat("行情采集", record.length, "仅记录行情，不发送订单", "▥", "个") + stat("配置持仓上限合计", `$${number(caps, 0)}`, "运行中实盘的双腿上限合计，非实际持仓", "⊞");
+  element("dex-stats").innerHTML = stat("运行中的任务", running.length, `<span class="mini-dot"></span>${state.meta.max_running > 0 ? `运行上限 ${state.meta.max_running} 个实例` : "任务数量不设上限"}`, "↗", "个") + stat("实盘交易", live.length, "独立实例 · 真实订单", "⇄", "个") + stat("行情采集", record.length, "仅记录行情，不发送订单", "▥", "个") + stat("配置持仓上限合计", `$${number(caps, 0)}`, "运行中实盘的双腿上限合计，非实际持仓", "⊞");
   const query = element("search").value.toLowerCase();
   const filter = element("state-filter").value;
   const tasks = state.tasks.filter((task) => `${task.name} ${task.symbol}`.toLowerCase().includes(query) && (filter === "all" || (filter === "active" && active(task)) || (filter === "stopped" && task.state === "stopped") || (filter === "failed" && ["failed", "interrupted"].includes(task.state))));
