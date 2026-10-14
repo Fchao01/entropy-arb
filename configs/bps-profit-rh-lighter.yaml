@@ -1,0 +1,68 @@
+# 完整往返净收益试运行版：RH 主腿 / Lighter 对冲。参数是示例，不保证盈利。
+# CLI 使用 --primary lighter-rh --hedge lighter；费率必须核对实际账户。
+strategy:
+  mode: bps
+bps:
+  exit_mode: profit
+  take_profit_bps: 1.0
+  stop_loss_bps: 10.0
+  max_hold_sec: 900
+  min_gap_bps: 2.0
+  entry_confirm_sec: 2.0
+  cycle_cooldown_sec: 30
+  add_step_bps: 0.5
+  execution_slippage_bps: 1.0
+  cost_buffer_bps: 0.5
+  levels: rolling
+  direction: long_primary
+  window_minutes: 120
+  min_valid_minutes: 30   # 允许缺口；最近窗口内至少 30 条，窗口不足 30 分钟时要求填满
+  entry_percentile: 10
+  exit_percentile: 75
+  max_entries: 1
+  add_interval_sec: 60
+  max_position_usd: 1000
+thresholds:
+  midline_bps: 0.0
+  upper_bps: 4.0
+  lower_bps: 4.0
+primary:
+  venue: lighter-rh
+  taker_fee_bps: 0.0
+  max_position_usd: 1000
+  max_orders_per_min: 30
+hedge:
+  taker_fee_bps: 0.0
+  max_position_usd: 1000
+  max_orders_per_min: 30
+sizing:
+  take_fraction: 0.5
+  max_order_notional_usd: 500
+  min_order_notional_usd: 10
+inventory:
+  scale_bps: 10.0
+  floor_frac: 0
+execution:
+  primary_order_type: taker   # taker 吃单 / maker 买一卖一只挂单
+  maker_timeout_sec: 5.0      # 挂单最长等待秒数，范围 (0, 60]
+  premium_persist_sec: 0
+  cooldown_sec: 0.0
+  settle_timeout_sec: 10.0
+  leg_slippage_bps: 50.0
+  hedge_slippage_bps: 20.0
+  net_tolerance_base: 0.001
+  max_consecutive_errors: 3
+  rate_limit_pause_sec: 10.0
+  staleness_sec: 10.0
+  reconcile_sec: 15.0
+  venue_probe_sec: 30.0
+  http_keepalive_sec: 10.0
+recorder:
+  enabled: true
+  csv: logs/{symbol}/minutes.csv
+logging:
+  level: INFO
+  status_interval_sec: 30.0
+  trades_csv: logs/{symbol}/trades.csv
+  dashboard: true
+  file: logs/{symbol}/engine.log

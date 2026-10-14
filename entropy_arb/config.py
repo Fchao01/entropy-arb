@@ -180,6 +180,15 @@ class Config:
     bps_add_interval_sec: float = 60.0
     bps_max_position_usd: float = 1000.0
     bps_cost_buffer_bps: float = 0.0
+    bps_exit_mode: str = "levels"
+    bps_take_profit_bps: float = 1.0
+    bps_stop_loss_bps: float = 10.0
+    bps_max_hold_sec: float = 900.0
+    bps_min_gap_bps: float = 2.0
+    bps_entry_confirm_sec: float = 2.0
+    bps_cycle_cooldown_sec: float = 30.0
+    bps_add_step_bps: float = 0.5
+    bps_execution_slippage_bps: float = 1.0
 
     @property
     def primary(self) -> VenueConf:
@@ -221,6 +230,9 @@ _SCHEMA: Dict[str, Any] = {
         "entry_percentile": float, "exit_percentile": float,
         "max_entries": int, "add_interval_sec": float,
         "max_position_usd": float, "cost_buffer_bps": float,
+        "exit_mode": str, "take_profit_bps": float, "stop_loss_bps": float,
+        "max_hold_sec": float, "min_gap_bps": float, "entry_confirm_sec": float,
+        "cycle_cooldown_sec": float, "add_step_bps": float, "execution_slippage_bps": float,
     },
     "primary": {
         "venue": str,
@@ -496,10 +508,15 @@ def load_config(config_file: str = "config.yaml", env_file: str = ".env", *,
     bps_defaults = dict(levels="rolling", direction="long_primary", entry_bps=-9.0,
                         exit_bps=-6.0, window_minutes=120, min_coverage_pct=80.0, min_valid_minutes=30, entry_percentile=10.0,
                         exit_percentile=75.0, max_entries=1, add_interval_sec=60.0,
-                        max_position_usd=1000.0, cost_buffer_bps=0.0)
+                        max_position_usd=1000.0, cost_buffer_bps=0.0,
+                        exit_mode="levels", take_profit_bps=1.0, stop_loss_bps=10.0,
+                        max_hold_sec=900.0, min_gap_bps=2.0, entry_confirm_sec=2.0,
+                        cycle_cooldown_sec=30.0, add_step_bps=0.5, execution_slippage_bps=1.0)
     bps = {**bps_defaults, **bps}
     if bps["levels"] not in ("manual", "rolling") or bps["direction"] not in ("long_primary", "short_primary"):
         raise ConfigError("bps levels must be manual/rolling; direction must be long_primary/short_primary")
+    if bps["exit_mode"] not in ("levels", "profit"):
+        raise ConfigError("bps.exit_mode must be levels or profit")
     if any(isinstance(v, (int, float)) and not math.isfinite(v) for v in bps.values()):
         raise ConfigError("bps parameters must be finite")
     if not 2 <= bps["window_minutes"] <= 10080 or bps["max_entries"] < 1:
@@ -510,6 +527,12 @@ def load_config(config_file: str = "config.yaml", env_file: str = ".env", *,
         raise ConfigError("bps.min_valid_minutes must be in [2, 10080] / 最少有效分钟数必须在 2–10080 之间")
     if bps["add_interval_sec"] < 0 or bps["cost_buffer_bps"] < 0 or bps["max_position_usd"] <= 0:
         raise ConfigError("bps interval/buffer must be >= 0; position cap must be > 0")
+    for name in ("stop_loss_bps", "max_hold_sec", "min_gap_bps", "entry_confirm_sec",
+                 "cycle_cooldown_sec", "add_step_bps", "execution_slippage_bps"):
+        if bps[name] < 0:
+            raise ConfigError(f"bps.{name} must be >= 0")
+    if bps["take_profit_bps"] <= 0 or bps["execution_slippage_bps"] >= 10000:
+        raise ConfigError("bps.take_profit_bps must be > 0; execution_slippage_bps must be < 10000")
     for name in ("entry_percentile", "exit_percentile"):
         if not 0 <= bps[name] <= 100:
             raise ConfigError("bps percentiles must be in [0, 100]")
@@ -579,6 +602,15 @@ def load_config(config_file: str = "config.yaml", env_file: str = ".env", *,
         bps_max_entries=bps["max_entries"], bps_add_interval_sec=float(bps["add_interval_sec"]),
         bps_max_position_usd=float(bps["max_position_usd"]),
         bps_cost_buffer_bps=float(bps["cost_buffer_bps"]),
+        bps_exit_mode=bps["exit_mode"],
+        bps_take_profit_bps=float(bps["take_profit_bps"]),
+        bps_stop_loss_bps=float(bps["stop_loss_bps"]),
+        bps_max_hold_sec=float(bps["max_hold_sec"]),
+        bps_min_gap_bps=float(bps["min_gap_bps"]),
+        bps_entry_confirm_sec=float(bps["entry_confirm_sec"]),
+        bps_cycle_cooldown_sec=float(bps["cycle_cooldown_sec"]),
+        bps_add_step_bps=float(bps["add_step_bps"]),
+        bps_execution_slippage_bps=float(bps["execution_slippage_bps"]),
         entropy=entropy,
         hedge=hedge,
         midline_bps=midline,

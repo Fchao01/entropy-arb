@@ -252,12 +252,13 @@ function renderMonitor() {
   const makerLabel = maker ? ` · 挂单${maker.state === "unresolved" ? "状态未确认" : maker.state === "canceling" ? "撤单确认中" : "跟踪中"} · 已成交 ${number(maker.filled, 6)} / 已对冲 ${number(maker.hedged, 6)}` : "";
   const bps = metrics?.bps_strategy;
   const coverageLabel = bps?.coverage ? ` · 有效数据 ${bps.coverage.valid_minutes}/${bps.window_minutes}（${number(bps.coverage.coverage_pct, 1)}%）` : "";
+  const pnlLabel = bps?.exit_mode === "profit" ? ` · 净收益止盈 ${number(bps.take_profit_bps, 2)} / 止损 ${number(bps.stop_loss_bps, 2)} bps · 保守退出净收益 ${money(bps.exit_quote?.net_usd, 4)}（${signed(bps.exit_quote?.net_bps)} bps） · ${bps.cost_known ? "已知成交成本" : "成本尚未建立或旧仓成本未知"}` : "";
   const strategyLabel = bps ? ` · bps ${bps.levels === "rolling" ? "滚动" : "固定"}：开仓 ${signed(bps.entry_bps)} / 平仓 ${signed(bps.exit_bps)} · ${bps.entries}/${bps.max_entries} 批 · ${bps.reason}${coverageLabel}` : "";
   const telegram = metrics?.telegram;
   const telegramState = !metrics ? "" : !metrics.telegram_enabled ? "未配置" : telegram?.status === "failed" ? "发送失败" : `已启用 · 已发 ${telegram?.sent ?? 0}`;
   const telegramProfile = telegram?.profile ? ` · ${escapeHtml(telegram.profile)}` : "";
   const telegramLabel = task.mode === "live" && metrics ? ` · Telegram${telegramProfile} ${telegramState}` : "";
-  element("monitor-summary").innerHTML = `<div><strong>${escapeHtml(task.symbol)}</strong><span>${escapeHtml(venues[task.primary])} ⇄ ${escapeHtml(venues[task.hedge])}</span><span class="badge ${task.mode}">${task.mode === "live" ? "LIVE · 实盘" : "DATA · 采集"}</span>${badge(task)}</div><small>${fresh ? "实时快照" : "最后快照"} ${timeLabel(metrics?.updated_at)} · ${escapeHtml(orderMode)}${escapeHtml(makerLabel)}${escapeHtml(strategyLabel)}${telegramLabel} ${task.exit_code == null ? "" : ` · 退出码 ${task.exit_code}`}</small>`;
+  element("monitor-summary").innerHTML = `<div><strong>${escapeHtml(task.symbol)}</strong><span>${escapeHtml(venues[task.primary])} ⇄ ${escapeHtml(venues[task.hedge])}</span><span class="badge ${task.mode}">${task.mode === "live" ? "LIVE · 实盘" : "DATA · 采集"}</span>${badge(task)}</div><small>${fresh ? "实时快照" : "最后快照"} ${timeLabel(metrics?.updated_at)} · ${escapeHtml(orderMode)}${escapeHtml(makerLabel)}${escapeHtml(strategyLabel)}${escapeHtml(pnlLabel)}${telegramLabel} ${task.exit_code == null ? "" : ` · 退出码 ${task.exit_code}`}</small>`;
   element("monitor-stats").innerHTML = stat("双腿中间价溢价", signed(metrics?.premium_bps), metricNote, "⇄", "bps") + stat("净敞口", metrics?.net_delta == null ? "—" : signed(metrics.net_delta, 6), "双腿基础币数量合计", "⊞") + stat("会话盈亏 · MTM", metrics?.session_pnl == null ? "—" : `$${signed(metrics.session_pnl)}`, "按盘口标记的会话估值变化，非已实现收益", "↗") + stat("套利执行 / 对冲", `${metrics?.trades ?? 0} / ${metrics?.hedges ?? 0}`, `当前会话记录 ${metrics?.minute_rows ?? 0} 条分钟数据`, "▥") + stat("总成交额 · 双腿合计", money(metrics?.session_volume_usd), "实际成交名义金额，不是账户权益", "⇄") + stat("净损益 · 已实现", money(metrics?.execution_stats?.net_realized_usd, 4), "已平仓价差减全部成交手续费，浮盈见交易统计", "↗") + stat("总手续费", money(metrics?.session_fees_usd, 4), "两条腿及后续对冲手续费", "▥");
   element("venue-cards").innerHTML = metrics?.venues?.length ? metrics.venues.map((venue) => `<article class="venue-card"><div class="venue-top"><div><b>${escapeHtml(venue.name)}</b><small>${escapeHtml(venue.symbol)}</small></div><span class="badge ${fresh && venue.fresh && !venue.down ? "" : "stale"}">${!fresh ? "非实时" : venue.down ? "连接异常" : venue.fresh ? `正常 · ${number(venue.age_sec, 1)}s` : "行情过期"}</span></div><div class="venue-values"><div><span>买一 / 卖一</span><strong class="number">${number(venue.bid, 5)} / ${number(venue.ask, 5)}</strong></div><div><span>持仓数量</span><strong>${signed(venue.position, 6)}</strong></div><div><span>持仓金额 · USD</span><strong>${money(venue.position_usd)}</strong></div><div><span>账户权益 / 可用</span><strong>${money(venue.equity)} / ${money(venue.free)}</strong></div><div><span>会话成交额 · USD</span><strong>${money(venue.volume_usd)}</strong></div></div></article>`).join("") : `<div class="empty-state"><h3>等待市场连接</h3><p>启动任务后将展示真实双腿盘口。启动失败请查看下方日志。</p></div>`;
   renderSignals(metrics, fresh);
@@ -279,7 +280,7 @@ function renderSignals(metrics, fresh) {
   const bps = signal.mode === "bps";
   const levels = metrics.bps_strategy;
   const thresholds = metrics.thresholds;
-  const summary = bps ? `溢价 bps 策略 · 中间价溢价 ${signed(metrics.premium_bps)} bps · 开仓 ${signed(levels?.entry_bps)} / 平仓 ${signed(levels?.exit_bps)} bps${levels?.entries ? " · 本轮点位已锁定" : ""}` : `套利阈值策略 · 中间价溢价 ${signed(metrics.premium_bps)} bps · 中线 ${signed(thresholds?.midline_bps)} · 区间 [${signed(thresholds ? thresholds.midline_bps - thresholds.lower_bps : null)} … ${signed(thresholds ? thresholds.midline_bps + thresholds.upper_bps : null)}]`;
+  const summary = bps ? `溢价 bps 策略 · 中间价溢价 ${signed(metrics.premium_bps)} bps · 开仓 ${signed(levels?.entry_bps)} / 参考回归 ${signed(levels?.exit_bps)} bps${levels?.exit_mode === "profit" ? ` · 净收益止盈 ${number(levels.take_profit_bps, 2)} bps · 保守退出 ${money(levels.exit_quote?.net_usd, 4)}` : ""}${levels?.entries ? " · 本轮点位已锁定" : ""}` : `套利阈值策略 · 中间价溢价 ${signed(metrics.premium_bps)} bps · 中线 ${signed(thresholds?.midline_bps)} · 区间 [${signed(thresholds ? thresholds.midline_bps - thresholds.lower_bps : null)} … ${signed(thresholds ? thresholds.midline_bps + thresholds.upper_bps : null)}]`;
   element("signal-summary").textContent = `${fresh ? "当前快照" : "最后快照 · 非实时"} · ${summary}`;
   element("signal-rows").innerHTML = signal.rows.map((row) => {
     const prefix = row.action === "open" ? "开仓 · " : row.action === "close" ? "平仓 · " : "";
@@ -291,6 +292,7 @@ function renderSignals(metrics, fresh) {
     return `<tr><td>${escapeHtml(direction)}<small>${row.order_type === "maker" ? "主腿挂单 / 对冲腿吃单" : "双腿吃单"}</small></td><td class="number">${signed(row.executable_premium_bps)}</td><td class="number">${signed(row.trigger_premium_bps)}</td><td class="number">${escapeHtml(row.comparison === "<=" ? "≤" : "≥")} ${signed(row.hurdle_bps)}</td><td class="number ${tone}">${signed(row.gap_bps)}</td><td>${status}</td></tr>`;
   }).join("");
   element("signal-note").textContent = bps ? "触发指标与门槛均为主腿相对对冲腿的中间价溢价；≤ 条件的 gap = 门槛 − 指标，≥ 条件的 gap = 指标 − 门槛。可成交溢价另按卖腿价格 / 买腿价格计算，不参与上述差值。" : "触发指标为可成交溢价；门槛包含当前方向阈值、配置手续费和仓位附加值。gap = 可成交溢价 − 门槛。";
+  if (levels?.exit_mode === "profit") element("signal-note").textContent = "开仓行比较中间价点位，另需通过深度报价、往返盘口成本和开仓保护；已知成本的平仓行比较本轮保守退出净收益 bps 与止盈目标，基准为主腿累计开仓成交额。止损和最长持仓也能触发减仓；旧仓成本未知时使用原 bps 点位。";
   element("signal-note").textContent += " gap ≥ 0 仅表示达到点位，不代表已下单或净利润；下单仍受盘口深度、信号持续时间、仓位上限及暂停状态等条件限制。可成交溢价按最优报价计算，不代表整笔实际成交价。";
 }
 
@@ -340,7 +342,7 @@ function renderLogs() {
     const page = Number(state.detail?.trades_page || state.tradesPage || 1);
     const pages = Number(state.detail?.trades_pages || 0);
     state.tradesPage = page;
-    element("trades-output").innerHTML = rows.length ? `<table class="records"><thead><tr><th>时间</th><th>方向</th><th>数量</th><th>买 / 卖成交</th><th>手续费 USD</th><th>利润 USD</th><th>结果</th></tr></thead><tbody>${rows.map((row) => {
+    element("trades-output").innerHTML = rows.length ? `<table class="records"><thead><tr><th>时间</th><th>方向</th><th>数量</th><th>买 / 卖成交</th><th>手续费 USD</th><th>成交净价差 USD</th><th>结果</th></tr></thead><tbody>${rows.map((row) => {
       const profit = Number(row.fill_edge_usd);
       const profitClass = Number.isFinite(profit) ? profit >= 0 ? "positive" : "negative" : "";
       return `<tr><td>${timeLabel(Number(row.ts))}</td><td>${escapeHtml(row.direction)}</td><td>${escapeHtml(row.qty)}</td><td>${escapeHtml(row.buy_fill)} / ${escapeHtml(row.sell_fill)}</td><td class="number">${money(row.fees_usd)}</td><td class="number ${profitClass}">${money(row.fill_edge_usd)}</td><td><span class="badge ${row.ok === "1" ? "" : "failed"}">${row.ok === "1" ? "完成" : "异常"}</span></td></tr>`;
@@ -371,7 +373,7 @@ async function refreshDetail() {
   renderMonitor();
 }
 
-const fieldMap = {"strategy-mode": ["strategy", "mode", "threshold"], "bps-levels": ["bps", "levels", "rolling"], "bps-direction": ["bps", "direction", "long_primary"], "bps-window": ["bps", "window_minutes", 120], "bps-min-valid": ["bps", "min_valid_minutes", 30], "bps-entry-percentile": ["bps", "entry_percentile", 10], "bps-exit-percentile": ["bps", "exit_percentile", 75], "bps-entry": ["bps", "entry_bps", -9], "bps-exit": ["bps", "exit_bps", -6], "bps-max-entries": ["bps", "max_entries", 1], "bps-add-interval": ["bps", "add_interval_sec", 60], "bps-position-cap": ["bps", "max_position_usd", 1000], "primary-order-type": ["execution", "primary_order_type", "taker"], "maker-timeout": ["execution", "maker_timeout_sec", 5], "primary-maker-fee": ["primary", "maker_fee_bps", 0], "midline": ["thresholds", "midline_bps", 0], "upper": ["thresholds", "upper_bps", 4], "lower": ["thresholds", "lower_bps", 4], "order-cap": ["sizing", "max_order_notional_usd", 500], "primary-cap": ["primary", "max_position_usd", 1000], "hedge-cap": ["hedge", "max_position_usd", 1000], "primary-fee": ["primary", "taker_fee_bps", 0], "hedge-fee": ["hedge", "taker_fee_bps", 2.25], "primary-symbol": ["primary", "symbol", ""], "hedge-symbol": ["hedge", "symbol", ""]};
+const fieldMap = {"strategy-mode": ["strategy", "mode", "threshold"], "bps-levels": ["bps", "levels", "rolling"], "bps-direction": ["bps", "direction", "long_primary"], "bps-window": ["bps", "window_minutes", 120], "bps-min-valid": ["bps", "min_valid_minutes", 30], "bps-entry-percentile": ["bps", "entry_percentile", 10], "bps-exit-percentile": ["bps", "exit_percentile", 75], "bps-entry": ["bps", "entry_bps", -9], "bps-exit": ["bps", "exit_bps", -6], "bps-exit-mode": ["bps", "exit_mode", "levels"], "bps-take-profit": ["bps", "take_profit_bps", 1], "bps-stop-loss": ["bps", "stop_loss_bps", 10], "bps-max-hold": ["bps", "max_hold_sec", 900], "bps-min-gap": ["bps", "min_gap_bps", 2], "bps-entry-confirm": ["bps", "entry_confirm_sec", 2], "bps-cycle-cooldown": ["bps", "cycle_cooldown_sec", 30], "bps-add-step": ["bps", "add_step_bps", .5], "bps-execution-slip": ["bps", "execution_slippage_bps", 1], "bps-cost-buffer": ["bps", "cost_buffer_bps", 0], "bps-max-entries": ["bps", "max_entries", 1], "bps-add-interval": ["bps", "add_interval_sec", 60], "bps-position-cap": ["bps", "max_position_usd", 1000], "primary-order-type": ["execution", "primary_order_type", "taker"], "maker-timeout": ["execution", "maker_timeout_sec", 5], "primary-maker-fee": ["primary", "maker_fee_bps", 0], "midline": ["thresholds", "midline_bps", 0], "upper": ["thresholds", "upper_bps", 4], "lower": ["thresholds", "lower_bps", 4], "order-cap": ["sizing", "max_order_notional_usd", 500], "primary-cap": ["primary", "max_position_usd", 1000], "hedge-cap": ["hedge", "max_position_usd", 1000], "primary-fee": ["primary", "taker_fee_bps", 0], "hedge-fee": ["hedge", "taker_fee_bps", 2.25], "primary-symbol": ["primary", "symbol", ""], "hedge-symbol": ["hedge", "symbol", ""]};
 
 function sectionLines(text, section) {
   const lines = text.split("\n");
@@ -414,6 +416,7 @@ function refreshStrategyFields() {
   const bps = element("strategy-mode").value === "bps";
   const rolling = element("bps-levels").value === "rolling";
   element("bps-settings").hidden = !bps;
+  element("bps-profit-settings").hidden = element("bps-exit-mode").value !== "profit";
   for (const id of ["midline", "upper", "lower"]) element(id).closest("label").hidden = bps;
   for (const id of ["bps-window", "bps-min-valid", "bps-entry-percentile", "bps-exit-percentile"]) element(id).closest("label").hidden = !rolling;
   for (const id of ["bps-entry", "bps-exit"]) element(id).closest("label").hidden = rolling;
@@ -490,7 +493,7 @@ element("task-strategy").addEventListener("change", () => applyStrategy().catch(
 for (const [id, [section, key]] of Object.entries(fieldMap)) {
   element(id).addEventListener("input", () => {
     const value = element(id).value;
-    if (["primary-order-type", "strategy-mode", "bps-levels", "bps-direction"].includes(id)) {
+    if (["primary-order-type", "strategy-mode", "bps-levels", "bps-direction", "bps-exit-mode"].includes(id)) {
       setYaml(section, key, value);
       if (id === "bps-direction") {
         for (const [entryId, exitId] of [["bps-entry", "bps-exit"], ["bps-entry-percentile", "bps-exit-percentile"]]) {

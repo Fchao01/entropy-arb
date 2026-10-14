@@ -412,7 +412,8 @@ class Engine:
             if premium is None or (premium > entry if strategy.long else premium < entry):
                 return False
             current = strategy.plan(buy, sell, quote=price)
-            return current is not None and current.qty >= plan.qty - self._step / 2
+            return (current is not None and current.qty >= plan.qty - self._step / 2
+                    and strategy.entry_check(current, buy, sell, strategy.locked_entry, strategy.locked_exit))
         current, _ = self._maker_plan_at(buy, sell, plan.buy_notional, price)
         return current is not None and current.qty >= plan.qty - self._step / 2
 
@@ -482,7 +483,7 @@ class Engine:
             return
         now = time.time()
         exiting = self.bps_strategy and self.bps_strategy.entries and (
-            self.bps_strategy.closing or self.bps_strategy.exit_reached(self.premium_bps()))
+            self.bps_strategy.exit_ready(now))
         if not exiting and now - self.last_trade_ts < cfg.cooldown_sec:
             self._schedule_poke(cfg.cooldown_sec - (now - self.last_trade_ts))
             return
@@ -627,7 +628,7 @@ class Engine:
                  direction, buy.name, plan.qty, plan.buy_limit, sell.name,
                  plan.sell_limit, plan.buy_notional, plan.q_max_notional,
                  plan.marginal_premium_bps, plan.exp_edge_usd)
-        slip = cfg.leg_slippage_bps / 1e4
+        slip = (cfg.leg_slippage_bps if plan.slippage_bps is None else plan.slippage_bps) / 1e4
         buy_bound = buy.px_round(plan.buy_limit * (1 + slip), round_up=False)
         sell_bound = sell.px_round(plan.sell_limit * (1 - slip), round_up=True)
         send_started = time.perf_counter()
@@ -650,6 +651,11 @@ class Engine:
         primary_before = self.entropy.position
         self.execution_stats.record(buy.key, True, bfill, binfo.get("avg_px"), buy.position, self._step)
         self.execution_stats.record(sell.key, False, sfill, sinfo.get("avg_px"), sell.position, self._step)
+        if self.bps_strategy:
+            self.bps_strategy.record_fill(buy, True, bfill, binfo.get("avg_px"), plan.buy_fee,
+                                          opening=plan.action == "bps_open")
+            self.bps_strategy.record_fill(sell, False, sfill, sinfo.get("avg_px"), plan.sell_fee,
+                                          opening=plan.action == "bps_open")
         if binfo.get("unresolved") or sinfo.get("unresolved"):
             self.execution_stats.unresolved = True
         primary_fill = bfill if buy is self.entropy else sfill
@@ -859,6 +865,9 @@ class Engine:
                     fill = info["filled_base"]
                     self.execution_stats.record(v.key, not is_sell, fill, info.get("avg_px"),
                                                 v.position, self._step)
+                    if self.bps_strategy:
+                        self.bps_strategy.record_fill(v, not is_sell, fill, info.get("avg_px"),
+                                                      v.fee_bps / 1e4, opening=False)
                     v.position += -fill if is_sell else fill
                     if fill:
                         px = info.get("avg_px") or limit

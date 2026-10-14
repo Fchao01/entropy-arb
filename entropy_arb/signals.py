@@ -28,14 +28,20 @@ def execution_signals(engine):
             ('open', strategy.long, state['entry_bps'], '<=' if strategy.long else '>='),
             ('close', not strategy.long, state['exit_bps'], '>=' if strategy.long else '<='),
         ):
+            trigger = premium
+            basis = 'mid_premium_bps'
+            if action == 'close' and strategy.profit_mode and state['cost_known']:
+                trigger = state['exit_quote']['net_bps'] if state['exit_quote'] else None
+                target, comparison = strategy.cfg.bps_take_profit_bps, '>='
+                basis = 'cycle_net_return_bps'
             buy, sell = (primary, hedge) if primary_buy else (hedge, primary)
-            gap = None if premium is None or target is None else (
-                target - premium if comparison == '<=' else premium - target)
+            gap = None if trigger is None or target is None else (
+                target - trigger if comparison == '<=' else trigger - target)
             rows.append(dict(action=action, primary_buy=primary_buy, buy=buy.name, sell=sell.name,
                              order_type='maker' if maker and action == 'open' else 'taker',
                              executable_premium_bps=executable_premium(
                                  engine, buy, sell, maker=maker and action == 'open'),
-                             trigger_premium_bps=premium, hurdle_bps=target,
+                             trigger_premium_bps=trigger, hurdle_bps=target, trigger_basis=basis,
                              comparison=comparison, gap_bps=gap,
                              has_position=bool(strategy.entries),
                              closing=bool(strategy.closing)))

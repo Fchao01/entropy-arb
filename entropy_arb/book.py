@@ -149,6 +149,7 @@ class ArbPlan:
     action: str = "arb"
     cycle_entry_bps: Optional[float] = None
     cycle_exit_bps: Optional[float] = None
+    slippage_bps: Optional[float] = None
 
     @property
     def gross_edge_usd(self) -> float:

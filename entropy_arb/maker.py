@@ -98,7 +98,8 @@ async def execute_primary_maker(engine, buy, sell, plan):
                       and remainder * levels[0][0] >= max(cfg.min_order_notional, hedge.min_quote)):
                     px, _ = walk_depth(levels, remainder)
                     is_buy = not primary_buy
-                    slip = cfg.hedge_slippage_bps / 1e4
+                    slip = (cfg.hedge_slippage_bps if plan.slippage_bps is None
+                            else min(cfg.hedge_slippage_bps, plan.slippage_bps)) / 1e4
                     bound = hedge.px_round(px * (1 + slip if is_buy else 1 - slip),
                                            round_up=not is_buy)
                     engine._record_send(hedge)
