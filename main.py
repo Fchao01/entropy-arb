@@ -31,6 +31,7 @@ import sys
 from entropy_arb.config import (DEFAULT_PRIMARY_VENUE, HEDGE_VENUES,
                                 PRIMARY_VENUES, ConfigError, load_config)
 from entropy_arb.engine import Engine
+from entropy_arb.run_logs import reset_run_log
 
 
 def setup_logging(level: str, log_file: str = None,
@@ -41,10 +42,8 @@ def setup_logging(level: str, log_file: str = None,
         "%(asctime)s.%(msecs)03d %(levelname)-7s %(name)s: %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S")
     if log_file:
-        d = os.path.dirname(log_file)
-        if d:
-            os.makedirs(d, exist_ok=True)
-        h = logging.FileHandler(log_file)
+        reset_run_log(log_file)
+        h = logging.FileHandler(log_file, mode="w", encoding="utf-8")
     else:
         h = logging.StreamHandler()
     h.setFormatter(fmt)

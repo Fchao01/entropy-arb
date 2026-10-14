@@ -31,6 +31,7 @@ from dotenv import dotenv_values
 from .config import ConfigError, HEDGE_VENUES, PRIMARY_VENUES, _SCHEMA, _validate, load_config
 from .market_monitor import MonitorRules, MultiVenueMonitor, discover_candidates
 from .privacy import PrivateLogCapture
+from .run_logs import reset_run_log
 from .thresholds import (ThresholdDataError, ThresholdSuggestion, daily_window,
                          analysis_report, load_window_rows, prune_csv, suggest)
 from .telegram import TelegramNotifier, test_message
@@ -952,6 +953,7 @@ class TaskManager:
                 if previous_id not in self.running and self.instance_locked(previous_id):
                     raise ConsoleError("上一进程仍在退出，请等待并核对服务器进程与持仓")
             public, rendered, cfg, credentials = self.validate(task, task_id)
+            log_path = self.configured_path(cfg.log_file)
             if task.get("started_at"):
                 previous = load_config(str(self.task_snapshot_config(task)),
                                        symbol=task["symbol"], primary_venue=task["primary"],
@@ -977,6 +979,8 @@ class TaskManager:
                     raise ConsoleError(f"同币种交易所组合已运行：{other['name']}")
                 if self.configured_path(cfg.recorder_csv) == runtime.get("recorder_path"):
                     raise ConsoleError(f"行情 CSV 路径与运行任务「{other['name']}」相同；请在 YAML 中设置独立 recorder.csv")
+                if log_path == runtime.get("log_path"):
+                    raise ConsoleError(f"运行日志路径与运行任务「{other['name']}」相同；请在 YAML 中设置独立 logging.file，避免清空另一任务日志")
                 if other["mode"] == task["mode"] == "live":
                     if markets & runtime["markets"]:
                         raise ConsoleError(f"交易市场与实盘任务「{other['name']}」重叠，请勿同时管理同一持仓")
@@ -1002,6 +1006,10 @@ class TaskManager:
                        "--control-file", str(directory / "control.json")]
             if task["mode"] == "record":
                 command.append("--record-only")
+            # Reset before spawning: clearing in watch() could erase the
+            # child's first log messages. The CLI also resets its own file.
+            reset_run_log(log_path)
+            reset_run_log(directory / "events.log")
             process = await asyncio.create_subprocess_exec(
                 *command, cwd=self.root, env=env, stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT, start_new_session=True)
@@ -1010,6 +1018,7 @@ class TaskManager:
                         exit_code=None, manual_paused=False)
             runtime = dict(process=process, markets=markets, signers=signers,
                            recorder_path=self.configured_path(cfg.recorder_csv),
+                           log_path=log_path,
                            grace=cfg.shutdown_grace_sec + 20,
                            log_capture=PrivateLogCapture(credentials))
             self.running[task_id] = runtime
@@ -1034,7 +1043,7 @@ class TaskManager:
 
     async def watch(self, task_id, runtime):
         process = runtime["process"]
-        log_path = self.log_path(self.tasks[task_id])
+        log_path = runtime["log_path"]
         log_path.parent.mkdir(parents=True, exist_ok=True)
         capture = runtime["log_capture"]
         try:

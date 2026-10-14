@@ -129,6 +129,72 @@ def test_multiple_symbols_and_duplicate_combo(tmp_path):
     asyncio.run(scenario())
 
 
+def test_restart_resets_only_run_logs_and_keeps_csv_and_position_state(tmp_path):
+    async def scenario():
+        manager = manager_at(tmp_path)
+        try:
+            source = STRATEGY + "logging:\n  file: logs/{symbol}/engine.log\n"
+            task = await manager.put({**payload(), "config": source})
+            task_id = task["id"]
+            await manager.start(task_id)
+            watcher = manager.running[task_id]["watcher"]
+            await asyncio.sleep(0.15)
+            await manager.stop(task_id)
+            await asyncio.wait_for(watcher, 3)
+            log_path = manager.log_path(manager.get(task_id))
+            assert "fake worker ready ETH" in log_path.read_text()
+            events = manager.directory(task_id) / "events.log"
+            events.write_text("previous run events\n")
+            for path in (log_path, events):
+                for index in (1, 2, 3):
+                    path.with_name(f"{path.name}.{index}").write_text("previous backup")
+            preserved = [manager.minute_path(manager.get(task_id)),
+                         manager.trades_path(manager.get(task_id)),
+                         log_path.with_suffix(".bps-state.json")]
+            for path in preserved:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("preserve history and costs")
+            (manager.root / "main.py").write_text(
+                FAKE_WORKER.replace("fake worker ready", "second run ready"))
+            await manager.start(task_id)
+            watcher = manager.running[task_id]["watcher"]
+            await asyncio.sleep(0.15)
+            await manager.stop(task_id)
+            await asyncio.wait_for(watcher, 3)
+            assert "second run ready ETH" in log_path.read_text()
+            assert "fake worker ready" not in log_path.read_text()
+            assert "previous run events" not in events.read_text()
+            assert "START" in events.read_text() and "EXIT" in events.read_text()
+            for path in (log_path, events):
+                assert all(not path.with_name(f"{path.name}.{index}").exists()
+                           for index in (1, 2, 3))
+            assert all(path.read_text() == "preserve history and costs" for path in preserved)
+        finally:
+            await manager.close()
+    asyncio.run(scenario())
+
+
+def test_shared_log_path_is_rejected_before_clearing_active_log(tmp_path):
+    async def scenario():
+        manager = manager_at(tmp_path)
+        try:
+            source = STRATEGY + "logging:\n  file: logs/shared/engine.log\n"
+            first = await manager.put({**payload("ETH"), "config": source})
+            second = await manager.put({**payload("BTC"), "config": source})
+            await manager.start(first["id"])
+            await asyncio.sleep(0.15)
+            path = manager.log_path(manager.get(first["id"]))
+            before = path.read_text()
+            assert "fake worker ready ETH" in before
+            with pytest.raises(ConsoleError, match="运行日志路径"):
+                await manager.start(second["id"])
+            assert path.read_text() == before
+            assert second["id"] not in manager.running
+        finally:
+            await manager.close()
+    asyncio.run(scenario())
+
+
 def test_default_allows_more_than_twelve_running_tasks(tmp_path):
     async def scenario():
         manager = manager_at(tmp_path)
