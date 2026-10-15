@@ -131,8 +131,8 @@ books with age/spread, positions and caps, equity and session PnL, the
 executable premium of each direction against its full hurdle (fees and
 inventory surcharge included, ● = armed), recorder progress, the last
 executions, and a tail of the log (the full log goes to `logging.file`,
-default `logs/{symbol}/engine.log`). Each start clears the previous log and
-numbered backups while preserving CSV history and BPS position state.
+default `logs/{symbol}/engine.log`). Each start appends to the existing log
+without clearing numbered backups, CSV history or BPS position state.
 It works in `--record-only` too. Add `--cn` to
 display the dashboard in Chinese. Use `--no-dashboard` for plain console
 logs (nohup/systemd — off-terminal runs fall back automatically), or set

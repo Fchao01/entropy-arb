@@ -129,11 +129,12 @@ def test_multiple_symbols_and_duplicate_combo(tmp_path):
     asyncio.run(scenario())
 
 
-def test_restart_resets_only_run_logs_and_keeps_csv_and_position_state(tmp_path):
+@pytest.mark.parametrize("configured_log", [True, False])
+def test_restart_preserves_run_logs_backups_csv_and_position_state(tmp_path, configured_log):
     async def scenario():
         manager = manager_at(tmp_path)
         try:
-            source = STRATEGY + "logging:\n  file: logs/{symbol}/engine.log\n"
+            source = STRATEGY + ("logging:\n  file: logs/{symbol}/engine.log\n" if configured_log else "")
             task = await manager.put({**payload(), "config": source})
             task_id = task["id"]
             await manager.start(task_id)
@@ -144,7 +145,9 @@ def test_restart_resets_only_run_logs_and_keeps_csv_and_position_state(tmp_path)
             log_path = manager.log_path(manager.get(task_id))
             assert "fake worker ready ETH" in log_path.read_text()
             events = manager.directory(task_id) / "events.log"
-            events.write_text("previous run events\n")
+            with events.open("a") as handle:
+                handle.write("previous run events\n")
+            previous_events = events.read_text()
             for path in (log_path, events):
                 for index in (1, 2, 3):
                     path.with_name(f"{path.name}.{index}").write_text("previous backup")
@@ -162,11 +165,12 @@ def test_restart_resets_only_run_logs_and_keeps_csv_and_position_state(tmp_path)
             await manager.stop(task_id)
             await asyncio.wait_for(watcher, 3)
             assert "second run ready ETH" in log_path.read_text()
-            assert "fake worker ready" not in log_path.read_text()
-            assert "previous run events" not in events.read_text()
-            assert "START" in events.read_text() and "EXIT" in events.read_text()
+            assert "fake worker ready ETH" in log_path.read_text()
+            assert events.read_text().startswith(previous_events)
+            assert events.read_text().count("START") == 2
+            assert events.read_text().count("EXIT") == 2
             for path in (log_path, events):
-                assert all(not path.with_name(f"{path.name}.{index}").exists()
+                assert all(path.with_name(f"{path.name}.{index}").read_text() == "previous backup"
                            for index in (1, 2, 3))
             assert all(path.read_text() == "preserve history and costs" for path in preserved)
         finally:
@@ -174,7 +178,7 @@ def test_restart_resets_only_run_logs_and_keeps_csv_and_position_state(tmp_path)
     asyncio.run(scenario())
 
 
-def test_shared_log_path_is_rejected_before_clearing_active_log(tmp_path):
+def test_shared_log_path_is_rejected_without_changing_active_log(tmp_path):
     async def scenario():
         manager = manager_at(tmp_path)
         try:
