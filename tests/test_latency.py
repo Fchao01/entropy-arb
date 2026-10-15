@@ -56,6 +56,31 @@ def test_latency_history_is_bounded():
     assert result["max_ms"] == pytest.approx(599, abs=.001)
 
 
+def test_message_gaps_distinguish_quiet_updates_from_delayed_delivery():
+    timing = BookLatency()
+    timing.record(STAMP * 1000, received_at=STAMP + .005, received_mono=10,
+                  data_timestamp=(STAMP - .02) * 1e6)
+    assert timing.snapshot()["receive_gap_ms"] is None
+    timing.record((STAMP + .5) * 1000, received_at=STAMP + .505, received_mono=10.5,
+                  data_timestamp=(STAMP + .48) * 1e6)
+    info = timing.snapshot()
+    assert info["source_gap_ms"] == pytest.approx(500, abs=.001)
+    assert info["receive_gap_ms"] == pytest.approx(500, abs=.001)
+    assert info["delay_ms"] == pytest.approx(5, abs=.001)
+    # Publication continues at 50 ms, but delivery takes 250 ms between frames.
+    timing.record((STAMP + .55) * 1000, received_at=STAMP + .755, received_mono=10.75,
+                  data_timestamp=(STAMP + .53) * 1e6)
+    info = timing.snapshot()
+    assert info["source_gap_ms"] == pytest.approx(50, abs=.001)
+    assert info["receive_gap_ms"] == pytest.approx(250, abs=.001)
+    assert info["data_gap_ms"] == pytest.approx(50, abs=.001)
+    assert info["delay_ms"] == pytest.approx(205, abs=.001)
+    assert info["p99_ms"] == pytest.approx(205, abs=.001)
+    assert info["ws_over_100ms_pct"] == pytest.approx(100 / 3)
+    assert info["receive_gap_p99_ms"] == pytest.approx(500)
+    assert info["source_gap_p99_ms"] == pytest.approx(500, abs=.001)
+
+
 def test_lighter_uses_envelope_and_committer_timestamps_only_on_accepted_books():
     async def run():
         book = OrderBook()

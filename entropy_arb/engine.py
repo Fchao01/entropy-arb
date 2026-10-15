@@ -102,6 +102,7 @@ class Engine:
         self.loop_lag_ms = 0.0
         self.loop_lag_max_ms = 0.0
         self.ws_gate_blocks = 0
+        self.ws_gate_blocks_by_reason = {}
         self.last_ws_gate_reason = None
         # proactive per-venue send budget: timestamps of recent order sends
         self._sends: Dict[str, deque] = {}
@@ -275,8 +276,9 @@ class Engine:
                  cfg.upper_bps, cfg.lower_bps)
         log.info("primary execution=%s maker_timeout=%.2fs primary_fee=%.3fbps",
                  cfg.primary_order_type, cfg.maker_timeout_sec, cfg.primary_fee_bps)
-        log.info("[WS GATE] max_data_age=%.1fms (0 disables); applies to new risk, reductions/hedges remain available",
-                 cfg.max_ws_age_ms)
+        log.info("[WS GATE] max_ws_receive_delay=%.1fms max_book_age=%.1fms "
+                 "(0 disables each independently); applies to new risk, reductions/hedges remain available",
+                 cfg.max_ws_delay_ms, cfg.max_ws_age_ms)
 
         if self.record_only:
             log.warning("RECORD-ONLY — collecting minute data, no strategy, "
@@ -496,10 +498,12 @@ class Engine:
         if self._reduces_both(buy, sell, plan):
             return True
         for venue in (buy, sell):
-            reason = venue.book.latency.entry_block_reason(self.cfg.max_ws_age_ms)
-            if reason:
+            block = venue.book.latency.entry_block(self.cfg.max_ws_age_ms, self.cfg.max_ws_delay_ms)
+            if block:
                 self.ws_gate_blocks += 1
-                self.last_ws_gate_reason = f"{venue.name}: {reason}"
+                kind = block["kind"]
+                self.ws_gate_blocks_by_reason[kind] = self.ws_gate_blocks_by_reason.get(kind, 0) + 1
+                self.last_ws_gate_reason = f"{venue.name}: [{kind}] {block['reason']}"
                 self._skiplog("[WS GATE] new order blocked: %s", self.last_ws_gate_reason)
                 return False
         return True

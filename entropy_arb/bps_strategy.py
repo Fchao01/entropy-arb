@@ -536,7 +536,7 @@ class BpsStrategy:
             return None
         if not eng._entry_data_allowed(eng.entropy, eng.hedge):
             eng._armed[eng.direction_key(not self.long)] = None
-            self.reason = '等待 100ms 内的双腿行情' if cfg.max_ws_age_ms == 100 else '等待新鲜的双腿行情'
+            self.reason = f'等待行情保护通过 · {eng.last_ws_gate_reason}'
             return None
         if self.profit_mode and not self.entries and now - self.last_closed_at < cfg.bps_cycle_cooldown_sec:
             self.reason = '平仓后冷却中'

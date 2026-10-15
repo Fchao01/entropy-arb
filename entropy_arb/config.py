@@ -167,6 +167,8 @@ class Config:
     primary_order_type: str = "taker"
     maker_timeout_sec: float = 5.0
     max_ws_age_ms: float = 100.0
+    # Legacy YAML retains its book-age guard; the separate receive gate is opt-in.
+    max_ws_delay_ms: float = 0.0
     strategy_mode: str = "threshold"
     bps_levels: str = "rolling"
     bps_direction: str = "long_primary"
@@ -289,6 +291,7 @@ _SCHEMA: Dict[str, Any] = {
         "rate_limit_pause_sec": float,
         "staleness_sec": float,
         "max_ws_age_ms": float,
+        "max_ws_delay_ms": float,
         "reconcile_sec": float,
         "venue_probe_sec": float,
         "http_keepalive_sec": float,
@@ -589,6 +592,9 @@ def load_config(config_file: str = "config.yaml", env_file: str = ".env", *,
     max_ws_age_ms = float(_get(raw, "execution", "max_ws_age_ms", 100.0))
     if not math.isfinite(max_ws_age_ms) or max_ws_age_ms < 0:
         raise ConfigError("execution.max_ws_age_ms must be finite and >= 0 / 行情年龄门槛必须是有限非负数")
+    max_ws_delay_ms = float(_get(raw, "execution", "max_ws_delay_ms", 0.0))
+    if not math.isfinite(max_ws_delay_ms) or max_ws_delay_ms < 0:
+        raise ConfigError("execution.max_ws_delay_ms must be finite and >= 0 / WS 接收延迟门槛必须是有限非负数")
 
     return Config(
         symbol=symbol,
@@ -597,6 +603,7 @@ def load_config(config_file: str = "config.yaml", env_file: str = ".env", *,
         primary_order_type=primary_order_type,
         maker_timeout_sec=maker_timeout_sec,
         max_ws_age_ms=max_ws_age_ms,
+        max_ws_delay_ms=max_ws_delay_ms,
         strategy_mode=strategy_mode,
         bps_levels=bps["levels"], bps_direction=bps["direction"],
         bps_entry=float(bps["entry_bps"]), bps_exit=float(bps["exit_bps"]),

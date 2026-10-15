@@ -85,3 +85,19 @@ def test_status_snapshot_exports_signals_for_record_only_monitor(tmp_path):
     result = snapshot(engine)
     assert result['execution_signals'] == execution_signals(engine)
     assert result['execution_signals']['rows'][0]['primary_buy'] is True
+
+
+def test_status_exposes_independent_guard_limits_and_block_kinds(tmp_path):
+    from entropy_arb.status import snapshot
+    engine = engine_at(tmp_path)
+    engine.cfg.max_ws_delay_ms, engine.cfg.max_ws_age_ms = 100, 150
+    engine.record_only = True
+    for venue, conf in zip(engine.venues.values(), (engine.cfg.primary, engine.cfg.hedge)):
+        venue.conf = conf
+        venue.equity = venue.free = None
+    assert not engine._entry_data_allowed(engine.entropy, engine.hedge)
+    guard = snapshot(engine)['ws_entry_guard']
+    assert guard['max_delay_ms'] == 100 and guard['max_age_ms'] == 150
+    assert guard['blocked_checks_by_reason'] == {'missing_ws_timestamp': 1}
+    assert guard['venue_blocks'][engine.entropy.key]['kind'] == 'missing_ws_timestamp'
+    assert 'missing WS message timestamp' in guard['venues'][engine.entropy.key]

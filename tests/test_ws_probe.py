@@ -24,6 +24,7 @@ def test_probe_reports_all_samples_and_preserves_clock_errors():
     assert result["data_age_at_receive_ms"]["p50"] == pytest.approx(50, abs=.001)
     assert result["data_age_at_receive_ms"]["p99"] == pytest.approx(220, abs=.001)
     assert result["data_over_100ms_pct"] == 20
+    assert result["ws_over_100ms_pct"] == 20
     assert result["clock_warning"]
     book.clear()
     samples.observe(book)
@@ -73,5 +74,6 @@ def test_probe_handles_diffs_and_resubscription_without_trading(monkeypatch):
     assert result["error"] is None and result["samples"] == 3
     assert result["data_age_at_receive_ms"]["p99"] >= 200
     assert result["data_over_100ms_pct"] == pytest.approx(100 / 3, abs=.001)
+    assert result["source_gap_ms"] is not None and result["receive_gap_ms"] is not None
     assert options[0]["compression"] is None and options[0]["max_queue"] == 4
     assert [row["type"] for row in sent] == ["subscribe", "unsubscribe", "subscribe", "pong"]

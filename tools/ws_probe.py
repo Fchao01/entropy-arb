@@ -33,6 +33,8 @@ class Samples:
         self.message_delays = []
         self.data_ages = []
         self.apply_times = []
+        self.source_gaps = []
+        self.receive_gaps = []
 
     def observe(self, book):
         if not book.ready:
@@ -46,12 +48,20 @@ class Samples:
             self.message_delays.append((latency.received_at - latency.source_ts) * 1000)
         if latency.apply_ms is not None:
             self.apply_times.append(latency.apply_ms)
+        if latency.source_gap_ms is not None:
+            self.source_gaps.append(latency.source_gap_ms)
+        if latency.receive_gap_ms is not None:
+            self.receive_gaps.append(latency.receive_gap_ms)
 
     def report(self):
         count = len(self.data_ages)
         return dict(samples=count, message_delay_ms=distribution(self.message_delays),
                     data_age_at_receive_ms=distribution(self.data_ages),
                     parse_and_apply_ms=distribution(self.apply_times),
+                    source_gap_ms=distribution(self.source_gaps),
+                    receive_gap_ms=distribution(self.receive_gaps),
+                    ws_over_100ms_pct=(round(100 * sum(round(x, 3) > 100 for x in self.message_delays)
+                                             / len(self.message_delays), 3) if self.message_delays else None),
                     data_over_100ms_pct=(round(100 * sum(round(x, 3) > 100 for x in self.data_ages)
                                                / count, 3) if count else None),
                     clock_warning=any(x < -1 for x in self.message_delays + self.data_ages))

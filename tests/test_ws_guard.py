@@ -56,6 +56,59 @@ def test_missing_future_clock_and_explicit_disable():
     assert book.entry_block_reason(0) is None
 
 
+def test_quiet_book_has_small_receive_delay_but_large_current_age():
+    book = BookLatency()
+    book.record((STAMP - .005) * 1000, received_at=STAMP,
+                received_mono=time.perf_counter() - .5,
+                data_timestamp=(STAMP - .03) * 1e6)
+    assert book.receive_delay_ms() == pytest.approx(5, abs=.001)
+    assert book.entry_block(1000, 100) is None
+    assert book.entry_block(150, 100)["kind"] == "book_age"
+    assert book.entry_block(0, 100) is None
+
+
+def test_slow_receive_and_old_book_are_independent_and_labelled():
+    book = BookLatency()
+    book.record((STAMP - .232) * 1000, received_at=STAMP,
+                data_timestamp=(STAMP - .270) * 1e6)
+    assert book.entry_block(1000, 100)["kind"] == "ws_delay"
+    assert book.entry_block(150, 0)["kind"] == "book_age"
+    assert book.entry_block(0, 0) is None
+    assert "232.0ms" in book.entry_block(0, 100)["reason"]
+    # A fast envelope must not hide old data when the book-age guard is enabled.
+    book.record((STAMP - .005) * 1000, received_at=STAMP,
+                data_timestamp=(STAMP - .400) * 1e6)
+    assert book.entry_block(150, 100)["kind"] == "book_age"
+
+
+def test_receive_only_guard_requires_timestamp_and_checks_clock():
+    book = BookLatency()
+    assert book.entry_block(0, 100)["kind"] == "missing_ws_timestamp"
+    book.record((STAMP + .020) * 1000, received_at=STAMP)
+    assert book.entry_block(0, 100)["kind"] == "clock"
+
+
+def test_slow_receive_prevents_both_sends_and_counts_reason():
+    async def run():
+        eng = engine()
+        eng.cfg.max_ws_age_ms, eng.cfg.max_ws_delay_ms = 1000, 100
+        eng.ensure_async_state()
+        plan, _ = eng._plan(eng.hedge, eng.entropy, 100)
+        stamp(eng.entropy.book, age=232)
+        eng._timed_send = AsyncMock()
+        with pytest.raises(StaleMarketData):
+            await eng._execute(eng.hedge, eng.entropy, plan)
+        eng._timed_send.assert_not_awaited()
+        assert eng.ws_gate_blocks_by_reason == {"ws_delay": 1}
+        assert "[ws_delay]" in eng.last_ws_gate_reason
+        eng.hedge.position, eng.entropy.position = -plan.qty, plan.qty
+        assert eng._entry_data_allowed(eng.hedge, eng.entropy, plan)
+        eng.cfg.primary_order_type = "maker"
+        eng.hedge.position = eng.entropy.position = 0
+        assert not eng._maker_quote_valid(eng.hedge, eng.entropy, plan, plan.sell_limit)
+    asyncio.run(run())
+
+
 def test_stale_diff_is_merged_and_heartbeat_does_not_bypass_gate():
     eng = engine()
     book = eng.entropy.book
@@ -125,11 +178,13 @@ def test_maker_quote_becomes_invalid_when_either_leg_ages():
     assert not eng._maker_quote_valid(eng.hedge, eng.entropy, plan, plan.sell_limit)
 
 
-def test_bps_blocks_open_but_allows_reduce_only_exit(tmp_path):
+@pytest.mark.parametrize("receive_limit", [0, 100])
+def test_bps_blocks_open_but_allows_reduce_only_exit(tmp_path, receive_limit):
     async def run():
         eng = engine_at(tmp_path)
         eng.ensure_async_state()
         eng.cfg.max_ws_age_ms = 100
+        eng.cfg.max_ws_delay_ms = receive_limit
         assert eng._scan(time.time()) is None  # no exchange timestamp
         for venue in eng.venues.values():
             stamp(venue.book)

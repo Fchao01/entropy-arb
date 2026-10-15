@@ -41,16 +41,21 @@ def snapshot(engine) -> dict:
         })
     ready = engine.markets_ready
     live = ready and not engine.record_only
+    guard_blocks = {v.key: v.book.latency.entry_block(engine.cfg.max_ws_age_ms,
+                                                     engine.cfg.max_ws_delay_ms)
+                    for v in engine.venues.values()}
     result = {
         "updated_at": now, "started_at": engine.start_ts,
         "event_loop_lag_ms": engine.loop_lag_ms,
         "event_loop_lag_max_ms": engine.loop_lag_max_ms,
         "ws_entry_guard": {
             "max_age_ms": engine.cfg.max_ws_age_ms,
+            "max_delay_ms": engine.cfg.max_ws_delay_ms,
             "blocked_checks": engine.ws_gate_blocks,
+            "blocked_checks_by_reason": dict(engine.ws_gate_blocks_by_reason),
             "last_reason": engine.last_ws_gate_reason,
-            "venues": {v.key: v.book.latency.entry_block_reason(engine.cfg.max_ws_age_ms)
-                       for v in engine.venues.values()},
+            "venues": {key: block["reason"] if block else None for key, block in guard_blocks.items()},
+            "venue_blocks": guard_blocks,
         },
         "config_path": getattr(engine, "config_path", None),
         "thresholds": {
