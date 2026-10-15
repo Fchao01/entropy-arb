@@ -32,70 +32,91 @@ def percentile(values, percent):
 
 
 def rolling_levels(cfg, now, *, include_coverage=False):
-    """Use valid completed bars inside the time window, allowing data gaps."""
+    """Reuse completed history; by default select the latest N valid minute bars."""
     end = int(now // 60) * 60
-    start = end - cfg.bps_window_minutes * 60
-    points = {}
-    present, low_samples, invalid_premium, before_source = set(), set(), set(), set()
+    records = cfg.bps_history_mode == 'records'
+    start = 0 if records else end - cfg.bps_window_minutes * 60
     with open(cfg.recorder_csv, newline='') as handle:
         header = next(csv.reader(handle))
         metadata = prepare_recorder_source(cfg.recorder_csv, recorder_source(cfg))
         since = float(metadata['since'])
-        # Read a bounded tail in the background, even for long-running CSVs.
+        # Recorder CSVs append chronologically. Expand the bounded tail when
+        # invalid/duplicate/source-filtered rows hide the required valid bars.
         size = os.fstat(handle.fileno()).st_size
-        offset = max(0, size - cfg.bps_window_minutes * 2048 - 8192)
-        if offset:
+        tail_bytes = cfg.bps_window_minutes * 2048 + 8192
+        while True:
+            offset = max(0, size - tail_bytes)
+            points = {}
+            present, low_samples, invalid_premium, before_source = set(), set(), set(), set()
             handle.seek(offset)
-            handle.readline()
-        for values in csv.reader(handle):
-            row = dict(zip(header, values))
-            try:
-                ts = float(row['minute_ts'])
-                if not (math.isfinite(ts) and ts % 60 == 0 and start <= ts < end):
-                    continue
-                present.add(int(ts))
-                if ts < since:
-                    before_source.add(int(ts))
-                    continue
+            if offset:
+                handle.readline()
+            else:
+                next(csv.reader(handle))
+            for values in csv.reader(handle):
+                row = dict(zip(header, values))
                 try:
-                    samples = int(row['samples'])
-                except (KeyError, ValueError, TypeError):
-                    low_samples.add(int(ts))
+                    ts = float(row['minute_ts'])
+                    if not (math.isfinite(ts) and ts % 60 == 0 and start <= ts < end):
+                        continue
+                    ts = int(ts)
+                    present.add(ts)
+                    if ts < since:
+                        before_source.add(ts)
+                        continue
+                    try:
+                        samples = int(row['samples'])
+                    except (KeyError, ValueError, TypeError):
+                        low_samples.add(ts)
+                        continue
+                    try:
+                        value = float(row['premium_close_bps'])
+                    except (KeyError, ValueError, TypeError):
+                        invalid_premium.add(ts)
+                        continue
+                    if samples < 10:
+                        low_samples.add(ts)
+                    elif not math.isfinite(value):
+                        invalid_premium.add(ts)
+                    else:
+                        points[ts] = value
+                except (KeyError, ValueError, TypeError, OverflowError):
                     continue
-                try:
-                    value = float(row['premium_close_bps'])
-                except (KeyError, ValueError, TypeError):
-                    invalid_premium.add(int(ts))
-                    continue
-                if samples < 10:
-                    low_samples.add(int(ts))
-                elif not math.isfinite(value):
-                    invalid_premium.add(int(ts))
-                else:
-                    points[int(ts)] = value
-            except (KeyError, ValueError, TypeError, OverflowError):
-                continue
-    # min_coverage_pct is accepted for old YAMLs, but no longer gates signals.
+            if not records or offset == 0 or len(points) >= cfg.bps_window_minutes:
+                break
+            tail_bytes *= 2
+    if records:
+        points = {ts: points[ts] for ts in sorted(points)[-cfg.bps_window_minutes:]}
     required = min(cfg.bps_window_minutes, cfg.bps_min_valid_minutes)
+    first = min(points) if points else None
+    last = max(points) if points else None
+    if records:
+        missing = int((last - first) // 60 + 1) - len(points) if points else 0
+    else:
+        missing = cfg.bps_window_minutes - len(present)
     coverage = dict(valid_minutes=len(points), required_minutes=required,
                     coverage_pct=len(points) / cfg.bps_window_minutes * 100,
-                    missing_minutes=cfg.bps_window_minutes - len(present),
+                    missing_minutes=missing,
                     low_sample_minutes=len(low_samples - points.keys()),
                     invalid_premium_minutes=len(invalid_premium - points.keys()),
-                    source_filtered_minutes=len(before_source - points.keys()))
+                    source_filtered_minutes=len(before_source - points.keys()),
+                    history_mode=cfg.bps_history_mode,
+                    history_start_ts=first, history_end_ts=last + 60 if last is not None else None,
+                    latest_data_age_sec=max(0, now - last - 60) if last is not None else None)
     if len(points) < required:
+        source_note = '历史有效记录，不要求连续' if records else '最近时间窗口，允许缺口'
         raise ValueError(f'等待有效分钟数据 {len(points)}/{cfg.bps_window_minutes}；'
                          f'至少 {required} 条；缺行 {coverage["missing_minutes"]} 分钟，'
                          f'采样不足 {coverage["low_sample_minutes"]} 分钟，'
                          f'无效溢价 {coverage["invalid_premium_minutes"]} 分钟，'
                          f'来源过滤 {coverage["source_filtered_minutes"]} 分钟；'
-                         f'允许缺口，读取 {cfg.recorder_csv}')
+                         f'{source_note}，读取 {cfg.recorder_csv}')
     values = list(points.values())
     entry = percentile(values, cfg.bps_entry_percentile)
     exit = percentile(values, cfg.bps_exit_percentile)
     if (cfg.bps_direction == 'long_primary' and entry >= exit
             or cfg.bps_direction == 'short_primary' and entry <= exit):
-        raise ValueError('窗口内溢价波动不足，开平仓点位重合')
+        raise ValueError('历史溢价波动不足，开平仓点位重合')
     result = entry, exit, end
     if include_coverage:
         return (*result, coverage)
@@ -380,13 +401,14 @@ class BpsStrategy:
                         self.reason = '持仓中' if self.entries else '等待开仓点位'
                     log.info('[BPS LEVELS] csv=%s window=%d valid=%d/%d coverage=%.1f%% '
                              'required=%d missing=%d low_samples=%d invalid_premium=%d source_filtered=%d '
-                             'entry=%+.3f exit=%+.3f bps frozen_exit=%s',
+                             'entry=%+.3f exit=%+.3f bps frozen_exit=%s history_mode=%s history_start=%s history_end=%s',
                              self.cfg.recorder_csv, self.cfg.bps_window_minutes,
                              coverage['valid_minutes'], self.cfg.bps_window_minutes,
                              coverage['coverage_pct'], coverage['required_minutes'],
                              coverage['missing_minutes'], coverage['low_sample_minutes'],
                              coverage['invalid_premium_minutes'], coverage['source_filtered_minutes'],
-                             entry, exit, self.locked_exit)
+                             entry, exit, self.locked_exit, self.cfg.bps_history_mode,
+                             coverage.get('history_start_ts'), coverage.get('history_end_ts'))
                 except (OSError, ValueError, StopIteration, KeyError, TypeError, csv.Error) as error:
                     self.entry = self.exit = None
                     self.coverage = None
@@ -405,7 +427,7 @@ class BpsStrategy:
                 self.engine._update_evt.set()  # Hold deadlines are checked even during quiet books.
 
     def snapshot(self):
-        return dict(levels=self.cfg.bps_levels, direction=self.cfg.bps_direction,
+        return dict(levels=self.cfg.bps_levels, history_mode=self.cfg.bps_history_mode, direction=self.cfg.bps_direction,
                     exit_mode=self.cfg.bps_exit_mode, exit_quote=self.exit_quote() if self.profit_mode else None,
                     take_profit_bps=self.cfg.bps_take_profit_bps, stop_loss_bps=self.cfg.bps_stop_loss_bps,
                     max_hold_sec=self.cfg.bps_max_hold_sec,

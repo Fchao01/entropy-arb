@@ -217,6 +217,7 @@ def test_restart_restores_frozen_levels_but_rejects_unconfirmed_or_foreign_posit
 def test_rolling_reads_yaml_csv_only_completed_minutes_and_checks_coverage(tmp_path):
     eng = engine_at(tmp_path)
     cfg = eng.cfg
+    cfg.bps_history_mode = "time"
     cfg.bps_window_minutes = 4
     cfg.bps_entry_percentile, cfg.bps_exit_percentile = 0, 100
     now = 6000
@@ -275,9 +276,8 @@ def test_rolling_reuses_recent_legacy_history_without_recorder_warmup(tmp_path, 
     assert rolling_levels(cfg, now + 20) == (-10, -6, now)
     assert json.loads(metadata_path.read_text()) == dict(version=2, source=recorder_source(cfg), since=0)
     assert csv_path.read_bytes() == original_csv
-    # Historical rows outside the configured wall-clock window are not backfilled.
-    with pytest.raises(ValueError, match='0/4'):
-        rolling_levels(cfg, now + 300)
+    # Record-count mode reuses the same completed history after downtime.
+    assert rolling_levels(cfg, now + 300) == (-10, -6, now + 300)
 
 
 def test_rolling_preserves_known_source_boundary_across_restart(tmp_path):

@@ -14,9 +14,10 @@ bps:
   execution_slippage_bps: 1.0
   cost_buffer_bps: 0.5
   levels: rolling
+  history_mode: records   # 最新有效分钟记录，可跨时段复用历史
   direction: long_primary
   window_minutes: 120
-  min_valid_minutes: 30   # 允许缺口；最近窗口内至少 30 条，窗口不足 30 分钟时要求填满
+  min_valid_minutes: 30   # 允许缺口；至少 30 条有效历史，参考记录数不足 30 时按参考数计算
   entry_percentile: 10
   exit_percentile: 75
   add_interval_sec: 60

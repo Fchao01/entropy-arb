@@ -169,6 +169,7 @@ class Config:
     strategy_mode: str = "threshold"
     spread_bps: float = 1.0
     bps_levels: str = "rolling"
+    bps_history_mode: str = "records"
     bps_direction: str = "long_primary"
     bps_entry: float = -9.0
     bps_exit: float = -6.0
@@ -224,7 +225,7 @@ class Config:
 _SCHEMA: Dict[str, Any] = {
     "strategy": {"mode": str, "spread_bps": float},
     "bps": {
-        "levels": str, "direction": str,
+        "levels": str, "direction": str, "history_mode": str,
         "entry_bps": float, "exit_bps": float,
         "window_minutes": int, "min_coverage_pct": float, "min_valid_minutes": int,
         "entry_percentile": float, "exit_percentile": float,
@@ -509,7 +510,7 @@ def load_config(config_file: str = "config.yaml", env_file: str = ".env", *,
     if not math.isfinite(spread_bps) or spread_bps < 0:
         raise ConfigError("strategy.spread_bps must be finite and >= 0")
     bps = dict(raw.get("bps") or {})
-    bps_defaults = dict(levels="rolling", direction="long_primary", entry_bps=-9.0,
+    bps_defaults = dict(levels="rolling", history_mode="records", direction="long_primary", entry_bps=-9.0,
                         exit_bps=-6.0, window_minutes=120, min_coverage_pct=80.0, min_valid_minutes=30, entry_percentile=10.0,
                         exit_percentile=75.0, add_interval_sec=60.0,
                         max_position_usd=1000.0, cost_buffer_bps=0.0,
@@ -517,6 +518,8 @@ def load_config(config_file: str = "config.yaml", env_file: str = ".env", *,
                         max_hold_sec=900.0, min_gap_bps=2.0, entry_confirm_sec=2.0,
                         cycle_cooldown_sec=30.0, add_step_bps=0.5, execution_slippage_bps=1.0)
     bps = {**bps_defaults, **bps}
+    if bps["history_mode"] not in ("records", "time"):
+        raise ConfigError("bps.history_mode must be records or time")
     if bps["levels"] not in ("manual", "rolling") or bps["direction"] not in ("long_primary", "short_primary"):
         raise ConfigError("bps levels must be manual/rolling; direction must be long_primary/short_primary")
     if bps["exit_mode"] not in ("levels", "profit"):
@@ -602,6 +605,7 @@ def load_config(config_file: str = "config.yaml", env_file: str = ".env", *,
         strategy_mode=strategy_mode,
         spread_bps=spread_bps,
         bps_levels=bps["levels"], bps_direction=bps["direction"],
+        bps_history_mode=bps["history_mode"],
         bps_entry=float(bps["entry_bps"]), bps_exit=float(bps["exit_bps"]),
         bps_window_minutes=bps["window_minutes"],
         bps_min_coverage_pct=float(bps["min_coverage_pct"]),

@@ -1,4 +1,4 @@
-"""Missing minutes are allowed inside the rolling window, never backfilled."""
+"""Explicit time-window mode allows gaps without backfilling older bars."""
 import asyncio
 import csv
 import logging
@@ -8,7 +8,13 @@ import pytest
 
 from entropy_arb.bps_strategy import rolling_levels
 from entropy_arb.config import load_config
-from test_bps_strategy import engine_at
+from test_bps_strategy import engine_at as make_engine
+
+
+def time_window_engine(tmp_path):
+    engine = make_engine(tmp_path)
+    engine.cfg.bps_history_mode = "time"
+    return engine
 
 
 def write_bars(cfg, rows):
@@ -25,7 +31,7 @@ def bars(now, count):
 
 
 def test_119_of_120_bars_work_immediately_with_existing_yaml_default(tmp_path):
-    cfg = engine_at(tmp_path).cfg
+    cfg = time_window_engine(tmp_path).cfg
     now = 60000
     write_bars(cfg, bars(now, 119))
     assert rolling_levels(cfg, now + 10) == (-10, -6, now)
@@ -38,7 +44,7 @@ def test_119_of_120_bars_work_immediately_with_existing_yaml_default(tmp_path):
 
 
 def test_accepts_30_and_rejects_29_without_old_or_future_backfill(tmp_path):
-    cfg = engine_at(tmp_path).cfg
+    cfg = time_window_engine(tmp_path).cfg
     now = 60000
     valid = bars(now, 30)
     extras = [(now - 121 * 60, -999, 60), (now, 999, 60), (now + 60, 999, 60),
@@ -53,7 +59,7 @@ def test_accepts_30_and_rejects_29_without_old_or_future_backfill(tmp_path):
 
 
 def test_minimum_minutes_is_configurable_and_short_window_requires_all_bars(tmp_path):
-    cfg = engine_at(tmp_path).cfg
+    cfg = time_window_engine(tmp_path).cfg
     now = 60000
     cfg.bps_min_valid_minutes = 120
     write_bars(cfg, bars(now, 119))
@@ -75,7 +81,7 @@ def test_yaml_loads_count_default_and_override(tmp_path):
 
 def test_refresh_deduplicates_waiting_logs_even_when_scan_changes_reason(tmp_path, caplog):
     async def scenario():
-        engine = engine_at(tmp_path)
+        engine = time_window_engine(tmp_path)
         engine.ensure_async_state()
         engine.cfg.bps_levels = 'rolling'
         engine.cfg.bps_min_valid_minutes = 120
@@ -106,7 +112,7 @@ def test_refresh_deduplicates_waiting_logs_even_when_scan_changes_reason(tmp_pat
 
 def test_refresh_reports_coverage_in_log_and_snapshot(tmp_path, caplog):
     async def scenario():
-        engine = engine_at(tmp_path)
+        engine = time_window_engine(tmp_path)
         engine.ensure_async_state()
         engine.cfg.bps_levels = 'rolling'
         now = 60000
@@ -130,7 +136,7 @@ def test_refresh_reports_coverage_in_log_and_snapshot(tmp_path, caplog):
 
 
 def test_82_bars_are_ready_even_with_legacy_80_percent_setting(tmp_path):
-    cfg = engine_at(tmp_path).cfg
+    cfg = time_window_engine(tmp_path).cfg
     cfg.bps_min_coverage_pct = 80
     now = 60000
     write_bars(cfg, bars(now, 82))
@@ -144,7 +150,7 @@ def test_82_bars_are_ready_even_with_legacy_80_percent_setting(tmp_path):
 
 
 def test_waiting_message_explains_missing_and_low_sample_minutes(tmp_path):
-    cfg = engine_at(tmp_path).cfg
+    cfg = time_window_engine(tmp_path).cfg
     now = 60000
     write_bars(cfg, bars(now, 25) + [(now - 60, -6, 9), (now - 120, 'nan', 60)])
     with pytest.raises(ValueError, match=r'25/120.*至少 30.*缺行 93.*采样不足 1.*无效溢价 1'):
