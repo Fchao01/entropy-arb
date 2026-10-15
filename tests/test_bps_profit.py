@@ -130,7 +130,6 @@ def test_multiple_entries_do_not_reset_holding_clock_and_cooldown_is_enforced(tm
         eng = profit_engine(tmp_path)
         eng.ensure_async_state()
         eng.cfg.max_order_notional = 100
-        eng.cfg.bps_max_entries = 2
         await execute(eng, eng._scan(time.time()))
         first_start = eng.bps_strategy.costs.started_at
         books(eng, -10)
@@ -154,7 +153,6 @@ def test_unknown_legacy_cost_is_not_zero_cost_profit_and_cannot_be_added(tmp_pat
         eng = profit_engine(tmp_path)
         eng.ensure_async_state()
         eng.entropy.position, eng.hedge.position = 1, -1
-        eng.cfg.bps_max_entries = 100
         eng.bps_strategy.restore()
         assert eng.bps_strategy.exit_quote() is None
         assert eng._scan(time.time()) is None

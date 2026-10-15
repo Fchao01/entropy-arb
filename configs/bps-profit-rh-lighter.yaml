@@ -19,7 +19,6 @@ bps:
   min_valid_minutes: 30   # 允许缺口；最近窗口内至少 30 条，窗口不足 30 分钟时要求填满
   entry_percentile: 10
   exit_percentile: 75
-  max_entries: 1
   add_interval_sec: 60
   max_position_usd: 1000
 thresholds:

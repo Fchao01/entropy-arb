@@ -16,7 +16,6 @@ bps:
   min_coverage_pct: 80
   entry_percentile: 10
   exit_percentile: 75
-  max_entries: 1
   add_interval_sec: 60
   max_position_usd: 1000
 ```
@@ -29,7 +28,7 @@ bps:
 
 CSV 旁的 `.source.json` 记录主腿、对冲腿、市场名称及可用历史起点。没有来源记录的旧 CSV，以及上一版仅记录升级时间的来源记录，会按 YAML 指定路径复用历史，日志提示 `CSV legacy history reused`。这一兼容操作假定旧历史与当前 YAML 的交易所、市场及主/对冲腿方向一致；旧格式无法验证这一点，曾混用路径或对调主腿的历史应先分开存放。升级后的来源记录使用 version 2；此后已记录的交易所/市场或腿方向变化会保留新起点，不混用变化前的数据，也不删除原 CSV。来源记录损坏时拒绝使用，不自动猜测。
 
-第一批成交后，本轮开仓点位和平仓点位固定。之后滚动计算的点位留给下一轮；允许加仓时仍按本轮点位判断。`max_entries` 包括首次开仓，只有实际增加了配对持仓才占用批次；`max_position_usd` 是每条腿的总持仓上限，同时受原有两条腿各自的仓位上限和单笔下单上限约束。
+第一批成交后，本轮开仓点位和平仓点位固定。之后滚动计算的点位留给下一轮；允许加仓时仍按本轮点位判断。不再限制开仓批次数量，旧 YAML 的 `max_entries` 为兼容保留读取但不再生效；`max_position_usd` 是每条腿的总持仓上限，同时受原有两条腿各自的仓位上限和单笔下单上限约束。
 
 ## 手动点位
 
@@ -41,7 +40,6 @@ bps:
   direction: long_primary
   entry_bps: -9
   exit_bps: -6
-  max_entries: 1
   max_position_usd: 1000
 ```
 

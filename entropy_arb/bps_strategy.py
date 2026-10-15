@@ -416,7 +416,7 @@ class BpsStrategy:
                     exit_bps=self.locked_exit if self.entries else self.exit,
                     window_minutes=self.cfg.bps_window_minutes, window_end=self.window_end,
                     min_valid_minutes=self.cfg.bps_min_valid_minutes, coverage=self.coverage,
-                    entries=self.entries, max_entries=self.cfg.bps_max_entries,
+                    entries=self.entries,
                     adopted_position=self.adopted_position, awaiting_levels=self.awaiting_levels,
                     closing=self.closing, reason=self.reason,
                     data_path=self.cfg.recorder_csv)
@@ -549,7 +549,7 @@ class BpsStrategy:
             eng._armed[key] = None
             self.reason = '持仓中，等待平仓点位' if self.entries else '等待开仓点位'
             return None
-        if self.entries >= cfg.bps_max_entries or now - self.last_entry_at < cfg.bps_add_interval_sec:
+        if now - self.last_entry_at < cfg.bps_add_interval_sec:
             return None
         if self.profit_mode and self.entries and self.last_add_premium is not None:
             improved = self.last_add_premium - premium if self.long else premium - self.last_add_premium

@@ -354,7 +354,7 @@ class Dashboard:
             direction = "BUY primary / SELL hedge" if eng.bps_strategy.long else "SELL primary / BUY hedge"
             entry, exit = state["entry_bps"], state["exit_bps"]
             content = Text(f"{direction}\nmid premium {eng.premium_bps()} bps\n"
-                           f"entry {entry} / exit {exit} bps · {state['entries']}/{state['max_entries']} batches\n"
+                           f"entry {entry} / exit {exit} bps · {state['entries']} filled batches · no batch limit\n"
                            f"{state['reason']}\nCSV: {state['data_path']}")
             if state['exit_mode'] == 'profit':
                 quote = state['exit_quote']

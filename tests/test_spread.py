@@ -17,7 +17,6 @@ def spread_engine():
     engine.cfg.spread_bps = 1
     engine.cfg.premium_persist_sec = 100
     engine.cfg.inventory_scale_bps = 100
-    engine.cfg.bps_max_entries = 1
     engine.cfg.bps_take_profit_bps = 0
     engine.cfg.take_fraction = 1
     engine.cfg.leg_slippage_bps = 0

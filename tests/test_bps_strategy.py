@@ -103,24 +103,50 @@ def test_bps_opens_by_levels_without_estimated_return_guard(tmp_path):
     asyncio.run(scenario())
 
 
-def test_batch_limits_and_total_position_cap(tmp_path):
+@pytest.mark.parametrize('long', [True, False])
+@pytest.mark.parametrize('profit', [True, False])
+def test_repeated_entries_are_limited_by_position_not_batches(tmp_path, long, profit):
     async def scenario():
-        eng = engine_at(tmp_path)
+        eng = engine_at(tmp_path, long=long)
         eng.ensure_async_state()
         eng.cfg.max_order_notional = 100
-        eng.cfg.bps_max_entries = 3
         eng.cfg.bps_max_position_usd = 220
+        if profit:
+            eng.cfg.bps_exit_mode = 'profit'
+            eng.cfg.bps_entry_confirm_sec = eng.cfg.bps_cycle_cooldown_sec = 0
+            eng.cfg.bps_min_gap_bps = eng.cfg.bps_add_step_bps = 0
+            eng.cfg.bps_execution_slippage_bps = 0
+        for _ in range(3):
+            books(eng, -9.5 if long else 9.5)
+            candidate = eng._scan(time.time())
+            assert candidate
+            await execute(eng, candidate)
+        assert eng.bps_strategy.entries == 3
+        assert abs(eng.entropy.position) * eng.entropy.book.mid() <= 220.001
+        books(eng, -9.5 if long else 9.5)
+        assert eng._scan(time.time()) is None
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize('legacy_limit', [0, 1])
+def test_old_yaml_batch_limit_does_not_block_repeated_entries(tmp_path, legacy_limit):
+    async def scenario():
+        path = tmp_path / 'legacy.yaml'
+        path.write_text('strategy:\n  mode: bps\nbps:\n  levels: manual\n'
+                        f'  max_entries: {legacy_limit}\n  add_interval_sec: 0\n'
+                        'execution:\n  premium_persist_sec: 0\n  leg_slippage_bps: 0\n')
+        eng = engine_at(tmp_path)
+        eng.cfg = load_config(str(path), symbol='SNDK', hedge_venue='lighter', credential_env={})
+        eng.cfg.log_file = str(tmp_path / 'engine.log')
+        eng.cfg.max_order_notional = 100
+        eng.bps_strategy = BpsStrategy(eng)
+        eng.ensure_async_state()
         for _ in range(3):
             books(eng, -9.5)
             candidate = eng._scan(time.time())
             assert candidate
             await execute(eng, candidate)
         assert eng.bps_strategy.entries == 3
-        assert abs(eng.entropy.position) * eng.entropy.book.mid() <= 220.001
-        books(eng, -9.5)
-        assert eng._scan(time.time()) is None
-        eng.cfg.bps_max_entries = 4
-        assert eng._scan(time.time()) is None  # cap prevents another minimum-size add
     asyncio.run(scenario())
 
 
@@ -317,7 +343,7 @@ def test_web_bps_skips_daily_threshold_without_restart_or_prune(tmp_path):
 
 
 @pytest.mark.parametrize('extra', ['  direction: long_primary\n  entry_bps: -6\n  exit_bps: -9',
-                                   '  window_minutes: 1', '  max_entries: 0',
+                                   '  window_minutes: 1',
                                    '  cost_buffer_bps: -1', '  exit_percentile: .nan',
                                    '  min_coverage_pct: 0', '  min_coverage_pct: -1',
                                    '  min_coverage_pct: 101', '  min_coverage_pct: .nan',

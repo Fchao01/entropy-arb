@@ -1107,10 +1107,10 @@ class Engine:
                    if self.recorder else "")
             if self.bps_strategy:
                 state = self.bps_strategy.snapshot()
-                log.info("[status] %s | prem %s bps | BPS entry=%s exit=%s batches=%d/%d %s "
+                log.info("[status] %s | prem %s bps | BPS entry=%s exit=%s filled_batches=%d %s "
                          "| pos %s net %+.6g | trades %d hedges %d | MTM %s%s%s",
                          books, prem_s, state["entry_bps"], state["exit_bps"], state["entries"],
-                         state["max_entries"], state["reason"], pos, net, self.trades, self.hedges,
+                         state["reason"], pos, net, self.trades, self.hedges,
                          f"${pnl:+.4f}" if pnl is not None else "—", rec,
                          " *** HALTED ***" if self.halted else "")
                 continue

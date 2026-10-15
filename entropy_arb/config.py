@@ -177,7 +177,6 @@ class Config:
     bps_min_valid_minutes: int = 30
     bps_entry_percentile: float = 10.0
     bps_exit_percentile: float = 75.0
-    bps_max_entries: int = 1
     bps_add_interval_sec: float = 60.0
     bps_max_position_usd: float = 1000.0
     bps_cost_buffer_bps: float = 0.0
@@ -229,7 +228,8 @@ _SCHEMA: Dict[str, Any] = {
         "entry_bps": float, "exit_bps": float,
         "window_minutes": int, "min_coverage_pct": float, "min_valid_minutes": int,
         "entry_percentile": float, "exit_percentile": float,
-        "max_entries": int, "add_interval_sec": float,
+        "max_entries": int,  # Legacy YAML key, accepted but no longer limits entries.
+        "add_interval_sec": float,
         "max_position_usd": float, "cost_buffer_bps": float,
         "exit_mode": str, "take_profit_bps": float, "stop_loss_bps": float,
         "max_hold_sec": float, "min_gap_bps": float, "entry_confirm_sec": float,
@@ -511,7 +511,7 @@ def load_config(config_file: str = "config.yaml", env_file: str = ".env", *,
     bps = dict(raw.get("bps") or {})
     bps_defaults = dict(levels="rolling", direction="long_primary", entry_bps=-9.0,
                         exit_bps=-6.0, window_minutes=120, min_coverage_pct=80.0, min_valid_minutes=30, entry_percentile=10.0,
-                        exit_percentile=75.0, max_entries=1, add_interval_sec=60.0,
+                        exit_percentile=75.0, add_interval_sec=60.0,
                         max_position_usd=1000.0, cost_buffer_bps=0.0,
                         exit_mode="levels", take_profit_bps=1.0, stop_loss_bps=10.0,
                         max_hold_sec=900.0, min_gap_bps=2.0, entry_confirm_sec=2.0,
@@ -523,8 +523,8 @@ def load_config(config_file: str = "config.yaml", env_file: str = ".env", *,
         raise ConfigError("bps.exit_mode must be levels or profit")
     if any(isinstance(v, (int, float)) and not math.isfinite(v) for v in bps.values()):
         raise ConfigError("bps parameters must be finite")
-    if not 2 <= bps["window_minutes"] <= 10080 or (strategy_mode == "bps" and bps["max_entries"] < 1):
-        raise ConfigError("bps.window_minutes must be in [2, 10080]; max_entries must be >= 1")
+    if not 2 <= bps["window_minutes"] <= 10080:
+        raise ConfigError("bps.window_minutes must be in [2, 10080]")
     if not 0 < bps["min_coverage_pct"] <= 100:
         raise ConfigError("bps.min_coverage_pct must be in (0, 100] / 最低数据覆盖率必须大于 0 且不超过 100%")
     if not 2 <= bps["min_valid_minutes"] <= 10080:
@@ -608,7 +608,7 @@ def load_config(config_file: str = "config.yaml", env_file: str = ".env", *,
         bps_min_valid_minutes=int(bps["min_valid_minutes"]),
         bps_entry_percentile=float(bps["entry_percentile"]),
         bps_exit_percentile=float(bps["exit_percentile"]),
-        bps_max_entries=bps["max_entries"], bps_add_interval_sec=float(bps["add_interval_sec"]),
+        bps_add_interval_sec=float(bps["add_interval_sec"]),
         bps_max_position_usd=float(bps["max_position_usd"]),
         bps_cost_buffer_bps=float(bps["cost_buffer_bps"]),
         bps_exit_mode=bps["exit_mode"],
