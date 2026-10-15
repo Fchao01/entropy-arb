@@ -205,7 +205,7 @@ def test_profit_signal_reports_net_return_basis(tmp_path):
 def test_profit_config_validation(tmp_path, field, value):
     import yaml
     path = tmp_path / 'config.yaml'
-    path.write_text(yaml.safe_dump({'strategy': {'mode': 'bps'}, 'bps': {field: value}}))
+    path.write_text(yaml.safe_dump({'strategy': {'mode': 'bps'}, 'bps': {'exit_mode': 'profit', field: value}}))
     with pytest.raises(ConfigError):
         load_config(str(path), symbol='ETH', hedge_venue='lighter', credential_env={})
 

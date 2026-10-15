@@ -1,0 +1,31 @@
+# 双向逐档可成交价差，严格超过 1 bps；不保证扣费后盈利。
+# 费率请按实际账户填写；仓位和下单金额均为示例。
+strategy:
+  mode: spread
+  spread_bps: 1.0
+primary:
+  venue: lighter-rh
+  taker_fee_bps: 0.0
+  max_position_usd: 1000
+  max_orders_per_min: 30
+hedge:
+  taker_fee_bps: 0.0
+  max_position_usd: 1000
+  max_orders_per_min: 30
+sizing:
+  take_fraction: 0.5
+  max_order_notional_usd: 500
+  min_order_notional_usd: 10
+execution:
+  primary_order_type: taker
+  cooldown_sec: 0
+  leg_slippage_bps: 10.0
+  hedge_slippage_bps: 5.0
+recorder:
+  enabled: true
+  csv: logs/{primary}-{hedge}/{symbol}/minutes.csv
+logging:
+  level: INFO
+  status_interval_sec: 30
+  trades_csv: logs/{primary}-{hedge}/{symbol}/trades.csv
+  file: logs/{primary}-{hedge}/{symbol}/engine.log

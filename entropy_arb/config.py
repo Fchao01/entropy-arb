@@ -167,6 +167,7 @@ class Config:
     primary_order_type: str = "taker"
     maker_timeout_sec: float = 5.0
     strategy_mode: str = "threshold"
+    spread_bps: float = 1.0
     bps_levels: str = "rolling"
     bps_direction: str = "long_primary"
     bps_entry: float = -9.0
@@ -222,7 +223,7 @@ class Config:
 
 # Schema: nested dict of key -> type (or nested dict). Unknown keys are errors.
 _SCHEMA: Dict[str, Any] = {
-    "strategy": {"mode": str},
+    "strategy": {"mode": str, "spread_bps": float},
     "bps": {
         "levels": str, "direction": str,
         "entry_bps": float, "exit_bps": float,
@@ -502,8 +503,11 @@ def load_config(config_file: str = "config.yaml", env_file: str = ".env", *,
                               "交易所币种名称不能为空")
 
     strategy_mode = _get(raw, "strategy", "mode", "threshold")
-    if strategy_mode not in ("threshold", "bps"):
-        raise ConfigError("strategy.mode must be threshold or bps")
+    if strategy_mode not in ("threshold", "bps", "spread"):
+        raise ConfigError("strategy.mode must be threshold, bps or spread")
+    spread_bps = float(_get(raw, "strategy", "spread_bps", 1.0))
+    if not math.isfinite(spread_bps) or spread_bps < 0:
+        raise ConfigError("strategy.spread_bps must be finite and >= 0")
     bps = dict(raw.get("bps") or {})
     bps_defaults = dict(levels="rolling", direction="long_primary", entry_bps=-9.0,
                         exit_bps=-6.0, window_minutes=120, min_coverage_pct=80.0, min_valid_minutes=30, entry_percentile=10.0,
@@ -519,7 +523,7 @@ def load_config(config_file: str = "config.yaml", env_file: str = ".env", *,
         raise ConfigError("bps.exit_mode must be levels or profit")
     if any(isinstance(v, (int, float)) and not math.isfinite(v) for v in bps.values()):
         raise ConfigError("bps parameters must be finite")
-    if not 2 <= bps["window_minutes"] <= 10080 or bps["max_entries"] < 1:
+    if not 2 <= bps["window_minutes"] <= 10080 or (strategy_mode == "bps" and bps["max_entries"] < 1):
         raise ConfigError("bps.window_minutes must be in [2, 10080]; max_entries must be >= 1")
     if not 0 < bps["min_coverage_pct"] <= 100:
         raise ConfigError("bps.min_coverage_pct must be in (0, 100] / 最低数据覆盖率必须大于 0 且不超过 100%")
@@ -531,8 +535,10 @@ def load_config(config_file: str = "config.yaml", env_file: str = ".env", *,
                  "cycle_cooldown_sec", "add_step_bps", "execution_slippage_bps"):
         if bps[name] < 0:
             raise ConfigError(f"bps.{name} must be >= 0")
-    if bps["take_profit_bps"] <= 0 or bps["execution_slippage_bps"] >= 10000:
-        raise ConfigError("bps.take_profit_bps must be > 0; execution_slippage_bps must be < 10000")
+    if bps["take_profit_bps"] < 0 or bps["execution_slippage_bps"] >= 10000:
+        raise ConfigError("bps.take_profit_bps must be >= 0; execution_slippage_bps must be < 10000")
+    if strategy_mode == "bps" and bps["exit_mode"] == "profit" and bps["take_profit_bps"] == 0:
+        raise ConfigError("bps.take_profit_bps must be > 0 in profit mode / 净收益平仓模式的止盈必须大于 0")
     for name in ("entry_percentile", "exit_percentile"):
         if not 0 <= bps[name] <= 100:
             raise ConfigError("bps percentiles must be in [0, 100]")
@@ -541,7 +547,7 @@ def load_config(config_file: str = "config.yaml", env_file: str = ".env", *,
     if (long and entry >= exit) or (not long and entry <= exit):
         raise ConfigError("bps long entry must be below exit; short entry must be above exit / 开平仓点位顺序不正确")
     thr = raw.get("thresholds") or {}
-    if strategy_mode == "bps":
+    if strategy_mode in ("bps", "spread"):
         thr = {"midline_bps": 0, "upper_bps": 4, "lower_bps": 4, **thr}
     for k in ("midline_bps", "upper_bps", "lower_bps"):
         if k not in thr:
@@ -581,6 +587,8 @@ def load_config(config_file: str = "config.yaml", env_file: str = ".env", *,
     primary_order_type = _get(raw, "execution", "primary_order_type", "taker")
     if primary_order_type not in ("taker", "maker"):
         raise ConfigError("execution.primary_order_type must be taker or maker / 主腿成交方式必须为 taker 或 maker")
+    if strategy_mode == "spread" and primary_order_type != "taker":
+        raise ConfigError("spread strategy requires taker / 实际可成交价差策略使用吃单成交")
     maker_timeout_sec = float(_get(raw, "execution", "maker_timeout_sec", 5.0))
     if not math.isfinite(maker_timeout_sec) or not 0 < maker_timeout_sec <= 60:
         raise ConfigError("execution.maker_timeout_sec must be in (0, 60] / 挂单等待时间必须大于 0 且不超过 60 秒")
@@ -592,6 +600,7 @@ def load_config(config_file: str = "config.yaml", env_file: str = ".env", *,
         primary_order_type=primary_order_type,
         maker_timeout_sec=maker_timeout_sec,
         strategy_mode=strategy_mode,
+        spread_bps=spread_bps,
         bps_levels=bps["levels"], bps_direction=bps["direction"],
         bps_entry=float(bps["entry_bps"]), bps_exit=float(bps["exit_bps"]),
         bps_window_minutes=bps["window_minutes"],

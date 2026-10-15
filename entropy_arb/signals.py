@@ -46,14 +46,16 @@ def execution_signals(engine):
                              has_position=bool(strategy.entries),
                              closing=bool(strategy.closing)))
     else:
+        spread = engine.cfg.strategy_mode == 'spread'
         for primary_buy in (False, True):
             buy, sell = (primary, hedge) if primary_buy else (hedge, primary)
             premium = executable_premium(engine, buy, sell, maker=maker)
-            hurdle = (engine._eff_threshold(buy, sell) + engine.cfg.primary_fee_bps
-                      + hedge.fee_bps)
+            hurdle = engine._eff_threshold(buy, sell)
+            if not spread:
+                hurdle += engine.cfg.primary_fee_bps + hedge.fee_bps
             rows.append(dict(action='trade', primary_buy=primary_buy, buy=buy.name, sell=sell.name,
                              order_type='maker' if maker else 'taker',
                              executable_premium_bps=premium, trigger_premium_bps=premium,
-                             hurdle_bps=hurdle, comparison='>=',
+                             hurdle_bps=hurdle, comparison='>' if spread else '>=',
                              gap_bps=None if premium is None else premium - hurdle))
-    return dict(mode='bps' if strategy else 'threshold', rows=rows)
+    return dict(mode=engine.cfg.strategy_mode, rows=rows)

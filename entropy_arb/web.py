@@ -369,8 +369,8 @@ class TaskManager:
         cfg = load_config(str(config_path), symbol=task["symbol"],
                           primary_venue=task["primary"], hedge_venue=task["hedge"],
                           credential_env=self.environment(task["profile"]))
-        if cfg.strategy_mode == "bps":
-            raise ConsoleError("bps 策略使用独立开平仓点位，请在策略配置中修改；不使用每日三个套利阈值")
+        if cfg.strategy_mode in ("bps", "spread"):
+            raise ConsoleError("bps 策略使用独立开平仓点位；实际价差策略使用固定价差门槛；请在策略配置中修改，不使用每日三个套利阈值")
         window = daily_window()
         csv_path = self.configured_path(cfg.recorder_csv)
         if not csv_path.exists():
@@ -439,11 +439,11 @@ class TaskManager:
         cfg = load_config(str(config_path), symbol=task["symbol"],
                           primary_venue=task["primary"], hedge_venue=task["hedge"],
                           credential_env=self.environment(task["profile"]))
-        if cfg.strategy_mode == "bps":
+        if cfg.strategy_mode in ("bps", "spread"):
             self._write_auto_status(task_id, {
                 "status": "skipped", "window": window.label,
                 "window_start": window.start_ts, "window_end": window.end_ts,
-                "checked_at": time.time(), "reason": "bps 策略自行更新点位，不应用每日套利阈值",
+                "checked_at": time.time(), "reason": "独立策略不应用每日套利阈值（bps 点位 / 实际价差门槛）",
             })
             return
         csv_path = self.configured_path(cfg.recorder_csv)
@@ -683,7 +683,8 @@ class TaskManager:
         finite_config(raw)
         _validate(raw, _SCHEMA)
         thresholds = raw.get("thresholds", {})
-        if any(key not in thresholds for key in ("midline_bps", "upper_bps", "lower_bps")):
+        if (raw.get("strategy", {}).get("mode") != "spread"
+                and any(key not in thresholds for key in ("midline_bps", "upper_bps", "lower_bps"))):
             raise ConsoleError("YAML 必须包含 midline_bps、upper_bps、lower_bps 阈值")
         return raw
 

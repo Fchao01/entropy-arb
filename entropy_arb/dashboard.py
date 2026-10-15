@@ -338,6 +338,17 @@ class Dashboard:
 
     def _signal_panel(self):
         eng, cfg = self.eng, self.eng.cfg
+        if cfg.strategy_mode == "spread":
+            from .signals import execution_signals
+            signals = execution_signals(eng)
+            content = Text(f"实际可成交价差 > {cfg.spread_bps:g} bps\n"
+                           "双向交易 · 不限批次 · 按仓位上限控制\n")
+            for row in (signals or {}).get('rows', []):
+                value = row['executable_premium_bps']
+                quote = f"{value:+.3f} bps" if value is not None else "等待盘口"
+                content.append(f"买 {row['buy']} / 卖 {row['sell']}: {quote}\n")
+            content.append("手续费另计；价差达标不保证盈利")
+            return Panel(content, title="实际价差交易", box=box.ROUNDED)
         if eng.bps_strategy:
             state = eng.bps_strategy.snapshot()
             direction = "BUY primary / SELL hedge" if eng.bps_strategy.long else "SELL primary / BUY hedge"

@@ -270,6 +270,9 @@ class Engine:
                  cfg.upper_bps, cfg.lower_bps)
         log.info("primary execution=%s maker_timeout=%.2fs primary_fee=%.3fbps",
                  cfg.primary_order_type, cfg.maker_timeout_sec, cfg.primary_fee_bps)
+        if cfg.strategy_mode == "spread":
+            log.info("[SPREAD] executable price spread > %.3f bps; both directions; "
+                     "no history, batch limit or profit target; fees reported separately", cfg.spread_bps)
 
         if self.record_only:
             log.warning("RECORD-ONLY — collecting minute data, no strategy, "
@@ -344,6 +347,8 @@ class Engine:
 
         selling entropy: executable premium must clear midline + upper;
         buying entropy: the reverse premium must clear lower - midline."""
+        if self.cfg.strategy_mode == "spread":
+            return self.cfg.spread_bps
         if sell.key == "entropy":
             base = self.cfg.midline_bps + self.cfg.upper_bps
         else:
@@ -373,6 +378,8 @@ class Engine:
             min_base=self._min_base,
             min_notional=self._min_notional,
             size_step=self._step,
+            gross_threshold_bps=(self.cfg.spread_bps
+                                 if self.cfg.strategy_mode == "spread" else None),
         )
 
     def _maker_plan_at(self, buy, sell, cap_notional, price):
@@ -564,14 +571,17 @@ class Engine:
                 self._armed[dkey] = None
                 continue
             armed = self._armed.get(dkey)
+            persistence = 0.0 if cfg.strategy_mode == "spread" else cfg.premium_persist_sec
             if armed is None:
                 # premium persistence: only fire if the edge survives
                 # premium_persist_sec (filters one-tick phantoms)
                 self._armed[dkey] = now
-                self._schedule_poke(cfg.premium_persist_sec)
-                continue
-            if now - armed < cfg.premium_persist_sec:
-                self._schedule_poke(cfg.premium_persist_sec - (now - armed))
+                armed = now
+                if persistence > 0 or cfg.strategy_mode != "spread":
+                    self._schedule_poke(persistence)
+                    continue
+            if now - armed < persistence:
+                self._schedule_poke(persistence - (now - armed))
                 continue
             if plan is None:
                 continue
@@ -613,7 +623,17 @@ class Engine:
         if self.halted:
             return False
         cfg = self.cfg
-        inv_bps = 0.0 if self.bps_strategy else self._inv_add_bps(buy, sell)
+        if cfg.strategy_mode == "spread":
+            ask = buy.book.best_ask()
+            if not ask:
+                return False
+            cap = min(cfg.max_order_notional, plan.buy_notional, plan.qty * ask,
+                      self._headroom(buy, sell, ask))
+            plan, _ = self._plan(buy, sell, cap)
+            if plan is None:
+                return False
+        inv_bps = (0.0 if self.bps_strategy or cfg.strategy_mode == "spread"
+                   else self._inv_add_bps(buy, sell))
         direction = self.direction_key(sell.key == self.entropy.key)
         closing = plan.action == "bps_close"
         if plan.action != "arb":

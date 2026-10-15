@@ -90,7 +90,8 @@ def floor_step(x: float, step: float) -> float:
 
 
 def crossable_base(asks: List[Level], bids: List[Level], threshold: float,
-                   buy_fee: float = 0.0, sell_fee: float = 0.0) -> Tuple[float, float]:
+                   buy_fee: float = 0.0, sell_fee: float = 0.0, *,
+                   strict: bool = False) -> Tuple[float, float]:
     """Walk both books level by level and return (base qty, buy notional) that
     can be crossed while every marginal slice still clears fees + threshold."""
     qty = 0.0
@@ -109,7 +110,9 @@ def crossable_base(asks: List[Level], bids: List[Level], threshold: float,
                 break
             b_px, b_rem = bids[j]
             j += 1
-        if b_px * (1.0 - sell_fee) < a_px * (1.0 + buy_fee) * (1.0 + threshold):
+        proceeds = b_px * (1.0 - sell_fee)
+        hurdle = a_px * (1.0 + buy_fee) * (1.0 + threshold)
+        if proceeds < hurdle or (strict and proceeds == hurdle):
             break
         take = min(a_rem, b_rem)
         qty += take
@@ -164,12 +167,13 @@ class ArbPlan:
 def plan_arb(buy_book: OrderBook, sell_book: OrderBook, *, threshold_bps: float,
              buy_fee_bps: float, sell_fee_bps: float, take_fraction: float,
              cap_notional: float, min_base: float, min_notional: float,
-             size_step: float):
+             size_step: float, gross_threshold_bps: float | None = None):
     """Size a two-leg taker slice: buy on buy_book, sell on sell_book.
 
     A slice qualifies when the executable premium (sell bid over buy ask)
     clears both venues' taker fees plus threshold_bps. Returns
-    (ArbPlan | None, reason).
+    (ArbPlan | None, reason). With gross_threshold_bps, each slice must strictly
+    exceed that price spread; fees still enter the returned cash-flow estimate.
     """
     asks = buy_book.sorted_asks()
     bids = sell_book.sorted_bids()
@@ -178,10 +182,18 @@ def plan_arb(buy_book: OrderBook, sell_book: OrderBook, *, threshold_bps: float,
     threshold = threshold_bps / 1e4
     buy_fee = buy_fee_bps / 1e4
     sell_fee = sell_fee_bps / 1e4
+    gate_buy_fee, gate_sell_fee = buy_fee, sell_fee
+    strict = gross_threshold_bps is not None
+    if strict:
+        threshold = gross_threshold_bps / 1e4
+        gate_buy_fee = gate_sell_fee = 0.0
     top_premium_bps = (bids[0][0] / asks[0][0] - 1.0) * 1e4
-    if bids[0][0] * (1.0 - sell_fee) < asks[0][0] * (1.0 + buy_fee) * (1.0 + threshold):
+    proceeds = bids[0][0] * (1.0 - gate_sell_fee)
+    hurdle = asks[0][0] * (1.0 + gate_buy_fee) * (1.0 + threshold)
+    if proceeds < hurdle or (strict and proceeds == hurdle):
         return None, "no_edge"
-    q_max, q_max_notional = crossable_base(asks, bids, threshold, buy_fee, sell_fee)
+    q_max, q_max_notional = crossable_base(asks, bids, threshold, gate_buy_fee,
+                                          gate_sell_fee, strict=strict)
     if q_max <= 0:
         return None, "no_edge"
     target = min(q_max * take_fraction, cap_notional / asks[0][0])
