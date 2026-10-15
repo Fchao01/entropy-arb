@@ -45,6 +45,13 @@ def snapshot(engine) -> dict:
         "updated_at": now, "started_at": engine.start_ts,
         "event_loop_lag_ms": engine.loop_lag_ms,
         "event_loop_lag_max_ms": engine.loop_lag_max_ms,
+        "ws_entry_guard": {
+            "max_age_ms": engine.cfg.max_ws_age_ms,
+            "blocked_checks": engine.ws_gate_blocks,
+            "last_reason": engine.last_ws_gate_reason,
+            "venues": {v.key: v.book.latency.entry_block_reason(engine.cfg.max_ws_age_ms)
+                       for v in engine.venues.values()},
+        },
         "config_path": getattr(engine, "config_path", None),
         "thresholds": {
             "midline_bps": engine.cfg.midline_bps,

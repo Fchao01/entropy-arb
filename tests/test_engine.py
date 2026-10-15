@@ -26,6 +26,7 @@ thresholds:
   lower_bps: {lower}
 execution:
   premium_persist_sec: 0.0
+  max_ws_age_ms: 0  # Synthetic price tests opt out; guard has dedicated tests.
 """)
     f.close()
     return load_config(f.name, NO_ENV,

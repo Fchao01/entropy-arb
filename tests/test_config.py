@@ -58,10 +58,18 @@ def test_minimal_defaults():
     assert cfg.hedge.label == "LIGHTER"
     assert cfg.primary_venue == "lighter-rh"
     assert cfg.entropy.label == "RH"
+    assert cfg.max_ws_age_ms == 100
     assert cfg.hedge.lighter_profile.chain_id == 304
     assert cfg.take_fraction == 0.5          # defaults kick in
     assert cfg.recorder_enabled is True
     assert cfg.entropy.symbol == cfg.hedge.symbol == "SNDK"
+
+
+def test_ws_age_config_validation():
+    for value in ("-1", ".nan", ".inf"):
+        expect_error(MINIMAL + f"execution:\n  max_ws_age_ms: {value}\n", "max_ws_age_ms")
+    assert load(MINIMAL + "execution:\n  max_ws_age_ms: 0\n").max_ws_age_ms == 0
+    assert load(MINIMAL + "execution:\n  max_ws_age_ms: 100\n").max_ws_age_ms == 100
 
 
 def test_independent_market_symbols_keep_pair_log_paths():

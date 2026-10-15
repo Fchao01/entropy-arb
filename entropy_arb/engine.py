@@ -36,7 +36,7 @@ from .venue_lighter import LighterVenue
 from .venue_arcus import ArcusVenue
 from .telegram import TelegramNotifier, hedge_message, trade_message
 from .execution_stats import ExecutionStats
-from .latency import timing_text
+from .latency import StaleMarketData, timing_text
 
 log = logging.getLogger("engine")
 
@@ -101,6 +101,8 @@ class Engine:
         self._mtm_baseline: Optional[float] = None
         self.loop_lag_ms = 0.0
         self.loop_lag_max_ms = 0.0
+        self.ws_gate_blocks = 0
+        self.last_ws_gate_reason = None
         # proactive per-venue send budget: timestamps of recent order sends
         self._sends: Dict[str, deque] = {}
         # reactive per-venue throttle: venue key -> excluded until
@@ -273,6 +275,8 @@ class Engine:
                  cfg.upper_bps, cfg.lower_bps)
         log.info("primary execution=%s maker_timeout=%.2fs primary_fee=%.3fbps",
                  cfg.primary_order_type, cfg.maker_timeout_sec, cfg.primary_fee_bps)
+        log.info("[WS GATE] max_data_age=%.1fms (0 disables); applies to new risk, reductions/hedges remain available",
+                 cfg.max_ws_age_ms)
 
         if self.record_only:
             log.warning("RECORD-ONLY — collecting minute data, no strategy, "
@@ -404,6 +408,8 @@ class Engine:
             min_base=self._min_base, min_notional=self._min_notional, size_step=self._step)
 
     def _maker_quote_valid(self, buy, sell, plan, price):
+        if not self._entry_data_allowed(buy, sell, plan):
+            return False
         if (not self.entropy.book.is_fresh(self.cfg.staleness_sec)
                 or not self.hedge.book.is_fresh(self.cfg.staleness_sec)
                 or not self.entropy.ready_to_trade() or not self.hedge.ready_to_trade()
@@ -481,6 +487,23 @@ class Engine:
             self._last_skiplog = now
             log.info(fmt, *args)
 
+    def _reduces_both(self, buy, sell, plan):
+        """A reducing slice must not flatten then open the opposite side."""
+        return (plan is not None and buy.position < 0 and sell.position > 0
+                and plan.qty <= min(-buy.position, sell.position) + self._step / 2)
+
+    def _entry_data_allowed(self, buy, sell, plan=None):
+        if self._reduces_both(buy, sell, plan):
+            return True
+        for venue in (buy, sell):
+            reason = venue.book.latency.entry_block_reason(self.cfg.max_ws_age_ms)
+            if reason:
+                self.ws_gate_blocks += 1
+                self.last_ws_gate_reason = f"{venue.name}: {reason}"
+                self._skiplog("[WS GATE] new order blocked: %s", self.last_ws_gate_reason)
+                return False
+        return True
+
     async def _evaluate(self) -> None:
         cfg = self.cfg
         if self.halted or self.manual_paused:
@@ -514,9 +537,15 @@ class Engine:
         unresolved = False
         before_qty = abs(self.entropy.position)
         try:
+            if not self._entry_data_allowed(buy, sell, plan):
+                return
             if self.bps_strategy:
                 self.bps_strategy.before_execution(plan)
             unresolved = await self._execute(buy, sell, plan)
+        except StaleMarketData:
+            if self.bps_strategy:
+                self.bps_strategy.abort_before_send(plan)
+            return
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -563,6 +592,9 @@ class Engine:
                     or sell.book.last_update_ts <= sell.last_traded_ts):
                 continue
             plan, reason = self._plan(buy, sell, cfg.max_order_notional)
+            if not self._entry_data_allowed(buy, sell, plan):
+                self._armed[dkey] = None
+                continue
             edge_present = reason not in ("no_edge", "empty_book")
             if not edge_present:
                 self._armed[dkey] = None
@@ -616,6 +648,10 @@ class Engine:
         must escalate to reconcile."""
         if self.halted:
             return False
+        # Recheck after planning/locks/checkpoint I/O, before either leg sends.
+        # Never independently skip one leg after its peer has been submitted.
+        if not self._entry_data_allowed(buy, sell, plan):
+            raise StaleMarketData(self.last_ws_gate_reason)
         cfg = self.cfg
         inv_bps = 0.0 if self.bps_strategy else self._inv_add_bps(buy, sell)
         direction = self.direction_key(sell.key == self.entropy.key)
@@ -639,6 +675,8 @@ class Engine:
         buy_bound = buy.px_round(plan.buy_limit * (1 + slip), round_up=False)
         sell_bound = sell.px_round(plan.sell_limit * (1 - slip), round_up=True)
         send_started = time.perf_counter()
+        if not self._entry_data_allowed(buy, sell, plan):
+            raise StaleMarketData(self.last_ws_gate_reason)
         if cfg.primary_order_type == "maker" and not closing:
             (binfo, buy_send_ms), (sinfo, sell_send_ms) = await execute_primary_maker(self, buy, sell, plan)
         else:

@@ -24,6 +24,7 @@ inventory:
   scale_bps: 10.0
   floor_frac: 0
 execution:
+  max_ws_age_ms: 100.0      # max exchange-data age before opening; 0 disables
   primary_order_type: taker   # taker 吃单 / maker 买一卖一只挂单
   maker_timeout_sec: 5.0      # 挂单最长等待秒数，范围 (0, 60]
   premium_persist_sec: 0
