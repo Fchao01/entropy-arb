@@ -174,16 +174,19 @@ def plan_arb(buy_book: OrderBook, sell_book: OrderBook, *, threshold_bps: float,
     clears both venues' taker fees plus threshold_bps. Returns
     (ArbPlan | None, reason).
     """
-    asks = buy_book.sorted_asks()
-    bids = sell_book.sorted_bids()
-    if not asks or not bids:
+    # Most feed updates have no executable edge. Check the top prices before
+    # sorting thousands of levels on the same event loop as the WS readers.
+    ask, bid = buy_book.best_ask(), sell_book.best_bid()
+    if ask is None or bid is None:
         return None, "empty_book"
     threshold = threshold_bps / 1e4
     buy_fee = buy_fee_bps / 1e4
     sell_fee = sell_fee_bps / 1e4
-    top_premium_bps = (bids[0][0] / asks[0][0] - 1.0) * 1e4
-    if bids[0][0] * (1.0 - sell_fee) < asks[0][0] * (1.0 + buy_fee) * (1.0 + threshold):
+    top_premium_bps = (bid / ask - 1.0) * 1e4
+    if bid * (1.0 - sell_fee) < ask * (1.0 + buy_fee) * (1.0 + threshold):
         return None, "no_edge"
+    asks = buy_book.sorted_asks()
+    bids = sell_book.sorted_bids()
     q_max, q_max_notional = crossable_base(asks, bids, threshold, buy_fee, sell_fee)
     if q_max <= 0:
         return None, "no_edge"
