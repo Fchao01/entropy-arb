@@ -534,10 +534,6 @@ class BpsStrategy:
         if self.profit_mode and self.entries and not self.costs.known:
             self.reason = '旧仓成本未知，等待原 bps 平仓点位；不继续加仓'
             return None
-        if not eng._entry_data_allowed(eng.entropy, eng.hedge):
-            eng._armed[eng.direction_key(not self.long)] = None
-            self.reason = f'等待行情保护通过 · {eng.last_ws_gate_reason}'
-            return None
         if self.profit_mode and not self.entries and now - self.last_closed_at < cfg.bps_cycle_cooldown_sec:
             self.reason = '平仓后冷却中'
             eng._schedule_poke(cfg.bps_cycle_cooldown_sec - (now - self.last_closed_at))
@@ -588,13 +584,6 @@ class BpsStrategy:
         self.save()  # a crash after submission cannot silently re-adopt fills
         log.info('[BPS %s] premium=%s entry=%s frozen_exit=%s entries=%d',
                  plan.action, self.engine.premium_bps(), self.locked_entry, self.locked_exit, self.entries)
-
-    def abort_before_send(self, plan):
-        self.pending = False
-        if not self.entries and plan.action == 'bps_open':
-            self.locked_entry = self.locked_exit = None
-        self.reason = '行情超时，未发单；等待新鲜行情'
-        self.save()
 
     def after_execution(self, plan, before_qty, unresolved):
         eng = self.engine

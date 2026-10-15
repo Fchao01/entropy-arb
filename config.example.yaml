@@ -87,8 +87,6 @@ inventory:
 
 # ======================= EXECUTION / 执行参数 ==============================
 execution:
-  max_ws_delay_ms: 100.0    # publication-to-receive delay / WS 接收延迟；0 关闭
-  max_ws_age_ms: 100.0      # book age before opening / 盘口年龄保护；0 关闭
   primary_order_type: taker   # taker 吃单 / maker 买一卖一只挂单
   maker_timeout_sec: 5.0      # 挂单最长等待秒数，范围 (0, 60]
   premium_persist_sec: 0     # edge must persist this long before firing / 信号需持续时间

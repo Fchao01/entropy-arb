@@ -212,21 +212,6 @@ def test_full_book_snapshots_replace_and_degraded_invalidates():
     assert not v.book.ready and not v.ready_to_trade()
 
 
-@pytest.mark.parametrize("scale", [1e6, 1e9])
-def test_book_timing_uses_contents_timestamp_and_ignores_old_sequences(scale):
-    v = venue()
-    stamp = 1792022400.125
-    msg = {"type": "channel_data", "channel": "l2Orderbook", "id": "ETH-USD",
-           "contents": {"lastSequenceId": 100, "timestamp": int(stamp * scale),
-                        "bids": [["2500", "2"]], "asks": [["2501", "1"]]}}
-    v._handle_message(msg, lambda: None, received_at=stamp + .25)
-    assert v.book.latency.snapshot()["delay_ms"] == pytest.approx(250, abs=.001)
-    assert v.book.latency.snapshot()["timestamp_field"] == "contents.timestamp"
-    msg["contents"]["lastSequenceId"] = 99
-    v._handle_message(msg, lambda: None, received_at=stamp + 99)
-    assert v.book.latency.snapshot()["messages"] == 1
-
-
 def test_account_and_market_demux_and_out_of_order_events():
     v = venue()
     def msg(account_index, row):

@@ -31,6 +31,7 @@ from dotenv import dotenv_values
 from .config import ConfigError, HEDGE_VENUES, PRIMARY_VENUES, _SCHEMA, _validate, load_config
 from .market_monitor import MonitorRules, MultiVenueMonitor, discover_candidates
 from .privacy import PrivateLogCapture
+from .run_logs import reset_run_log
 from .thresholds import (ThresholdDataError, ThresholdSuggestion, daily_window,
                          analysis_report, load_window_rows, prune_csv, suggest)
 from .telegram import TelegramNotifier, test_message
@@ -979,7 +980,7 @@ class TaskManager:
                 if self.configured_path(cfg.recorder_csv) == runtime.get("recorder_path"):
                     raise ConsoleError(f"行情 CSV 路径与运行任务「{other['name']}」相同；请在 YAML 中设置独立 recorder.csv")
                 if log_path == runtime.get("log_path"):
-                    raise ConsoleError(f"运行日志路径与运行任务「{other['name']}」相同；请在 YAML 中设置独立 logging.file，避免混合不同任务的日志")
+                    raise ConsoleError(f"运行日志路径与运行任务「{other['name']}」相同；请在 YAML 中设置独立 logging.file，避免清空另一任务日志")
                 if other["mode"] == task["mode"] == "live":
                     if markets & runtime["markets"]:
                         raise ConsoleError(f"交易市场与实盘任务「{other['name']}」重叠，请勿同时管理同一持仓")
@@ -1005,6 +1006,10 @@ class TaskManager:
                        "--control-file", str(directory / "control.json")]
             if task["mode"] == "record":
                 command.append("--record-only")
+            # Reset before spawning: clearing in watch() could erase the
+            # child's first log messages. The CLI also resets its own file.
+            reset_run_log(log_path)
+            reset_run_log(directory / "events.log")
             process = await asyncio.create_subprocess_exec(
                 *command, cwd=self.root, env=env, stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT, start_new_session=True)

@@ -120,7 +120,7 @@ python3 main.py --symbol SNDK --hedge lighter
 **仪表盘。** 在终端运行时会显示实时 Rich 仪表盘：两边盘口（含数据龄/点差）、
 持仓与上限、账户权益与本次会话盈亏、两个方向的可成交溢价对比完整门槛
 （已含手续费与库存加价，● 表示已武装）、数据采集进度、最近成交，以及日志
-尾部（完整日志写入 `logging.file`，默认 `logs/{symbol}/engine.log`；每次启动追加日志，不清空旧日志及编号备份，分钟 CSV、成交 CSV 和 BPS 持仓状态也保留）。`--record-only`
+尾部（完整日志写入 `logging.file`，默认 `logs/{symbol}/engine.log`；每次启动清空旧日志及编号备份，分钟 CSV、成交 CSV 和 BPS 持仓状态保留）。`--record-only`
 模式同样可用。加 `--cn` 参数可使仪表盘全部以中文显示。`--no-dashboard`
 可切换为纯日志输出（nohup/systemd 等非终端环境会自动退回纯日志），也可
 设置 `logging.dashboard: false`。

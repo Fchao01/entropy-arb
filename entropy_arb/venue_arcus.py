@@ -275,9 +275,7 @@ class ArcusVenue:
                                                   "id": self.address, "accountIndex": self.account_index,
                                                   "market": self.market_name}))
                     async for raw in ws:
-                        received_at, received_mono = time.time(), time.perf_counter()
-                        self._handle_message(json.loads(raw), notify, received_at=received_at,
-                                             received_mono=received_mono)
+                        self._handle_message(json.loads(raw), notify)
                         backoff = 1.0
                         if stop.is_set():
                             break
@@ -294,7 +292,7 @@ class ArcusVenue:
                 pass
             backoff = min(backoff * 2.0, 30.0)
 
-    def _handle_message(self, msg: dict, notify, *, received_at=None, received_mono=None) -> None:
+    def _handle_message(self, msg: dict, notify) -> None:
         self.book.touch()  # transport liveness does not refresh book age
         rpc_id = msg.get("id")
         if isinstance(rpc_id, int) and rpc_id in self._rpc_pending:
@@ -326,9 +324,6 @@ class ArcusVenue:
             levels = [[{"px": px, "sz": sz} for px, sz in ob[side]]
                       for side in ("bids", "asks")]
             self.book.apply_hl(levels)
-            source = ob.get("timestamp", msg.get("timestamp"))
-            self.book.latency.record(source, received_at=received_at, received_mono=received_mono,
-                                     timestamp_field="contents.timestamp" if "timestamp" in ob else "timestamp")
             self._book_sequence = sequence
             notify()
         elif channel == "orders":

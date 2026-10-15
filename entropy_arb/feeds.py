@@ -17,7 +17,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import time
 from typing import Callable, Optional
 
 try:
@@ -58,25 +57,14 @@ class LighterBookFeed:
         await ws.send(json.dumps({"type": "subscribe",
                                   "channel": f"order_book/{self.market_id}"}))
 
-    async def _handle_book(self, ws, msg: dict, snapshot: bool, *,
-                           received_at=None, received_mono=None) -> None:
+    async def _handle_book(self, ws, msg: dict, snapshot: bool) -> None:
         if _chan_id(msg.get("channel", "")) != self.market_id:
             return
         ob = msg["order_book"]
-        def record_timing():
-            # Envelope publication time (ms) differs from committer time (us).
-            data_ts = ob.get("last_updated_at", msg.get("last_updated_at"))
-            timestamp = msg.get("timestamp")
-            self.book.latency.record(
-                timestamp if timestamp is not None else data_ts,
-                received_at=received_at, received_mono=received_mono,
-                timestamp_field="timestamp" if timestamp is not None else "last_updated_at",
-                data_timestamp=data_ts)
         if snapshot:
             self._nonce = ob.get("nonce")
             self._synced = True
             self.book.apply_lighter(ob, snapshot=True)
-            record_timing()
             log.info("[%s] snapshot: %d bids / %d asks", self.name,
                      len(self.book.bids), len(self.book.asks))
             self.notify()
@@ -100,7 +88,6 @@ class LighterBookFeed:
         if end is not None:
             self._nonce = end
         self.book.apply_lighter(ob, snapshot=False)
-        record_timing()
         self.notify()
 
     async def run(self, stop: asyncio.Event) -> None:
@@ -114,17 +101,14 @@ class LighterBookFeed:
                     self._nonce = None
                     self._synced = False
                     async for raw in ws:
-                        received_at, received_mono = time.time(), time.perf_counter()
                         backoff = 1.0
                         msg = json.loads(raw)
                         t = msg.get("type")
                         self.book.touch()
                         if t == "update/order_book":
-                            await self._handle_book(ws, msg, snapshot=False,
-                                                    received_at=received_at, received_mono=received_mono)
+                            await self._handle_book(ws, msg, snapshot=False)
                         elif t == "subscribed/order_book":
-                            await self._handle_book(ws, msg, snapshot=True,
-                                                    received_at=received_at, received_mono=received_mono)
+                            await self._handle_book(ws, msg, snapshot=True)
                         elif t == "connected":
                             await self._subscribe(ws)
                         elif t == "ping":
@@ -157,14 +141,12 @@ class HLBookFeed:
         self.ping_sec = ping_sec
         self._snapped = False
 
-    def _on_frame(self, msg: dict, *, received_at=None, received_mono=None) -> None:
+    def _on_frame(self, msg: dict) -> None:
         self.book.touch()
         if msg.get("channel") == "l2Book":
             d = msg.get("data") or {}
             if d.get("coin") == self.coin:
                 self.book.apply_hl(d["levels"])
-                self.book.latency.record(d.get("time"), timestamp_field="data.time",
-                                         received_at=received_at, received_mono=received_mono)
                 if not self._snapped:
                     self._snapped = True
                     log.info("[%s] snapshot: %d bids / %d asks", self.name,
@@ -200,10 +182,8 @@ class HLBookFeed:
                                          "fast": True}}))
                     ptask = asyncio.create_task(self._pinger(ws))
                     async for raw in ws:
-                        received_at, received_mono = time.time(), time.perf_counter()
                         backoff = 1.0
-                        self._on_frame(json.loads(raw), received_at=received_at,
-                                       received_mono=received_mono)
+                        self._on_frame(json.loads(raw))
                         if stop.is_set():
                             break
             except asyncio.CancelledError:
