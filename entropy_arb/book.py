@@ -11,6 +11,7 @@ import math
 import time
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
+from .latency import BookLatency
 
 Level = Tuple[float, float]
 
@@ -22,6 +23,7 @@ class OrderBook:
         self.ready = False
         self.last_update_ts = 0.0
         self.alive_ts = 0.0
+        self.latency = BookLatency()
 
     def touch(self) -> None:
         self.alive_ts = time.time()
@@ -30,6 +32,7 @@ class OrderBook:
         self.bids.clear()
         self.asks.clear()
         self.ready = False
+        self.latency = BookLatency()
 
     # ---- zkLighter snapshot + diff ----
     def apply_lighter(self, ob: dict, snapshot: bool) -> None:

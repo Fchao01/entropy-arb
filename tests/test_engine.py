@@ -79,7 +79,7 @@ def test_eff_threshold_directions():
         approx(total, 7.0)
 
 
-def test_rh_primary_uses_primary_premium_and_parallel_orders():
+def test_rh_primary_uses_primary_premium_and_parallel_orders(caplog):
     from unittest.mock import AsyncMock, patch
     eng = make_engine(midline=0.0, upper=1.0, lower=1.0)
     eng.cfg.primary_venue = "lighter-rh"
@@ -89,6 +89,10 @@ def test_rh_primary_uses_primary_premium_and_parallel_orders():
         v.px_round = lambda px, round_up: px
     eng.entropy.set_book(100.14, 100.16)
     eng.hedge.set_book(99.99, 100.01)
+    caplog.set_level("INFO", logger="engine")
+    for venue in (eng.entropy, eng.hedge):
+        venue.book.latency.record(1792022400, received_at=1792022400.08,
+                                  timestamp_field="before_send")
     eng.hedge.fee_bps = 2.25
     approx(eng.premium_bps(), 15.0)
     assert eng.direction_key(True) == "sell_primary"
@@ -102,6 +106,8 @@ def test_rh_primary_uses_primary_premium_and_parallel_orders():
         gate = asyncio.Event()
         started = []
         async def send(v, *, is_buy, qty, limit_px):
+            v.book.latency.record(1792022401, received_at=1792022401.25,
+                                  timestamp_field="after_send")
             started.append((v.name, is_buy, qty))
             if len(started) == 2:
                 gate.set()
@@ -115,6 +121,23 @@ def test_rh_primary_uses_primary_premium_and_parallel_orders():
         assert eng.recent_trades[-1]["direction"] == "sell_primary"
         approx(eng.entropy.position + eng.hedge.position, 0)
     asyncio.run(run())
+    timing_logs = [record.message for record in caplog.records if "[TIMING FEED]" in record.message]
+    assert len(timing_logs) == 2
+    assert all("field=before_send" in line and "delay=80.0ms" in line for line in timing_logs)
+
+
+def test_event_loop_probe_uses_monotonic_elapsed_time(monkeypatch):
+    from unittest.mock import AsyncMock, Mock
+    eng = make_engine()
+    eng.stop = Mock()
+    eng.stop.is_set.return_value = False
+    monkeypatch.setattr("entropy_arb.engine.time.perf_counter", Mock(side_effect=[100, 101.125, 102]))
+    monkeypatch.setattr("entropy_arb.engine.asyncio.wait_for",
+                        AsyncMock(side_effect=[asyncio.TimeoutError, None]))
+    eng.stop.wait.return_value = None
+    asyncio.run(eng._latency_loop())
+    assert eng.loop_lag_ms == pytest.approx(125)
+    assert eng.loop_lag_max_ms == pytest.approx(125)
 
 
 def test_live_non_hl_primary_initializes_without_hl_methods():

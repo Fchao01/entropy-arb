@@ -322,7 +322,8 @@ class TripleVenueMonitor:
             venues.append({"key": key, "name": venue.name, "symbol": venue.conf.symbol,
                            "bid": book.best_bid(), "ask": book.best_ask(), "mid": book.mid(),
                            "fresh": book.is_fresh(10),
-                           "age_sec": time.time() - book.last_update_ts if book.ready else None})
+                           "age_sec": time.time() - book.last_update_ts if book.ready else None,
+                           "ws_latency": book.latency.snapshot()})
         return {"running": self.running, "symbol": self.symbol, "updated_at": self.updated_at,
                 "rules": self.rules.__dict__, "venues": venues, "pairs": pairs,
                 "errors": self.errors}

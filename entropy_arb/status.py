@@ -28,6 +28,7 @@ def snapshot(engine) -> dict:
             "bid": bid, "ask": ask,
             "fresh": book.is_fresh(engine.cfg.staleness_sec),
             "age_sec": now - book.last_update_ts if book.ready else None,
+            "ws_latency": book.latency.snapshot(now),
             "position": position,
             "mark_price": mark_price,
             "position_usd": (abs(position) * mark_price
@@ -42,6 +43,8 @@ def snapshot(engine) -> dict:
     live = ready and not engine.record_only
     result = {
         "updated_at": now, "started_at": engine.start_ts,
+        "event_loop_lag_ms": engine.loop_lag_ms,
+        "event_loop_lag_max_ms": engine.loop_lag_max_ms,
         "config_path": getattr(engine, "config_path", None),
         "thresholds": {
             "midline_bps": engine.cfg.midline_bps,

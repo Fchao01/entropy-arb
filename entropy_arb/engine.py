@@ -36,6 +36,7 @@ from .venue_lighter import LighterVenue
 from .venue_arcus import ArcusVenue
 from .telegram import TelegramNotifier, hedge_message, trade_message
 from .execution_stats import ExecutionStats
+from .latency import timing_text
 
 log = logging.getLogger("engine")
 
@@ -98,6 +99,8 @@ class Engine:
         self._min_base = 0.0
         self._min_notional = 10.0
         self._mtm_baseline: Optional[float] = None
+        self.loop_lag_ms = 0.0
+        self.loop_lag_max_ms = 0.0
         # proactive per-venue send budget: timestamps of recent order sends
         self._sends: Dict[str, deque] = {}
         # reactive per-venue throttle: venue key -> excluded until
@@ -306,6 +309,7 @@ class Engine:
             tasks.append(asyncio.create_task(self._http_keepalive_loop(),
                                              name="keepalive"))
         tasks.append(asyncio.create_task(self._status_loop(), name="status"))
+        tasks.append(asyncio.create_task(self._latency_loop(), name="latency"))
         if self.control_file and not self.record_only:
             tasks.append(asyncio.create_task(self._control_loop(), name="control"))
         if live:
@@ -622,6 +626,9 @@ class Engine:
         book_age_ms = max(0.0, signal_ts - min(buy.book.last_update_ts,
                                                sell.book.last_update_ts)) * 1000.0
         book_skew_ms = abs(buy.book.last_update_ts - sell.book.last_update_ts) * 1000.0
+        # Freeze feed diagnostics before awaiting sends; new WS messages
+        # during settlement must not replace the measurements for this trade.
+        feed_timings = [(v.name, v.book.latency.snapshot(signal_ts)) for v in (buy, sell)]
         self.last_trade_ts = time.time()
         log.info("[ARB] %s: BUY %s %.6g @<=%.6g | SELL %s @>=%.6g | "
                  "take $%.0f of $%.0f | prem %.2fbps | exp $%.4f",
@@ -700,6 +707,8 @@ class Engine:
                  buy_send_ms, sell_send_ms,
                  f"{realized_edge_bps:.3f}bps" if realized_edge_bps is not None else "—",
                  f"{shortfall_bps:+.3f}bps" if shortfall_bps is not None else "—")
+        for name, timing in feed_timings:
+            log.info("[TIMING FEED] %s: %s", direction, timing_text(name, timing))
         buy.last_traded_ts = sell.last_traded_ts = time.time()
 
         unresolved = binfo.get("unresolved") or sinfo.get("unresolved")
@@ -1064,6 +1073,17 @@ class Engine:
             return None
         return (em / hm - 1.0) * 1e4
 
+    async def _latency_loop(self) -> None:
+        """Probe event-loop scheduling independently of exchange clocks."""
+        while not self.stop.is_set():
+            target = time.perf_counter() + 1.0
+            try:
+                await asyncio.wait_for(self.stop.wait(), timeout=1.0)
+                return
+            except asyncio.TimeoutError:
+                self.loop_lag_ms = max(0.0, (time.perf_counter() - target) * 1000)
+                self.loop_lag_max_ms = max(self.loop_lag_max_ms, self.loop_lag_ms)
+
     async def _status_loop(self) -> None:
         cfg = self.cfg
         while not self.stop.is_set():
@@ -1071,6 +1091,9 @@ class Engine:
                 await asyncio.sleep(cfg.status_interval_sec)
             except asyncio.CancelledError:
                 raise
+            for venue in self.venues.values():
+                log.info("[WS LATENCY] %s", timing_text(venue.name, venue.book.latency.snapshot()))
+            log.info("[LOOP LATENCY] lag=%.1fms session_max=%.1fms", self.loop_lag_ms, self.loop_lag_max_ms)
             books = " | ".join(
                 f"{v.name} {v.book.best_bid() or '—'}/{v.book.best_ask() or '—'}"
                 + ("" if v.book.is_fresh(cfg.staleness_sec) else " STALE")
