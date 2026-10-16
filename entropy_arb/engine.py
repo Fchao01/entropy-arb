@@ -89,6 +89,7 @@ class Engine:
         self.total_fill_edge = 0.0
         self.total_fees_usd = 0.0
         self.execution_stats = ExecutionStats()
+        self.balance_status = {}
         self.start_ts = time.time()
         self._last_skiplog = 0.0
         self._poke_due: Optional[float] = None
@@ -1257,16 +1258,36 @@ class Engine:
     async def _balance_loop(self) -> None:
         while not self.stop.is_set():
             for v in self.venues.values():
+                previous = self.balance_status.get(v.key, {})
                 try:
                     got = await v.fetch_equity()
-                    if got is not None:
-                        v.equity, v.free = got
-                        if v.start_equity is None:
-                            v.start_equity = v.equity
+                    if got is None:
+                        raise ValueError("balance snapshot unavailable")
+                    equity, free = got
+                    if any(isinstance(value, bool) or value is None for value in (equity, free)):
+                        raise ValueError("invalid balance snapshot")
+                    equity, free = float(equity), float(free)
+                    if not all(math.isfinite(value) for value in (equity, free)):
+                        raise ValueError("non-finite balance snapshot")
+                    v.equity, v.free = equity, free
+                    if v.start_equity is None:
+                        v.start_equity = v.equity
+                    checked_at = time.time()
+                    self.balance_status[v.key] = dict(state="ready", updated_at=checked_at,
+                                                     checked_at=checked_at, error=None)
+                    if previous.get("state") == "error":
+                        log.info("[%s] equity poll recovered", v.name)
                 except asyncio.CancelledError:
                     raise
                 except Exception as e:
-                    log.debug("[%s] equity poll failed: %r", v.name, e)
+                    status = getattr(e, "status", None)
+                    detail = f"HTTP {status}" if isinstance(status, int) else type(e).__name__
+                    self.balance_status[v.key] = dict(state="error", error=detail,
+                                                     updated_at=previous.get("updated_at"),
+                                                     checked_at=time.time())
+                    if previous.get("state") != "error" or previous.get("error") != detail:
+                        log.warning("[%s] equity poll failed (%s); balance unavailable or last-known only",
+                                    v.name, detail)
             try:
                 await asyncio.wait_for(self.stop.wait(), timeout=BALANCE_POLL_SEC)
             except asyncio.TimeoutError:

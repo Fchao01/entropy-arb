@@ -23,6 +23,17 @@ def snapshot(engine) -> dict:
         ask = book.best_ask()
         position = venue.position if not engine.record_only else None
         mark_price = getattr(venue, "mark_price", None)
+        balance = dict(engine.balance_status.get(venue.key, {}))
+        balance.setdefault("state", "disabled" if engine.record_only else "waiting")
+        updated_at = balance.get("updated_at")
+        balance["age_sec"] = max(0.0, now - updated_at) if updated_at is not None else None
+        if balance["state"] == "ready" and balance["age_sec"] is not None and balance["age_sec"] > 90:
+            balance["state"] = "stale"
+        conf = venue.conf
+        account = None
+        if getattr(conf, "kind", None) == "arcus":
+            account = {"network": conf.arcus_network,
+                       "account_index": conf.arcus_creds.account_index if conf.arcus_creds else None}
         venues.append({
             "key": venue.key, "name": venue.name, "symbol": venue.conf.symbol,
             "bid": bid, "ask": ask,
@@ -34,6 +45,7 @@ def snapshot(engine) -> dict:
                               if position is not None and mark_price is not None
                               else None),
             "equity": venue.equity, "free": venue.free,
+            "balance_status": balance, "account": account,
             "volume_usd": venue.volume_usd,
             "limited": engine._venue_limited(venue),
             "down": venue.key in engine._venue_down,

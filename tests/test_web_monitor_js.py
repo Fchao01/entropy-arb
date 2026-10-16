@@ -146,3 +146,64 @@ const snapshot = id => ({minutes: [], task: {id, symbol: 'SPY', primary: 'arcus'
 })().catch(error => {console.error(error); process.exitCode = 1;});
 ''', str(source)], capture_output=True, text=True, timeout=15)
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_monitor_distinguishes_balance_errors_waiting_and_confirmed_zero():
+    node = shutil.which('node')
+    if not node:
+        pytest.skip('Node.js is only needed to execute this frontend regression test')
+    source = Path(__file__).resolve().parents[1] / 'web' / 'app.js'
+    result = subprocess.run([node, '-e', r'''
+const fs = require('node:fs');
+const vm = require('node:vm');
+const assert = require('node:assert/strict');
+const source = fs.readFileSync(process.argv[1], 'utf8');
+const utilities = source.slice(0, source.indexOf('async function api('));
+const monitor = source.slice(source.indexOf('function renderMonitor() {'), source.indexOf('\nfunction renderSignals('));
+const nodes = new Map();
+const context = vm.createContext({
+  location: {pathname: '/monitor'},
+  document: {getElementById(id) {
+    if (!nodes.has(id)) nodes.set(id, {});
+    return nodes.get(id);
+  }},
+  badge: () => '', stat: () => '', renderSignals() {}, drawChart() {}, renderLogs() {},
+});
+vm.runInContext(utilities + '\n' + monitor + `
+state.selected = 'balance-test';
+state.detail = {minutes: [], task: {
+  id: 'balance-test', symbol: 'QQQ', primary: 'arcus', hedge: 'lighter-rh',
+  mode: 'live', state: 'running', status_stale: false,
+  status: {venues: [{name: 'ARCUS', symbol: 'QQQ', fresh: true,
+    equity: null, free: null, account: {network: 'mainnet', account_index: 3},
+    balance_status: {state: 'error', updated_at: null, error: 'HTTP 429'}}]}
+}};
+renderMonitor();
+`, context);
+const run = code => vm.runInContext(code, context);
+const html = () => nodes.get('venue-cards').innerHTML;
+assert.match(html(), /权益读取失败（HTTP 429）/);
+assert.match(html(), /尚无有效余额/);
+assert.match(html(), /<strong>— \/ —<\/strong>/);
+assert.match(html(), /Arcus 主网 · 子账户 #3/);
+assert.match(html(), /正常/);
+run(`state.detail.task.status.venues[0].balance_status = {state: 'waiting'};
+renderMonitor();`);
+assert.match(html(), /等待首次权益读取/);
+run(`Object.assign(state.detail.task.status.venues[0], {equity: 0, free: 0,
+balance_status: {state: 'ready', updated_at: 1792076400}}); renderMonitor();`);
+assert.match(html(), /<strong>\$0\.00 \/ \$0\.00<\/strong>/);
+assert.match(html(), /接口返回零，请核对所选网络、账户和子账户/);
+assert.match(html(), /更新于/);
+run(`Object.assign(state.detail.task.status.venues[0], {equity: 1234.5, free: 1000,
+balance_status: {state: 'error', updated_at: 1792076400, error: 'ConnectionError'}}); renderMonitor();`);
+assert.match(html(), /\$1,234\.50 \/ \$1,000\.00/);
+assert.match(html(), /金额为上次成功值，非实时/);
+run(`state.detail.task.status.venues[0].balance_status.state = 'stale'; renderMonitor();`);
+assert.match(html(), /权益数据过期/);
+run(`state.detail.task.mode = 'record'; renderMonitor();`);
+assert.match(html(), /采集模式不读取账户权益/);
+assert.match(html(), /<strong>— \/ —<\/strong>/);
+assert.doesNotMatch(html(), /\$1,234\.50/);
+''', str(source)], capture_output=True, text=True, timeout=15)
+    assert result.returncode == 0, result.stdout + result.stderr

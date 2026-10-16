@@ -679,7 +679,18 @@ class ArcusVenue:
     async def fetch_equity(self):
         data = await self._get("/v1/account", address=self.address,
                                accountIndex=self.account_index)
-        return float(data["equity"]), float(data["freeCollateral"])
+        if not isinstance(data, dict) or data.get("error"):
+            raise ValueError("[ARCUS] invalid account balance response")
+        if (("address" in data and str(data["address"]).lower() != self.address)
+                or ("accountIndex" in data and data["accountIndex"] != self.account_index)):
+            raise ValueError("[ARCUS] account balance identity mismatch")
+        values = [data.get("equity"), data.get("freeCollateral")]
+        if any(value is None or isinstance(value, bool) for value in values):
+            raise ValueError("[ARCUS] missing account equity/freeCollateral")
+        equity, free = map(float, values)
+        if not all(math.isfinite(value) for value in (equity, free)):
+            raise ValueError("[ARCUS] non-finite account balance")
+        return equity, free
 
     async def warm_http(self) -> None:
         data = await self._get("/v1/markets", market=self.market_name)

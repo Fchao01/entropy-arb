@@ -293,6 +293,37 @@ def test_positions_use_signed_size_and_subaccount():
     asyncio.run(run())
 
 
+def test_account_equity_uses_selected_subaccount_and_accepts_real_zero():
+    async def run():
+        instance = venue()
+        instance.conf.arcus_creds.account_index = 3
+        for equity, free in (("1234.56", "1000"), ("0", "0"), ("-1.5", "-2")):
+            instance._get = AsyncMock(return_value={
+                "address": ADDRESS.lower(), "accountIndex": 3,
+                "equity": equity, "freeCollateral": free})
+            assert await instance.fetch_equity() == (float(equity), float(free))
+            instance._get.assert_awaited_once_with("/v1/account", address=ADDRESS.lower(), accountIndex=3)
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("response", [
+    {}, {"error": "unavailable"}, [],
+    {"equity": None, "freeCollateral": "0"},
+    {"equity": True, "freeCollateral": "0"},
+    {"equity": "nan", "freeCollateral": "0"},
+    {"equity": "0", "freeCollateral": "inf"},
+    {"equity": "0", "freeCollateral": "0", "accountIndex": 1},
+    {"equity": "0", "freeCollateral": "0", "address": "0x" + "CD" * 20},
+])
+def test_account_equity_rejects_missing_invalid_or_wrong_account_values(response):
+    async def run():
+        instance = venue()
+        instance._get = AsyncMock(return_value=response)
+        with pytest.raises(ValueError):
+            await instance.fetch_equity()
+    asyncio.run(run())
+
+
 def test_local_websocket_routes_ack_and_lifecycle_on_same_connection():
     async def run():
         import aiohttp
