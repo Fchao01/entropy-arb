@@ -281,6 +281,10 @@ class Engine:
                      cfg.maker_cancel_policy, cfg.maker_reprice_delay_sec,
                      '信号有效且在最优价时持续保留，不设总等待上限'
                      if cfg.maker_cancel_policy == 'best_price' else '按最长等待时间撤单')
+        if self.bps_strategy:
+            log.info('[BPS PRICE] configured_basis=%s entry_percentile=%.2f exit_percentile=%.2f; '
+                     'executable compares sell bid / buy ask, both triggers >= target; existing cycles retain their saved basis',
+                     cfg.bps_price_basis, cfg.bps_entry_percentile, cfg.bps_exit_percentile)
         if cfg.strategy_mode == "spread":
             log.info("[SPREAD] executable price spread > %.3f bps; both directions; "
                      "no history, batch limit or profit target; fees reported separately", cfg.spread_bps)
@@ -685,7 +689,7 @@ class Engine:
         buy_bound = buy.px_round(plan.buy_limit * (1 + slip), round_up=False)
         sell_bound = sell.px_round(plan.sell_limit * (1 - slip), round_up=True)
         send_started = time.perf_counter()
-        if cfg.primary_order_type == "maker" and not closing:
+        if cfg.primary_order_type == "maker" and not closing and not (self.bps_strategy and self.bps_strategy.executable):
             (binfo, buy_send_ms), (sinfo, sell_send_ms) = await execute_primary_maker(self, buy, sell, plan)
         else:
             self._record_send(buy)
@@ -1186,9 +1190,10 @@ class Engine:
                    if self.recorder else "")
             if self.bps_strategy:
                 state = self.bps_strategy.snapshot()
-                log.info("[status] %s | prem %s bps | BPS entry=%s exit=%s filled_batches=%d %s "
+                log.info("[status] %s | mid_prem %s bps | BPS basis=%s open_signal=%s close_signal=%s entry=%s exit=%s filled_batches=%d %s "
                          "| pos %s net %+.6g | trades %d hedges %d | MTM %s%s%s",
-                         books, prem_s, state["entry_bps"], state["exit_bps"], state["entries"],
+                         books, prem_s, state['price_basis'], state['open_signal_bps'], state['close_signal_bps'],
+                         state["entry_bps"], state["exit_bps"], state["entries"],
                          state["reason"], pos, net, self.trades, self.hedges,
                          f"${pnl:+.4f}" if pnl is not None else "—", rec,
                          " *** HALTED ***" if self.halted else "")

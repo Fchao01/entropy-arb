@@ -11,7 +11,7 @@ import os
 import time
 from pathlib import Path
 
-from .book import ArbPlan, floor_step, walk_depth
+from .book import ArbPlan, crossable_base, floor_step, walk_depth
 from .recorder import prepare_recorder_source
 from .bps_pnl import CycleCosts
 
@@ -71,13 +71,23 @@ def rolling_levels(cfg, now, *, include_coverage=False):
                         low_samples.add(ts)
                         continue
                     try:
-                        value = float(row['premium_close_bps'])
+                        if cfg.bps_price_basis == 'executable':
+                            pb, pa, hb, ha = (float(row[k]) for k in
+                                              ('entropy_bid', 'entropy_ask', 'hedge_bid', 'hedge_ask'))
+                            if not all(math.isfinite(x) and x > 0 for x in (pb, pa, hb, ha)) or pb > pa or hb > ha:
+                                raise ValueError('invalid quotes')
+                            buy_primary = (hb / pa - 1) * 1e4
+                            sell_primary = (pb / ha - 1) * 1e4
+                            value = ((buy_primary, sell_primary) if cfg.bps_direction == 'long_primary'
+                                     else (sell_primary, buy_primary))
+                        else:
+                            value = float(row['premium_close_bps'])
                     except (KeyError, ValueError, TypeError):
                         invalid_premium.add(ts)
                         continue
                     if samples < 10:
                         low_samples.add(ts)
-                    elif not math.isfinite(value):
+                    elif not all(math.isfinite(x) for x in (value if isinstance(value, tuple) else (value,))):
                         invalid_premium.add(ts)
                     else:
                         points[ts] = value
@@ -113,9 +123,9 @@ def rolling_levels(cfg, now, *, include_coverage=False):
                          f'来源过滤 {coverage["source_filtered_minutes"]} 分钟；'
                          f'{source_note}，读取 {cfg.recorder_csv}')
     values = list(points.values())
-    entry = percentile(values, cfg.bps_entry_percentile)
-    exit = percentile(values, cfg.bps_exit_percentile)
-    if (cfg.bps_direction == 'long_primary' and entry >= exit
+    entry = percentile([v[0] for v in values] if cfg.bps_price_basis == 'executable' else values, cfg.bps_entry_percentile)
+    exit = percentile([v[1] for v in values] if cfg.bps_price_basis == 'executable' else values, cfg.bps_exit_percentile)
+    if cfg.bps_price_basis == 'mid' and (cfg.bps_direction == 'long_primary' and entry >= exit
             or cfg.bps_direction == 'short_primary' and entry <= exit):
         raise ValueError('历史溢价波动不足，开平仓点位重合')
     result = entry, exit, end
@@ -134,6 +144,7 @@ class BpsStrategy:
         self.coverage = None
         self.entries = 0
         self.locked_entry = self.locked_exit = None
+        self.locked_price_basis = None
         self.closing = False
         self.pending = False
         self.startup_recovery = None
@@ -162,6 +173,25 @@ class BpsStrategy:
     def long(self):
         return self.cfg.bps_direction == 'long_primary'
 
+    @property
+    def price_basis(self):
+        return self.locked_price_basis if self.entries and self.locked_price_basis else self.cfg.bps_price_basis
+
+    @property
+    def executable(self):
+        return self.price_basis == 'executable'
+
+    def signal(self, closing=False, plan=None):
+        if not self.executable:
+            return self.engine.premium_bps()
+        if plan is not None:
+            return plan.marginal_premium_bps
+        primary_buy = self.long != closing
+        buy, sell = ((self.engine.entropy, self.engine.hedge) if primary_buy
+                     else (self.engine.hedge, self.engine.entropy))
+        ask, bid = buy.book.best_ask(), sell.book.best_bid()
+        return (bid / ask - 1) * 1e4 if ask and bid else None
+
     def flat(self):
         # Net-delta tolerance is not a flat-position threshold (e.g. 0.001
         # BTC may still be a material paired position).
@@ -173,7 +203,7 @@ class BpsStrategy:
 
     def exit_reached(self, premium):
         return (premium is not None and self.locked_exit is not None
-                and (premium >= self.locked_exit if self.long else premium <= self.locked_exit))
+                and (premium >= self.locked_exit if self.executable or self.long else premium <= self.locked_exit))
 
     @property
     def profit_mode(self):
@@ -217,7 +247,7 @@ class BpsStrategy:
         if not self.entries:
             return None
         if not self.profit_mode:
-            return 'bps 平仓点位' if self.exit_reached(self.engine.premium_bps()) else None
+            return 'bps 平仓点位' if self.exit_reached(self.signal(closing=True)) else None
         if self.closing:
             return self.close_reason or '继续减仓'
         if (self.cfg.bps_max_hold_sec > 0 and self.costs.started_at
@@ -279,6 +309,7 @@ class BpsStrategy:
     def _adopt_positions(self):
         self._check_paired_positions()
         self.entries = 1  # Historical batch count is unknown; represent the existing pair once.
+        self.locked_price_basis = self.cfg.bps_price_basis
         self.adopted_position = True
         self.last_entry_at = time.time()
         self.costs.inherit({v.key: v.position for v in self.engine.venues.values()}, time.time())
@@ -443,6 +474,7 @@ class BpsStrategy:
         with archive.open('x', encoding='utf-8') as output:
             output.write(original)
         self.entries = max(1, int(state.get('entries', 1)))
+        self.locked_price_basis = state.get('locked_price_basis') or 'mid'
         last_entry = state.get('last_entry_at', 0.0)
         if not isinstance(last_entry, (float, int)) or not math.isfinite(last_entry):
             raise RuntimeError('bps 旧加仓时间无效；保留 pending')
@@ -573,6 +605,9 @@ class BpsStrategy:
                 raise ValueError('checkpoint mismatch or unfinished execution')
             for key in ('entries', 'locked_entry', 'locked_exit', 'closing', 'last_entry_at'):
                 setattr(self, key, state[key])
+            self.locked_price_basis = state.get('locked_price_basis') or 'mid'
+            if self.locked_price_basis not in ('mid', 'executable'):
+                raise ValueError('invalid cycle price basis')
             self.adopted_position = state.get('adopted_position', False)
             self.awaiting_levels = state.get('awaiting_levels', False)
             self.last_closed_at = state.get('last_closed_at', 0.0)
@@ -610,6 +645,7 @@ class BpsStrategy:
                 ('entries', 'locked_entry', 'locked_exit', 'closing', 'pending', 'last_entry_at',
                  'adopted_position', 'awaiting_levels')}
         data.update(identity=self.identity, positions={v.key: v.position for v in self.engine.venues.values()})
+        data['locked_price_basis'] = self.locked_price_basis
         data['active_maker'] = self.engine.active_maker
         data.update(cycle_costs=self.costs.dump(), last_closed_at=self.last_closed_at,
                     last_add_premium=self.last_add_premium, close_reason=self.close_reason,
@@ -630,7 +666,15 @@ class BpsStrategy:
                     self.entry, self.exit, self.window_end = entry, exit, end
                     self.coverage = coverage
                     if self.awaiting_levels:
-                        self.locked_entry, self.locked_exit = entry, exit
+                        if self.price_basis != self.cfg.bps_price_basis:
+                            from dataclasses import replace
+                            old_cfg = replace(self.cfg, bps_price_basis=self.price_basis,
+                                              bps_entry_percentile=100 - self.cfg.bps_entry_percentile if self.long else self.cfg.bps_entry_percentile,
+                                              bps_exit_percentile=self.cfg.bps_exit_percentile if self.long else 100 - self.cfg.bps_exit_percentile)
+                            old_entry, old_exit, _ = await asyncio.to_thread(rolling_levels, old_cfg, time.time())
+                        else:
+                            old_entry, old_exit = entry, exit
+                        self.locked_entry, self.locked_exit = old_entry, old_exit
                         self.awaiting_levels = False
                         try:
                             self.save()
@@ -672,6 +716,8 @@ class BpsStrategy:
 
     def snapshot(self):
         return dict(levels=self.cfg.bps_levels, history_mode=self.cfg.bps_history_mode, direction=self.cfg.bps_direction,
+                    price_basis=self.price_basis, configured_price_basis=self.cfg.bps_price_basis,
+                    open_signal_bps=self.signal(), close_signal_bps=self.signal(closing=True),
                     exit_mode=self.cfg.bps_exit_mode, exit_quote=self.exit_quote() if self.profit_mode else None,
                     take_profit_bps=self.cfg.bps_take_profit_bps, stop_loss_bps=self.cfg.bps_stop_loss_bps,
                     max_hold_sec=self.cfg.bps_max_hold_sec,
@@ -689,7 +735,7 @@ class BpsStrategy:
 
     def plan(self, buy, sell, closing=False, quote=None):
         eng, cfg = self.engine, self.cfg
-        maker = cfg.primary_order_type == 'maker' and not closing
+        maker = cfg.primary_order_type == 'maker' and not closing and not self.executable
         pbuy = buy is eng.entropy
         asks, bids = buy.book.sorted_asks(), sell.book.sorted_bids()
         if not asks or not bids:
@@ -706,6 +752,13 @@ class BpsStrategy:
         asks = [(px, sz) for px, sz in asks if px <= asks[0][0] * (1 + slip)]
         bids = [(px, sz) for px, sz in bids if px >= bids[0][0] * (1 - slip)]
         depth = min(sum(sz for _, sz in asks), sum(sz for _, sz in bids))
+        target = ((self.locked_exit if closing else self.locked_entry) if self.entries
+                  else (self.exit if closing else self.entry))
+        if self.executable:
+            if target is None:
+                return None
+            qualified, _ = crossable_base(asks, bids, target / 1e4)
+            depth = min(depth, qualified)
         max_px = max(asks[0][0], bids[0][0])
         qty = min(depth * (1 if closing else cfg.take_fraction), cfg.max_order_notional / max_px)
         if closing:
@@ -752,13 +805,17 @@ class BpsStrategy:
             return None
         bf = cfg.primary_fee_bps if maker and pbuy else buy.fee_bps
         sf = cfg.primary_fee_bps if maker and not pbuy else sell.fee_bps
+        safe_slip = None
+        if self.executable:
+            ratio = 1 + target / 1e4
+            safe_slip = min(slip, max(0, (sp - ratio * bp) / (sp + ratio * bp))) * 1e4
         return ArbPlan(qty, bp, sp, bn, sn, depth, depth * max_px,
                        (bids[0][0] / asks[0][0] - 1) * 1e4,
                        (sp / bp - 1) * 1e4, bf / 1e4, sf / 1e4,
                        action='bps_close' if closing else 'bps_open',
                        cycle_entry_bps=self.locked_entry if self.entries else self.entry,
                        cycle_exit_bps=self.locked_exit if self.entries else self.exit,
-                       slippage_bps=self.execution_slippage if self.profit_mode else None)
+                       slippage_bps=safe_slip if self.executable else self.execution_slippage if self.profit_mode else None)
 
     def scan(self, now):
         eng, cfg = self.engine, self.cfg
@@ -780,7 +837,7 @@ class BpsStrategy:
         if any(not eng._venue_rate_ok(v) or v.book.last_update_ts <= v.last_traded_ts
                for v in eng.venues.values()):
             return None
-        premium = eng.premium_bps()
+        premium = self.signal()
         if premium is None:
             return None
         exit_reason = self.exit_decision(now)
@@ -821,6 +878,9 @@ class BpsStrategy:
         if self.profit_mode and self.entries and not self.costs.known:
             self.reason = '旧仓成本未知，等待原 bps 平仓点位；不继续加仓'
             return None
+        if self.entries and self.price_basis != cfg.bps_price_basis:
+            self.reason = '旧仓按原口径退出，新一轮使用配置口径；不继续加旧仓'
+            return None
         if self.profit_mode and not self.entries and now - self.last_closed_at < cfg.bps_cycle_cooldown_sec:
             self.reason = '平仓后冷却中'
             eng._schedule_poke(cfg.bps_cycle_cooldown_sec - (now - self.last_closed_at))
@@ -830,7 +890,7 @@ class BpsStrategy:
         if entry is None or (self.cfg.bps_levels == 'rolling'
                              and (self.window_end is None or now - self.window_end > 120)):
             return None
-        condition = premium <= entry if self.long else premium >= entry
+        condition = premium >= entry if self.executable or not self.long else premium <= entry
         key = eng.direction_key(not self.long)
         if not condition:
             eng._armed[key] = None
@@ -865,12 +925,14 @@ class BpsStrategy:
     def before_execution(self, plan):
         if not self.entries and plan.action == 'bps_open':
             self.locked_entry, self.locked_exit = plan.cycle_entry_bps, plan.cycle_exit_bps
+            self.locked_price_basis = self.cfg.bps_price_basis
             self.costs = CycleCosts()
             self.close_reason = None
         self.pending = True
         self.save()  # a crash after submission cannot silently re-adopt fills
-        log.info('[BPS %s] premium=%s entry=%s frozen_exit=%s entries=%d',
-                 plan.action, self.engine.premium_bps(), self.locked_entry, self.locked_exit, self.entries)
+        log.info('[BPS %s] basis=%s signal=%s entry=%s frozen_exit=%s entries=%d',
+                 plan.action, self.price_basis, self.signal(closing=plan.action == 'bps_close', plan=plan),
+                 self.locked_entry, self.locked_exit, self.entries)
 
     def after_execution(self, plan, before_qty, unresolved):
         eng = self.engine
@@ -888,6 +950,7 @@ class BpsStrategy:
             self.costs = CycleCosts()
             self.entries = 0
             self.locked_entry = self.locked_exit = None
+            self.locked_price_basis = None
             self.adopted_position = self.awaiting_levels = False
             self.closing = False
             self.last_entry_at = time.time()

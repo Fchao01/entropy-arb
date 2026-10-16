@@ -297,7 +297,7 @@ nothing here is investment advice. Start with tiny position caps.
 
 ### 溢价 bps 的滚动历史数据
 
-滚动策略读取 YAML 的 `recorder.csv`，只使用最近 `bps.window_minutes` 分钟内的已完成分钟，允许缺口，不用更早的数据补齐。默认 `bps.min_valid_minutes: 30`，窗口不足 30 分钟时要求填满该窗口；每条记录仍须至少 10 次有效采样。旧版 `min_coverage_pct` 字段为兼容保留，不再拦截计算。有效记录数是滚动窗口内的去重数量，不是本次运行的累计写入行数；新记录进入、旧记录移出时，数量可以不变。
+滚动策略读取 YAML 的 `recorder.csv`，默认使用最新 `bps.window_minutes` 条有效的已完成分钟记录，允许断档、跨时段并复用重启前的历史；显式设置 `history_mode: time` 才仅限最近 N 分钟时间范围。默认 `bps.min_valid_minutes: 30`，窗口不足 30 分钟时要求填满该窗口；每条记录仍须至少 10 次有效采样。旧版 `min_coverage_pct` 字段为兼容保留，不再拦截计算。有效记录数是滚动窗口内的去重数量，不是本次运行的累计写入行数；新记录进入、旧记录移出时，数量可以不变。
 
 网页“阈值”弹窗显示完整溢价分布和各档净带宽的买卖触发分钟数、折合每日数。它与 `tools/analyze.py --daily` 使用同一计算方法；数据路径及费率以 YAML 为准。弹窗使用最近完成的上海时间 08:00–08:00 窗口，命令端不加 `--daily` 则分析全部历史。触发表固定使用参考中线，修改三个输入框不会重算表格。历史达标分钟数不等于实际成交笔数或交易收益。
 
@@ -307,3 +307,6 @@ nothing here is investment advice. Start with tiny position caps.
 ## License
 
 [MIT](LICENSE)
+
+
+BPS 可成交价差口径：`bps.price_basis: executable`。所有交易所组合均按主腿/对冲腿角色计算：买主腿开仓比较对冲腿买一 / 主腿卖一，反向平仓比较主腿买一 / 对冲腿卖一；两个信号均为 `(卖价 / 买价 - 1) × 10000 >= 对应点位`。反向持仓交换开平方向。历史从 CSV 买卖报价重算独立分位数，执行使用双腿吃单、合格深度及联合价差保护，不增加盈利门槛。旧持仓保留原口径到退出，详见 `docs/bps-strategy.md`。

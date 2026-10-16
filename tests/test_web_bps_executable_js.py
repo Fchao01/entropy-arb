@@ -1,0 +1,58 @@
+"""Execute the real browser config migration and executable signal renderer."""
+import shutil
+import subprocess
+from pathlib import Path
+
+import pytest
+
+
+def test_browser_migrates_once_and_renders_executable_targets():
+    node = shutil.which('node')
+    if not node:
+        pytest.skip('Node.js unavailable')
+    source = Path(__file__).resolve().parents[1] / 'web' / 'app.js'
+    result = subprocess.run([node, '-e', r'''
+const fs = require('node:fs'), vm = require('node:vm'), assert = require('node:assert/strict');
+const source = fs.readFileSync(process.argv[1], 'utf8');
+const nodes = new Map();
+function get(id) {
+  if (!nodes.has(id)) nodes.set(id, {value: '', innerHTML: '', textContent: '',
+    closest() {return this;}, querySelectorAll() {return [];}});
+  return nodes.get(id);
+}
+const context = vm.createContext({location: {pathname: '/monitor'}, document: {getElementById: get}});
+const utilities = source.slice(0, source.indexOf('async function api('));
+const config = source.slice(source.indexOf('const fieldMap ='), source.indexOf('async function openEditor('));
+const render = source.slice(source.indexOf('function renderSignals('), source.indexOf('\nfunction drawChart('));
+vm.runInContext(utilities + '\n' + config + '\n' + render + String.raw`
+state.meta = {primary_venues: ['lighter-rh', 'arcus']};
+element('config-yaml').value = 'strategy:\n  mode: bps\nbps:\n  levels: rolling\n  direction: long_primary\n  entry_percentile: 10\n  exit_percentile: 75\nexecution:\n  primary_order_type: maker\n';
+syncFields();
+`, context);
+assert.equal(get('bps-price-basis').value, 'executable');
+assert.equal(get('bps-entry-percentile').value, 90);
+assert.equal(get('bps-exit-percentile').value, 75);
+assert.equal(get('primary-order-type').value, 'taker');
+assert.equal(get('primary-order-type').disabled, true);
+vm.runInContext('syncFields()', context);
+assert.equal(get('bps-entry-percentile').value, 90);
+vm.runInContext(`
+element('bps-exit-mode').value = 'profit';
+refreshStrategyFields();
+`, context);
+assert.equal(get('bps-price-basis').value, 'mid');
+assert.equal(get('bps-entry-percentile').value, 10);
+vm.runInContext(`
+renderSignals({bps_strategy: {price_basis: 'executable', entry_bps: 5, exit_bps: -4},
+  venues: [{fresh: true}], execution_signals: {mode: 'bps', rows: [
+  {action: 'open', primary_buy: true, buy: 'ARCUS', sell: 'RH', order_type: 'taker',
+   comparison: '>=', executable_premium_bps: 6, trigger_premium_bps: 6, hurdle_bps: 5, gap_bps: 1}
+]}}, true);
+`, context);
+assert.match(get('signal-summary').textContent, /可成交价差/);
+assert.match(get('signal-rows').innerHTML, /双腿吃单/);
+assert.match(get('signal-rows').innerHTML, /≥/);
+assert.match(get('signal-note').textContent, /卖方买一/);
+assert.doesNotMatch(get('signal-note').textContent, /中间价溢价/);
+''', str(source)], capture_output=True, text=True, timeout=15)
+    assert result.returncode == 0, result.stdout + result.stderr

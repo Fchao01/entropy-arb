@@ -23,13 +23,14 @@ def execution_signals(engine):
     rows = []
     if strategy:
         state = strategy.snapshot()
-        premium = engine.premium_bps()
         for action, primary_buy, target, comparison in (
             ('open', strategy.long, state['entry_bps'], '<=' if strategy.long else '>='),
             ('close', not strategy.long, state['exit_bps'], '>=' if strategy.long else '<='),
         ):
-            trigger = premium
-            basis = 'mid_premium_bps'
+            trigger = strategy.signal(closing=action == 'close')
+            basis = 'executable_premium_bps' if strategy.executable else 'mid_premium_bps'
+            if strategy.executable:
+                comparison = '>='
             if action == 'close' and strategy.profit_mode and state['cost_known']:
                 trigger = state['exit_quote']['net_bps'] if state['exit_quote'] else None
                 target, comparison = strategy.cfg.bps_take_profit_bps, '>='
@@ -38,9 +39,9 @@ def execution_signals(engine):
             gap = None if trigger is None or target is None else (
                 target - trigger if comparison == '<=' else trigger - target)
             rows.append(dict(action=action, primary_buy=primary_buy, buy=buy.name, sell=sell.name,
-                             order_type='maker' if maker and action == 'open' else 'taker',
+                             order_type='maker' if maker and action == 'open' and not strategy.executable else 'taker',
                              executable_premium_bps=executable_premium(
-                                 engine, buy, sell, maker=maker and action == 'open'),
+                                 engine, buy, sell, maker=maker and action == 'open' and not strategy.executable),
                              trigger_premium_bps=trigger, hurdle_bps=target, trigger_basis=basis,
                              comparison=comparison, gap_bps=gap,
                              has_position=bool(strategy.entries),

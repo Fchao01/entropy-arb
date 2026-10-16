@@ -353,7 +353,9 @@ class Dashboard:
             state = eng.bps_strategy.snapshot()
             direction = "BUY primary / SELL hedge" if eng.bps_strategy.long else "SELL primary / BUY hedge"
             entry, exit = state["entry_bps"], state["exit_bps"]
-            content = Text(f"{direction}\nmid premium {eng.premium_bps()} bps\n"
+            quote_label = (f"可成交开仓 {state['open_signal_bps']} / 平仓 {state['close_signal_bps']} bps（均 ≥ 门槛）"
+                           if state['price_basis'] == 'executable' else f"mid premium {eng.premium_bps()} bps（旧口径）")
+            content = Text(f"{direction}\n{quote_label}\n"
                            f"entry {entry} / exit {exit} bps · {state['entries']} filled batches · no batch limit\n"
                            f"{state['reason']}\nCSV: {state['data_path']}")
             if state['exit_mode'] == 'profit':

@@ -172,6 +172,7 @@ class Config:
     spread_bps: float = 1.0
     bps_levels: str = "rolling"
     bps_history_mode: str = "records"
+    bps_price_basis: str = "mid"
     bps_direction: str = "long_primary"
     bps_entry: float = -9.0
     bps_exit: float = -6.0
@@ -227,7 +228,7 @@ class Config:
 _SCHEMA: Dict[str, Any] = {
     "strategy": {"mode": str, "spread_bps": float},
     "bps": {
-        "levels": str, "direction": str, "history_mode": str,
+        "levels": str, "direction": str, "history_mode": str, "price_basis": str,
         "entry_bps": float, "exit_bps": float,
         "window_minutes": int, "min_coverage_pct": float, "min_valid_minutes": int,
         "entry_percentile": float, "exit_percentile": float,
@@ -522,6 +523,13 @@ def load_config(config_file: str = "config.yaml", env_file: str = ".env", *,
                         max_hold_sec=900.0, min_gap_bps=2.0, entry_confirm_sec=2.0,
                         cycle_cooldown_sec=30.0, add_step_bps=0.5, execution_slippage_bps=1.0)
     bps = {**bps_defaults, **bps}
+    legacy_basis = 'price_basis' not in (raw.get('bps') or {})
+    bps['price_basis'] = bps.get('price_basis', 'mid' if strategy_mode != 'bps' or bps['levels'] == 'manual'
+                                 or bps['exit_mode'] == 'profit' else 'executable')
+    if bps['price_basis'] not in ('mid', 'executable'):
+        raise ConfigError('bps.price_basis must be mid or executable')
+    if bps['price_basis'] == 'executable' and bps['exit_mode'] != 'levels':
+        raise ConfigError('可成交价差使用 bps.exit_mode: levels；净收益模式使用 mid 兼容口径')
     if bps["history_mode"] not in ("records", "time"):
         raise ConfigError("bps.history_mode must be records or time")
     if bps["levels"] not in ("manual", "rolling") or bps["direction"] not in ("long_primary", "short_primary"):
@@ -551,8 +559,23 @@ def load_config(config_file: str = "config.yaml", env_file: str = ".env", *,
             raise ConfigError("bps percentiles must be in [0, 100]")
     long = bps["direction"] == "long_primary"
     entry, exit = (bps["entry_bps"], bps["exit_bps"]) if bps["levels"] == "manual" else (bps["entry_percentile"], bps["exit_percentile"])
-    if (long and entry >= exit) or (not long and entry <= exit):
+    if (bps['price_basis'] == 'mid' or legacy_basis) and ((long and entry >= exit) or (not long and entry <= exit)):
         raise ConfigError("bps long entry must be below exit; short entry must be above exit / 开平仓点位顺序不正确")
+    if legacy_basis and bps['price_basis'] == 'executable':
+        # Preserve the selected historical tail when converting the former
+        # primary/hedge coordinate to separate sell/buy opportunity series.
+        if long:
+            bps['entry_percentile'] = 100 - bps['entry_percentile']
+        else:
+            bps['exit_percentile'] = 100 - bps['exit_percentile']
+    elif bps['price_basis'] == 'executable':
+        original_bps = raw.get('bps') or {}
+        bps['entry_percentile'] = original_bps.get('entry_percentile', 90)
+        bps['exit_percentile'] = original_bps.get('exit_percentile', 75)
+        bps['entry_bps'] = original_bps.get('entry_bps', 1.0)
+        bps['exit_bps'] = original_bps.get('exit_bps', 1.0)
+    if bps['price_basis'] == 'executable' and min(bps['entry_bps'], bps['exit_bps']) <= -10000:
+        raise ConfigError('可成交价差门槛必须大于 -10000 bps')
     thr = raw.get("thresholds") or {}
     if strategy_mode in ("bps", "spread"):
         thr = {"midline_bps": 0, "upper_bps": 4, "lower_bps": 4, **thr}
@@ -594,6 +617,8 @@ def load_config(config_file: str = "config.yaml", env_file: str = ".env", *,
     primary_order_type = _get(raw, "execution", "primary_order_type", "taker")
     if primary_order_type not in ("taker", "maker"):
         raise ConfigError("execution.primary_order_type must be taker or maker / 主腿成交方式必须为 taker 或 maker")
+    if strategy_mode == 'bps' and bps['price_basis'] == 'executable':
+        primary_order_type = 'taker'
     if strategy_mode == "spread" and primary_order_type != "taker":
         raise ConfigError("spread strategy requires taker / 实际可成交价差策略使用吃单成交")
     maker_timeout_sec = float(_get(raw, "execution", "maker_timeout_sec", 5.0))
@@ -618,6 +643,7 @@ def load_config(config_file: str = "config.yaml", env_file: str = ".env", *,
         spread_bps=spread_bps,
         bps_levels=bps["levels"], bps_direction=bps["direction"],
         bps_history_mode=bps["history_mode"],
+        bps_price_basis=bps['price_basis'],
         bps_entry=float(bps["entry_bps"]), bps_exit=float(bps["exit_bps"]),
         bps_window_minutes=bps["window_minutes"],
         bps_min_coverage_pct=float(bps["min_coverage_pct"]),

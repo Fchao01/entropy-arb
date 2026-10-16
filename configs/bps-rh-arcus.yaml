@@ -1,16 +1,17 @@
-# 溢价低位开仓、回升平仓；分位数和规模为配置示例，不保证可覆盖交易成本。
+# 买主腿/卖对冲腿开仓，反向平仓；两个方向均比较可成交价差 >= 各自点位，费用另计。
 # RH 主腿 + Arcus 对冲。先用 --record-only 采集；阈值是示例，须重新测量。
 # Arcus 手续费按你提供的 0.0225% 填为 2.25 bps；RH 费率也应核对账户。
 # 两边品种名称不同时分别添加 primary.symbol / hedge.symbol。
 strategy:
   mode: bps
 bps:
+  price_basis: executable
   levels: rolling
   history_mode: records   # 最新有效分钟记录，可跨时段复用历史
   direction: long_primary
   window_minutes: 120
   min_valid_minutes: 30   # 允许缺口；至少 30 条有效历史，参考记录数不足 30 时按参考数计算
-  entry_percentile: 10
+  entry_percentile: 90
   exit_percentile: 75
   add_interval_sec: 60
   max_position_usd: 1000
