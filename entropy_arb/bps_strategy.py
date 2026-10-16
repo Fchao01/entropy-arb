@@ -685,10 +685,17 @@ class BpsStrategy:
             qty = floor_step(min(abs(net), self.cfg.max_order_notional / cap_price), step)
             minimum = max(min_base, min_quote / limit)
             minimum = round(math.ceil(minimum / step - 1e-9) * step, 12)
+            capped_qty = qty
             if self.tolerance < abs(net) - qty < minimum:
                 qty = floor_step(abs(net) - minimum, step)
             if qty < minimum:
-                raise RuntimeError('bps 差额低于最小下单规模或单笔上限不足以拆分；保留 pending')
+                reason = (f'bps 自动修正被拦截 [{excess.name}]：净差额 {net:+.8g}，'
+                          f'按单笔上限可下 {capped_qty:.8g}，避免小尾仓后拟下 {qty:.8g}；'
+                          f'保护价 {limit:.8g}，减仓最小数量 {min_base:.8g}，'
+                          f'减仓最小金额 ${min_quote:.4f}，单笔上限 ${self.cfg.max_order_notional:.4f}；'
+                          '差额低于最小下单规模或单笔上限不足以拆分；保留 pending')
+                log.error('[BPS RECOVERY BLOCKED] %s', reason)
+                raise RuntimeError(reason)
             confirmed = await eng._hedge(math.copysign(qty, net))
             self.save()
             if not confirmed or eng.halted:

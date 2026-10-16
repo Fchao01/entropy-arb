@@ -48,6 +48,9 @@ def grid_int(value: str, unit: Decimal) -> int:
 
 class ArcusVenue:
     kind = "arcus"
+    # Match _place_request(): reduce-only orders are exempt from minimum
+    # notional, but must still satisfy minOrderSize and the quantity grid.
+    reduce_only_min_quote = 0.0
 
     def __init__(self, conf: VenueConf, session: aiohttp.ClientSession,
                  settle_timeout_sec: float) -> None:
