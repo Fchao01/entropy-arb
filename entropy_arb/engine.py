@@ -856,7 +856,9 @@ class Engine:
 
     def _check_starting_positions(self) -> None:
         net = sum(v.position for v in self.venues.values())
-        if not math.isfinite(net) or abs(net) > self.cfg.net_tolerance_base:
+        balanced = (self.bps_strategy.net_balanced() if self.bps_strategy
+                    else math.isfinite(net) and abs(net) <= self.cfg.net_tolerance_base)
+        if not balanced:
             raise RuntimeError(
                 f"startup positions are unbalanced (net {net:+.8g}); no orders sent / "
                 "启动时已有仓位不平衡，已拒绝启动，不会自动平仓；请核对两边账户和旧仓位")
@@ -871,7 +873,7 @@ class Engine:
         net = sum(v.position for v in self.venues.values())
         tolerance = self.bps_strategy.tolerance if self.bps_strategy else self.cfg.net_tolerance_base
         for _ in range(3 if self.bps_strategy else 1):
-            if abs(net) <= tolerance:
+            if (self.bps_strategy.net_balanced() if self.bps_strategy else abs(net) <= tolerance):
                 break
             confirmed = await self._hedge(net)
             remaining = sum(v.position for v in self.venues.values())
@@ -881,7 +883,8 @@ class Engine:
                 break
             net = remaining
         remaining = sum(v.position for v in self.venues.values())
-        if self.cfg.primary_order_type == "maker" and abs(remaining) > tolerance:
+        balanced = self.bps_strategy.net_balanced() if self.bps_strategy else abs(remaining) <= tolerance
+        if self.cfg.primary_order_type == "maker" and not balanced:
             self.halted = True
             log.critical("[MAKER] residual base %.8g exceeds tolerance; stopped new quotes", remaining)
 

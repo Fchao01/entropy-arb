@@ -292,7 +292,8 @@ function renderMonitor() {
   const historyRange = bps?.coverage?.history_start_ts != null ? ` · 最新参考历史 ${windowTime(bps.coverage.history_start_ts)} → ${windowTime(bps.coverage.history_end_ts)} · 最后记录距今 ${number(bps.coverage.latest_data_age_sec / 60, 1)} 分钟` : "";
   const coverageLabel = bps?.coverage ? ` · 有效数据 ${bps.coverage.valid_minutes}/${bps.window_minutes}（${number(bps.coverage.coverage_pct, 1)}%）` : "";
   const pnlLabel = bps?.exit_mode === "profit" ? ` · 净收益止盈 ${number(bps.take_profit_bps, 2)} / 止损 ${number(bps.stop_loss_bps, 2)} bps · 保守退出净收益 ${money(bps.exit_quote?.net_usd, 4)}（${signed(bps.exit_quote?.net_bps)} bps） · ${bps.cost_known ? "已知成交成本" : "成本尚未建立或旧仓成本未知"}` : "";
-  const strategyLabel = bps ? ` · bps ${bps.levels === "rolling" ? "滚动" : "固定"}：开仓 ${signed(bps.entry_bps)} / 平仓 ${signed(bps.exit_bps)} · 本轮已成交 ${bps.entries} 批 · 不限批次 · ${bps.reason}${coverageLabel}${historyRange}` : "";
+  const dustLabel = bps?.position_residual?.accepted_dust ? ` · 已确认精度尾差 ${signed(bps.position_residual.net_base, 8)}（名义敞口 ${money(bps.position_residual.notional_usd, 6)}），继续监控` : "";
+  const strategyLabel = bps ? ` · bps ${bps.levels === "rolling" ? "滚动" : "固定"}：开仓 ${signed(bps.entry_bps)} / 平仓 ${signed(bps.exit_bps)} · 本轮已成交 ${bps.entries} 批 · 不限批次 · ${bps.reason}${dustLabel}${coverageLabel}${historyRange}` : "";
   const telegram = metrics?.telegram;
   const telegramState = !metrics ? "" : !metrics.telegram_enabled ? "未配置" : telegram?.status === "failed" ? "发送失败" : `已启用 · 已发 ${telegram?.sent ?? 0}`;
   const telegramProfile = telegram?.profile ? ` · ${escapeHtml(telegram.profile)}` : "";

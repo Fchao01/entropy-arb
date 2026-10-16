@@ -37,6 +37,7 @@ state.detail = {minutes: [], task: {
     active_maker: {cancel_policy: 'best_price', state: 'OPEN', at_best_price: true, filled: 0, hedged: 0},
     bps_strategy: {
     levels: 'rolling', window_minutes: 120, entries: 0, reason: '等待开仓点位',
+    position_residual: {accepted_dust: true, net_base: .0000694, notional_usd: .053597},
     coverage: {valid_minutes: 120, coverage_pct: 100, history_start_ts: 1792072800,
       history_end_ts: 1792076400, latest_data_age_sec: 60}
   }}
@@ -45,6 +46,8 @@ renderMonitor();
 `, context);
 const html = nodes.get('monitor-summary').innerHTML;
 assert.match(html, /最新参考历史/);
+assert.match(html, /已确认精度尾差 \+0\.00006940/);
+assert.match(html, /名义敞口 \$0\.053597/);
 assert.match(html, /条件有效且在最优价持续保留/);
 assert.match(html, /最优价排队中/);
 assert.doesNotMatch(html, /最长等待/);

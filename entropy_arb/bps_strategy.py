@@ -156,6 +156,7 @@ class BpsStrategy:
         self.last_add_premium = None
         self.close_reason = None
         self.last_cycle_net_usd = None
+        self._dust_log = None
         self.reason = '等待数据' if self.entry is None else '等待开仓点位'
         self.path = Path(self.cfg.log_file).with_suffix('.bps-state.json')
         self.identity = [self.cfg.symbol, self.cfg.primary_venue, self.cfg.hedge_venue,
@@ -195,11 +196,73 @@ class BpsStrategy:
     def flat(self):
         # Net-delta tolerance is not a flat-position threshold (e.g. 0.001
         # BTC may still be a material paired position).
-        return all(abs(v.position) < self.engine._step / 2 for v in self.engine.venues.values())
+        return all(abs(v.position) <= 1e-12 for v in self.engine.venues.values())
 
     @property
     def tolerance(self):
         return max(1e-12, min(self.cfg.net_tolerance_base, self.engine._step / 2))
+
+    def _dust_prices(self):
+        venues = list(self.engine.venues.values())
+        if not all(v.book.is_fresh(self.cfg.staleness_sec) for v in venues):
+            return None
+        prices = [v.book.mid() for v in venues]
+        return prices if all(p is not None and math.isfinite(p) and p > 0 for p in prices) else None
+
+    def precision_dust(self, positions=None):
+        """Classify quantity/price only; order certainty is checked separately."""
+        eng = self.engine
+        positions = positions if positions is not None else [v.position for v in eng.venues.values()]
+        net = sum(positions)
+        cap = self.cfg.bps_max_dust_notional_usd
+        if not math.isfinite(net) or abs(net) <= 1e-12 or abs(net) > eng._step + 1e-12 or cap <= 0:
+            return False
+        prices = self._dust_prices()
+        if prices is None or abs(net) * max(prices) > cap + 1e-12:
+            return False
+        # An outage never turns a normally tradeable imbalance into dust.
+        for venue, price, position in zip(eng.venues.values(), prices, positions):
+            if position * net <= 0:
+                continue
+            qty = floor_step(min(abs(net), abs(position)), eng._step)
+            if qty > 0 and qty >= venue.min_base and qty * price >= max(venue.min_quote, self.cfg.min_order_notional):
+                return False
+        return True
+
+    def net_balanced(self):
+        net = sum(v.position for v in self.engine.venues.values())
+        return math.isfinite(net) and (abs(net) <= 1e-12 or self.precision_dust())
+
+    def only_dust_positions(self, positions=None):
+        positions = positions if positions is not None else [v.position for v in self.engine.venues.values()]
+        if all(abs(position) <= 1e-12 for position in positions):
+            return False
+        prices = self._dust_prices()
+        return (prices is not None and (abs(sum(positions)) <= 1e-12 or self.precision_dust(positions))
+                and all(abs(position) <= self.engine._step + 1e-12
+                        and abs(position) * price <= self.cfg.bps_max_dust_notional_usd + 1e-12
+                        for position, price in zip(positions, prices)))
+
+    def residual_status(self):
+        net = sum(v.position for v in self.engine.venues.values())
+        prices = self._dust_prices()
+        accepted = (not self.pending and not self.engine.halted and self.engine.active_maker is None
+                    and not self.engine._position_uncertain and self.precision_dust())
+        return dict(net_base=net, notional_usd=abs(net) * max(prices) if prices else None,
+                    accepted_dust=accepted, max_dust_notional_usd=self.cfg.bps_max_dust_notional_usd)
+
+    def note_dust(self):
+        if not self.precision_dust():
+            self._dust_log = None
+            return
+        net = sum(v.position for v in self.engine.venues.values())
+        previous = self._dust_log
+        now = time.monotonic()
+        if previous is None or abs(net - previous[0]) > 1e-12 or now - previous[1] >= 60:
+            log.warning('[BPS DUST] confirmed precision residual net=%+.8g value=$%.6f cap=$%.2f; '
+                        'below order minimum, continue monitoring without rounding positions to zero',
+                        net, self.residual_status()['notional_usd'], self.cfg.bps_max_dust_notional_usd)
+            self._dust_log = (net, now)
 
     def exit_reached(self, premium):
         return (premium is not None and self.locked_exit is not None
@@ -302,8 +365,8 @@ class BpsStrategy:
         primary, hedge = self.engine.entropy.position, self.engine.hedge.position
         sign = 1 if self.long else -1
         if (not all(math.isfinite(value) for value in (primary, hedge))
-                or primary * sign <= 0 or hedge * sign >= 0
-                or abs(primary + hedge) > self.tolerance):
+                or ((primary * sign <= 0 or hedge * sign >= 0) and not self.only_dust_positions())
+                or not self.net_balanced()):
             raise RuntimeError('bps 旧仓位未配对或方向与 bps.direction 不一致，请核对两腿数量及配置方向')
 
     def _adopt_positions(self):
@@ -415,11 +478,13 @@ class BpsStrategy:
                 raise ValueError('invalid checkpoint')
         except (OSError, ValueError, TypeError) as error:
             raise RuntimeError('bps 状态文件损坏，请核对订单和仓位') from error
-        if not state.get('pending'):
+        net = sum(v.position for v in self.engine.venues.values())
+        dust_candidate = math.isfinite(net) and 1e-12 < abs(net) <= self.engine._step + 1e-12
+        if not state.get('pending') and not dust_candidate:
             return
         if state.get('identity') != self.identity:
             raise RuntimeError('bps 未确认状态的账户或交易对与当前配置不一致，不能自动解除')
-        log.warning('[BPS RECOVERY] 检测到旧 pending，开始查询两边未成交订单与实时持仓')
+        log.warning('[BPS RECOVERY] 检测到旧 pending 或精度尾差，开始查询两边未成交订单与实时持仓')
         query_timeout = max(10.0, self.cfg.settle_timeout_sec)
 
         async def check(venue):
@@ -559,7 +624,18 @@ class BpsStrategy:
         self.adopted_position = True
         self.closing = False
         self.close_reason = None
-        self.costs.inherit(positions, time.time())
+        if not state.get('pending'):
+            # A clean restart with dust retains the established cycle metadata,
+            # especially a latched profit-mode exit and its add-spacing basis.
+            for key in ('closing', 'close_reason', 'last_add_premium', 'last_closed_at', 'last_cycle_net_usd'):
+                if key in state:
+                    setattr(self, key, state[key])
+        if (not state.get('pending') and state.get('cycle_costs') is not None
+                and all(abs(positions[v.key] - state['positions'][v.key]) <= self.tolerance
+                        for v in eng.venues.values())):
+            self.costs = CycleCosts.restore(state['cycle_costs'], positions, self.tolerance)
+        else:
+            self.costs.inherit(positions, time.time())
         self._use_current_basis()
         # Old ambiguous fills have unknown prices. Do not manufacture P&L.
         self.save()  # durable pending before the first reduce-only repair
@@ -567,7 +643,7 @@ class BpsStrategy:
         deadline = time.monotonic() + max(30, 2 * self.cfg.settle_timeout_sec)
         for _ in range(3):
             net = sum(v.position for v in eng.venues.values())
-            if abs(net) <= self.tolerance:
+            if abs(net) <= 1e-12:
                 break
             while not eng.stop.is_set() and time.monotonic() < deadline:
                 if all(v.ready_to_trade() and v.book.is_fresh(self.cfg.staleness_sec)
@@ -579,6 +655,8 @@ class BpsStrategy:
                     pass
             if eng.stop.is_set() or time.monotonic() >= deadline:
                 raise RuntimeError('bps 自动修正等待行情超时或停止；保留 pending')
+            if self.net_balanced():
+                break  # Fresh prices now verify the size + USD dust limits.
             # Recheck that no external order/position changed during feed setup.
             for venue in eng.venues.values():
                 if await asyncio.wait_for(venue.has_open_orders(), self.cfg.settle_timeout_sec) is not False:
@@ -615,7 +693,7 @@ class BpsStrategy:
                 pass
             else:
                 raise RuntimeError('bps 自动核验已停止，保留 pending')
-        if abs(sum(v.position for v in eng.venues.values())) > self.tolerance:
+        if not self.net_balanced():
             raise RuntimeError('bps 自动修正后仍有差额；保留 pending，未开启交易')
         for attempt in range(2):
             for venue in eng.venues.values():
@@ -637,9 +715,11 @@ class BpsStrategy:
         self.pending = False
         self.startup_recovery = None
         self.save()
-        log.warning('[BPS RECOVERY] 已自动修正 net=%+.8g -> %+.8g，保留配对仓位；'
-                    '旧状态归档=%s；旧轮成本未知，不补算盈利',
-                    initial_net, sum(v.position for v in eng.venues.values()), archive)
+        self.note_dust()
+        log.warning('[BPS RECOVERY] 核验/修正完成 net=%+.8g -> %+.8g precision_dust=%s；'
+                    '旧状态归档=%s；历史成本=%s',
+                    initial_net, sum(v.position for v in eng.venues.values()), self.precision_dust(),
+                    archive, '已知' if self.costs.known else '未知，不补算盈利')
 
     def restore(self):
         state = None
@@ -688,18 +768,19 @@ class BpsStrategy:
             positions_now = {v.key: v.position for v in self.engine.venues.values()}
             if state.get('cycle_costs') is not None:
                 self.costs = CycleCosts.restore(state['cycle_costs'], positions_now, self.tolerance)
-                if self.costs.known:
-                    # Retain known inventory basis; new-session turnover/fees still start at zero.
-                    from collections import deque
-                    self.engine.execution_stats.lots = {key: deque([list(lot) for lot in lots])
-                                                        for key, lots in self.costs.stats.lots.items()}
+                # Retain even unknown-price dust lots: dropping a tiny inherited
+                # lot would wrongly make its later realized P&L look known.
+                # New-session turnover and fees still start at zero.
+                from collections import deque
+                self.engine.execution_stats.lots = {key: deque([list(lot) for lot in lots])
+                                                    for key, lots in self.costs.stats.lots.items()}
             else:
                 self.costs.inherit(positions_now, time.time())
             waiting = (self.adopted_position and self.awaiting_levels and not self.closing
                        and self.locked_entry is None and self.locked_exit is None)
-            if (self.entries < 1 or (not waiting and not all(
+            if ((self.entries < 1 and not self.only_dust_positions()) or (not waiting and not all(
                     math.isfinite(x) for x in (self.locked_entry, self.locked_exit)))
-                    or self.engine.entropy.position * (1 if self.long else -1) <= 0):
+                    or (self.engine.entropy.position * (1 if self.long else -1) <= 0 and not self.only_dust_positions())):
                 raise ValueError('invalid cycle')
         except (OSError, ValueError, KeyError, TypeError, OverflowError) as error:
             raise RuntimeError('bps 策略发现无法确认归属的旧仓位或未完成订单，已拒绝启动；请核对订单和仓位后处理') from error
@@ -795,6 +876,7 @@ class BpsStrategy:
         return dict(levels=self.cfg.bps_levels, history_mode=self.cfg.bps_history_mode, direction=self.cfg.bps_direction,
                     price_basis=self.price_basis, configured_price_basis=self.cfg.bps_price_basis,
                     open_signal_bps=self.signal(), close_signal_bps=self.signal(closing=True),
+                    position_residual=self.residual_status(),
                     exit_mode=self.cfg.bps_exit_mode, exit_quote=self.exit_quote() if self.profit_mode else None,
                     take_profit_bps=self.cfg.bps_take_profit_bps, stop_loss_bps=self.cfg.bps_stop_loss_bps,
                     max_hold_sec=self.cfg.bps_max_hold_sec,
@@ -846,13 +928,20 @@ class BpsStrategy:
                 cap = min(venue.cap_usd, cfg.bps_max_position_usd)
                 qty = min(qty, max(0, cap / mid - abs(venue.position)))
         qty = floor_step(qty, eng._step)
+        def bounded_tail(quantity):
+            # Only tolerate the unavoidable fractional remainder after closing
+            # every orderable step, never deliberately strand a small slice
+            # because a cap/depth restriction shortened this batch.
+            return (quantity >= floor_step(paired, eng._step) - 1e-12
+                    and self.only_dust_positions([v.position + (quantity if v is buy else -quantity)
+                                                 for v in eng.venues.values()]))
         if closing:
             paired = min(max(0, -buy.position), max(0, sell.position))
             minimum_tail = max(eng._min_base, buy.min_quote / asks[0][0],
                                sell.min_quote / (bids[-1][0] * (1 - slip)))
             minimum_tail = round(math.ceil(minimum_tail / eng._step - 1e-9) * eng._step, 12)
             residual = paired - qty
-            if eng._step / 2 <= residual < minimum_tail:
+            if eng._step / 2 <= residual < minimum_tail and not bounded_tail(qty):
                 # A per-order cap or limited depth must not strand an
                 # untradeable last slice. Leave at least one valid order.
                 qty = floor_step(max(0, paired - minimum_tail), eng._step)
@@ -871,7 +960,7 @@ class BpsStrategy:
                 return None
             bp, bn = walk_depth(asks, qty)
             sp, sn = walk_depth(bids, qty)
-        if closing and eng._step / 2 <= paired - qty < minimum_tail:
+        if closing and eng._step / 2 <= paired - qty < minimum_tail and not bounded_tail(qty):
             qty = floor_step(max(0, paired - minimum_tail), eng._step)
             if qty <= 0 or qty < eng._min_base:
                 return None
@@ -906,7 +995,7 @@ class BpsStrategy:
                for v in eng.venues.values()) or eng._venue_down:
             self.reason = '等待可交易的双腿行情'
             return None
-        if abs(sum(v.position for v in eng.venues.values())) > self.tolerance:
+        if not self.net_balanced():
             eng.halted = self.pending = True
             self.reason = '两边已确认仓位不匹配，暂停新订单'
             self.save()
@@ -935,10 +1024,18 @@ class BpsStrategy:
             # Thin depth is transient. Halt only when the actual remainder is dust.
             dust = any(abs(v.position) < max(v.min_base, v.min_quote / v.book.mid())
                        for v in eng.venues.values())
-            if plan is None and not self.flat() and dust:
+            if plan is None and self.only_dust_positions():
+                self.reason = '仅剩小额精度尾仓，继续监控；未将真实仓位归零'
+                self.note_dust()
+            elif plan is None and not self.flat() and dust:
                 eng.halted = True
                 log.critical('[BPS] %s', self.reason)
-            return (buy, sell, plan) if plan else None
+            if plan:
+                return buy, sell, plan
+            if not self.only_dust_positions() or self.profit_mode:
+                return None
+            # An untradeable tiny remainder must not prevent a fresh entry
+            # when its own entry signal and position limits allow it.
         if self.closing and not self.profit_mode:
             # Ordinary level exits are reconsidered for every slice, including
             # restored cycles. Keep the frozen levels and remaining cost basis;
@@ -1003,7 +1100,8 @@ class BpsStrategy:
         if not self.entries and plan.action == 'bps_open':
             self.locked_entry, self.locked_exit = plan.cycle_entry_bps, plan.cycle_exit_bps
             self.locked_price_basis = self.cfg.bps_price_basis
-            self.costs = CycleCosts()
+            if not self.only_dust_positions():
+                self.costs = CycleCosts()
             self.close_reason = None
         self.pending = True
         self.save()  # a crash after submission cannot silently re-adopt fills
@@ -1013,9 +1111,13 @@ class BpsStrategy:
 
     def after_execution(self, plan, before_qty, unresolved):
         eng = self.engine
-        if unresolved or abs(sum(v.position for v in eng.venues.values())) > self.tolerance:
-            eng.halted = True
-            self.reason = '成交或对冲未确认，暂停交易'
+        if (unresolved or eng.halted or eng.active_maker is not None
+                or eng._position_uncertain or not self.net_balanced()):
+            eng.halted = self.pending = True
+            if unresolved or eng.active_maker is not None or eng._position_uncertain:
+                self.reason = '订单或对冲结果未确认，暂停新订单'
+            elif not self.net_balanced():
+                self.reason = '已确认仓位差额超过精度/金额上限或修正失败，暂停新订单'
             self.save()
             return
         if self.flat():
@@ -1040,4 +1142,5 @@ class BpsStrategy:
             self.last_add_premium = eng.premium_bps()
         self.pending = False
         self.save()
+        self.note_dust()
         self.reason = '平仓中' if self.closing else '持仓中' if self.entries else '等待开仓点位'

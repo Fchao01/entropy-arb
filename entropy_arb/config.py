@@ -193,6 +193,7 @@ class Config:
     bps_cycle_cooldown_sec: float = 30.0
     bps_add_step_bps: float = 0.5
     bps_execution_slippage_bps: float = 1.0
+    bps_max_dust_notional_usd: float = 0.10
 
     @property
     def primary(self) -> VenueConf:
@@ -238,6 +239,7 @@ _SCHEMA: Dict[str, Any] = {
         "exit_mode": str, "take_profit_bps": float, "stop_loss_bps": float,
         "max_hold_sec": float, "min_gap_bps": float, "entry_confirm_sec": float,
         "cycle_cooldown_sec": float, "add_step_bps": float, "execution_slippage_bps": float,
+        "max_dust_notional_usd": float,
     },
     "primary": {
         "venue": str,
@@ -521,7 +523,8 @@ def load_config(config_file: str = "config.yaml", env_file: str = ".env", *,
                         max_position_usd=1000.0, cost_buffer_bps=0.0,
                         exit_mode="levels", take_profit_bps=1.0, stop_loss_bps=10.0,
                         max_hold_sec=900.0, min_gap_bps=2.0, entry_confirm_sec=2.0,
-                        cycle_cooldown_sec=30.0, add_step_bps=0.5, execution_slippage_bps=1.0)
+                        cycle_cooldown_sec=30.0, add_step_bps=0.5, execution_slippage_bps=1.0,
+                        max_dust_notional_usd=0.10)
     bps = {**bps_defaults, **bps}
     legacy_basis = 'price_basis' not in (raw.get('bps') or {})
     bps['price_basis'] = bps.get('price_basis', 'mid' if strategy_mode != 'bps' or bps['levels'] == 'manual'
@@ -547,7 +550,7 @@ def load_config(config_file: str = "config.yaml", env_file: str = ".env", *,
     if bps["add_interval_sec"] < 0 or bps["cost_buffer_bps"] < 0 or bps["max_position_usd"] <= 0:
         raise ConfigError("bps interval/buffer must be >= 0; position cap must be > 0")
     for name in ("stop_loss_bps", "max_hold_sec", "min_gap_bps", "entry_confirm_sec",
-                 "cycle_cooldown_sec", "add_step_bps", "execution_slippage_bps"):
+                 "cycle_cooldown_sec", "add_step_bps", "execution_slippage_bps", "max_dust_notional_usd"):
         if bps[name] < 0:
             raise ConfigError(f"bps.{name} must be >= 0")
     if bps["take_profit_bps"] < 0 or bps["execution_slippage_bps"] >= 10000:
@@ -662,6 +665,7 @@ def load_config(config_file: str = "config.yaml", env_file: str = ".env", *,
         bps_cycle_cooldown_sec=float(bps["cycle_cooldown_sec"]),
         bps_add_step_bps=float(bps["add_step_bps"]),
         bps_execution_slippage_bps=float(bps["execution_slippage_bps"]),
+        bps_max_dust_notional_usd=float(bps['max_dust_notional_usd']),
         entropy=entropy,
         hedge=hedge,
         midline_bps=midline,
