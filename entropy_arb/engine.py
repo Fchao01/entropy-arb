@@ -289,6 +289,8 @@ class Engine:
                      cfg.maker_cancel_policy, cfg.maker_reprice_delay_sec,
                      '信号有效且在最优价时持续保留，不设总等待上限'
                      if cfg.maker_cancel_policy == 'best_price' else '按最长等待时间撤单')
+        if cfg.primary_maker_only:
+            log.info('[ARCUS MAKER ONLY] 主腿开仓、平仓和余仓修正均为 Post-only；禁止 IOC 回退，退出可能等待成交')
         if self.bps_strategy:
             log.info('[BPS PRICE] configured_basis=%s entry_percentile=%.2f exit_percentile=%.2f; '
                      'executable compares sell bid / buy ask, both triggers >= target; existing cycles retain their saved basis',
@@ -448,6 +450,16 @@ class Engine:
                 or math.isclose(price, best, rel_tol=1e-12, abs_tol=1e-12))
 
     def _maker_quote_valid(self, buy, sell, plan, price):
+        if plan.action == "maker_repair":
+            primary_buy = buy is self.entropy
+            net = sum(v.position for v in self.venues.values())
+            return (self.entropy.book.is_fresh(self.cfg.staleness_sec)
+                    and self.entropy.ready_to_trade()
+                    and self.entropy.key not in self._venue_down
+                    and not self._position_uncertain
+                    and (net < 0 if primary_buy else net > 0)
+                    and (self.entropy.position < 0 if primary_buy else self.entropy.position > 0)
+                    and plan.qty <= min(abs(net), abs(self.entropy.position)) + 1e-12)
         if (not self.entropy.book.is_fresh(self.cfg.staleness_sec)
                 or not self.hedge.book.is_fresh(self.cfg.staleness_sec)
                 or not self.entropy.ready_to_trade() or not self.hedge.ready_to_trade()
@@ -467,6 +479,12 @@ class Engine:
             current = strategy.plan(buy, sell, quote=price)
             return (current is not None and current.qty >= plan.qty - self._step / 2
                     and strategy.entry_check(current, buy, sell, strategy.locked_entry, strategy.locked_exit))
+        if self.bps_strategy and plan.action == "bps_close":
+            strategy = self.bps_strategy
+            if not strategy.profit_mode and not strategy.exit_reached(strategy.signal(closing=True)):
+                return False
+            current = strategy.plan(buy, sell, closing=True, quote=price)
+            return current is not None and current.qty >= plan.qty - self._step / 2
         current, _ = self._maker_plan_at(buy, sell, plan.buy_notional, price)
         return current is not None and current.qty >= plan.qty - self._step / 2
 
@@ -655,6 +673,10 @@ class Engine:
         latency distributions even when wall-clock time is adjusted.
         """
         started = time.perf_counter()
+        if self.cfg.primary_maker_only and venue is self.entropy:
+            log.error('[ARCUS MAKER ONLY] blocked IOC submission; no order sent')
+            return ({"status": "maker-only-blocked", "filled_base": 0.0, "avg_px": None,
+                     "err": "Arcus maker-only policy prohibits IOC orders", "unresolved": False}, 0.0)
         try:
             result = await venue.send_taker(is_buy=is_buy, qty=qty,
                                             limit_px=limit_px,
@@ -700,7 +722,7 @@ class Engine:
         buy_bound = buy.px_round(plan.buy_limit * (1 + slip), round_up=False)
         sell_bound = sell.px_round(plan.sell_limit * (1 - slip), round_up=True)
         send_started = time.perf_counter()
-        if cfg.primary_order_type == "maker" and not closing:
+        if cfg.primary_order_type == "maker" and (not closing or cfg.primary_maker_only):
             (binfo, buy_send_ms), (sinfo, sell_send_ms) = await execute_primary_maker(self, buy, sell, plan)
         else:
             self._record_send(buy)
@@ -881,8 +903,17 @@ class Engine:
         # owner may finish the repair; another caller must not use a stale net.
         if self._residual_repair_lock.locked():
             return
-        async with self._residual_repair_lock:
-            await self._repair_residual(allow_halted=allow_halted)
+        async def repair():
+            async with self._residual_repair_lock:
+                await self._repair_residual(allow_halted=allow_halted)
+
+        if self.cfg.primary_maker_only:
+            task = asyncio.create_task(repair(), name="arcus-maker-residual")
+            self._exec_tasks.add(task)
+            task.add_done_callback(self._exec_tasks.discard)
+            await asyncio.shield(task)
+        else:
+            await repair()
 
     async def _repair_residual(self, *, allow_halted=False) -> None:
         if self.bps_strategy and self.halted and not allow_halted:
@@ -938,17 +969,22 @@ class Engine:
 
     def _reduction_order(self, venue, net):
         """One shared sizing check for actual repairs and their diagnostics."""
+        maker = self.cfg.primary_maker_only and venue is self.entropy
+        if maker and (self.manual_paused or (self.stop is not None and self.stop.is_set())):
+            return 0, None, 'Arcus 仅挂单修正已暂停或停止；未发送新订单'
         if venue.key in self._venue_down or not venue.book.is_fresh(self.cfg.staleness_sec):
             return 0, None, '行情或连接不可用'
         if self._venue_limited(venue):
             return 0, None, '交易所限流冷却中'
         if self._vlock(venue.key).locked():
             return 0, None, '等待该腿订单或持仓查询完成'
-        ref = venue.book.best_bid() if net > 0 else venue.book.best_ask()
+        ref = ((venue.book.best_ask() if net > 0 else venue.book.best_bid()) if maker
+               else (venue.book.best_bid() if net > 0 else venue.book.best_ask()))
         if ref is None or not math.isfinite(ref) or ref <= 0:
             return 0, None, '缺少有效减仓报价'
         slip = self.cfg.hedge_slippage_bps / 1e4
-        limit = venue.px_round(ref * (1 - slip), False) if net > 0 else venue.px_round(ref * (1 + slip), True)
+        limit = (venue.px_round(ref, round_up=net > 0) if maker else
+                 venue.px_round(ref * (1 - slip), False) if net > 0 else venue.px_round(ref * (1 + slip), True))
         if not math.isfinite(limit) or limit <= 0:
             return 0, None, '减仓保护价无效'
         step, minimum_base, minimum_quote = reduction_rules(venue, self._step, self.cfg.min_order_notional)
@@ -976,7 +1012,7 @@ class Engine:
 
     async def _hedge(self, net: float) -> bool:
         """Reduce the venue that carries the imbalance back toward net zero
-        (reduce-only taker with hedge_slippage_bps price protection)."""
+        (reduce-only, respecting the Arcus primary maker-only policy)."""
         cfg = self.cfg
         is_sell = net > 0
         sgn = 1.0 if net > 0 else -1.0
@@ -995,9 +1031,22 @@ class Engine:
                 log.warning("[HEDGE] net %+.6g — %s %.6g on %s @%.6g",
                             net, "SELL" if is_sell else "BUY", qty, v.name, limit)
                 self.hedges += 1
-                self._record_send(v)  # counts toward the budget, never blocked
-                info, _ = await self._timed_send(v, is_buy=not is_sell, qty=qty,
-                                                limit_px=limit, reduce_only=True)
+                maker = cfg.primary_maker_only and v is self.entropy
+                if maker:
+                    if self.bps_strategy:
+                        previous_pending = self.bps_strategy.pending
+                        self.bps_strategy.pending = True
+                        self.bps_strategy.save()
+                    plan = ArbPlan(qty, limit, limit, qty * limit, qty * limit, qty, qty * limit,
+                                   0, 0, cfg.primary_fee_bps / 1e4, cfg.primary_fee_bps / 1e4,
+                                   action="maker_repair")
+                    buy, sell = (v, self.hedge) if not is_sell else (self.hedge, v)
+                    results = await execute_primary_maker(self, buy, sell, plan, hedge_enabled=False)
+                    info, _ = results[0 if not is_sell else 1]
+                else:
+                    self._record_send(v)
+                    info, _ = await self._timed_send(v, is_buy=not is_sell, qty=qty,
+                                                    limit_px=limit, reduce_only=True)
                 fill = info.get('filled_base')
                 if (not isinstance(fill, (int, float)) or not math.isfinite(fill)
                         or not 0 <= fill <= qty + self._step / 2):
@@ -1028,15 +1077,23 @@ class Engine:
                                                 v.position, self._step)
                     if self.bps_strategy:
                         self.bps_strategy.record_fill(v, not is_sell, fill, info.get("avg_px"),
-                                                      v.fee_bps / 1e4, opening=False)
+                                                      (cfg.primary_fee_bps if maker else v.fee_bps) / 1e4,
+                                                      opening=False)
                     v.position += -fill if is_sell else fill
                     if fill:
                         px = info.get("avg_px") or limit
-                        fee = v.fee_bps / 1e4
+                        fee = (cfg.primary_fee_bps if maker else v.fee_bps) / 1e4
                         self.total_fees_usd += fill * px * fee
                         v.cash += fill * px * (1 - fee) if is_sell \
                             else -fill * px * (1 + fee)
                         v.volume_usd += fill * px
+                    if maker and self.bps_strategy:
+                        self.bps_strategy.pending = previous_pending
+                        try:
+                            self.bps_strategy.save()
+                        except OSError:
+                            self.halted = self.bps_strategy.pending = True
+                            raise
                     log.info("[HEDGE SETTLED] %s %s %.6g/%.6g",
                              v.name, info["status"], fill, qty)
                 self._notify_hedge(

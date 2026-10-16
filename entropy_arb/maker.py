@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 from .book import floor_step, walk_depth
+from .reduction import reduction_rules
 
 log = logging.getLogger("maker")
 
@@ -34,14 +35,15 @@ def empty_result(status="not-sent", err=None, unresolved=False):
             "err": err, "unresolved": unresolved}
 
 
-async def execute_primary_maker(engine, buy, sell, plan):
-    """Both venue locks remain held until cancel/terminal confirmation.
+async def execute_primary_maker(engine, buy, sell, plan, *, hedge_enabled=True):
+    """Required venue locks remain held until cancel/terminal confirmation.
 
     A cancel ACK is never treated as terminal. Each new cumulative fill is
     hedged once; small slices accumulate until the hedge venue's minimum is
     met. Unknown hedge outcomes stop further hedge sends to prevent duplicates.
     """
     primary, hedge, cfg = engine.entropy, engine.hedge, engine.cfg
+    reducing = plan.action in ("bps_close", "maker_repair")
     primary_buy = primary is buy
     price = plan.buy_limit if primary_buy else plan.sell_limit
     pinfo, hinfo = empty_result(), empty_result()
@@ -97,7 +99,7 @@ async def execute_primary_maker(engine, buy, sell, plan):
             return 'stop-requested'
         if engine.manual_paused:
             return 'manual-pause'
-        if engine.halted:
+        if engine.halted and hedge_enabled:
             return 'engine-halted'
         # Signal/hedge validity always has priority over queue position.
         if not engine._maker_quote_valid(buy, sell, plan, price):
@@ -136,17 +138,19 @@ async def execute_primary_maker(engine, buy, sell, plan):
             await request_cancel(cancel_reason)
 
     engine._record_send(primary)
-    log.info("[MAKER] %s %s qty=%.8g price=%.10g policy=%s %s",
+    log.info("[MAKER] %s %s qty=%.8g price=%.10g policy=%s action=%s post_only=true reduce_only=%s %s",
              primary.name, "BUY" if primary_buy else "SELL", plan.qty, price,
-             cfg.maker_cancel_policy, f'timeout={cfg.maker_timeout_sec:.2f}s'
+             cfg.maker_cancel_policy, plan.action, reducing, f'timeout={cfg.maker_timeout_sec:.2f}s'
              if cfg.maker_cancel_policy == 'timeout' else '最优价持续保留；信号失效立即撤单')
     try:
-        order = await primary.place_maker(is_buy=primary_buy, qty=plan.qty, limit_px=price)
+        order = await primary.place_maker(is_buy=primary_buy, qty=plan.qty, limit_px=price,
+                                          **({"reduce_only": True} if reducing else {}))
         client_id = order.client_id.to_raw() if hasattr(order.client_id, 'to_raw') else str(order.client_id)
         engine.active_maker = {"venue": primary.name, "client_id": client_id,
                                "price": price, "qty": plan.qty, "filled": 0.0,
                                "hedged": 0.0, "state": "waiting",
-                               "cancel_policy": cfg.maker_cancel_policy}
+                               "cancel_policy": cfg.maker_cancel_policy,
+                               "reduce_only": reducing, "action": plan.action}
         if engine.bps_strategy:
             engine.bps_strategy.save()  # retain the own order id across restarts
         if order.rejected:
@@ -178,15 +182,20 @@ async def execute_primary_maker(engine, buy, sell, plan):
                 cancel_reason = cancel_reason or ('order-state-unavailable:' + detail)
 
             remainder = floor_step(pinfo["filled_base"] - hinfo["filled_base"], engine._step)
-            if remainder > 0 and not hedge_failed:
+            if hedge_enabled and remainder > 0 and not hedge_failed:
                 levels = hedge.book.sorted_bids() if primary_buy else hedge.book.sorted_asks()
                 enough = sum(size for _, size in levels) >= remainder - 1e-12
+                if reducing:
+                    _, minimum_base, minimum_quote = reduction_rules(hedge, engine._step, 0)
+                else:
+                    minimum_base = hedge.min_base
+                    minimum_quote = max(cfg.min_order_notional, hedge.min_quote)
                 if (not hedge.book.is_fresh(cfg.staleness_sec) or not hedge.ready_to_trade()
                         or not enough or not engine._venue_rate_ok(hedge)):
                     hedge_failed = True
                     hinfo["err"] = "maker fill cannot be hedged: hedge venue unavailable/depth/budget"
-                elif (remainder >= max(hedge.min_base, engine._step)
-                      and remainder * levels[0][0] >= max(cfg.min_order_notional, hedge.min_quote)):
+                elif (remainder >= max(minimum_base, engine._step)
+                      and remainder * levels[0][0] >= minimum_quote):
                     px, _ = walk_depth(levels, remainder)
                     is_buy = not primary_buy
                     slip = (cfg.hedge_slippage_bps if plan.slippage_bps is None
@@ -196,7 +205,8 @@ async def execute_primary_maker(engine, buy, sell, plan):
                     engine._record_send(hedge)
                     try:
                         result, elapsed = await asyncio.wait_for(engine._timed_send(
-                            hedge, is_buy=is_buy, qty=remainder, limit_px=bound),
+                            hedge, is_buy=is_buy, qty=remainder, limit_px=bound,
+                            **({"reduce_only": True} if reducing else {})),
                             timeout=2 * cfg.settle_timeout_sec + 10)
                     except asyncio.TimeoutError:
                         result = empty_result("hedge-timeout", "maker hedge outcome unknown", True)
@@ -259,7 +269,7 @@ async def execute_primary_maker(engine, buy, sell, plan):
             log.critical("[MAKER] HALTED: unresolved order or incomplete hedge; check open orders and positions")
     if hinfo["status"] == "not-sent" and terminal and pinfo["filled_base"] == 0:
         hinfo["status"] = "no-fill"
-    if terminal and pinfo["filled_base"] > hinfo["filled_base"] and not hedge_failed:
+    if hedge_enabled and terminal and pinfo["filled_base"] > hinfo["filled_base"] and not hedge_failed:
         log.warning("[MAKER] remaining base %.8g below hedge minimum; reducing residual exposure",
                     pinfo["filled_base"] - hinfo["filled_base"])
     primary_ms = (time.perf_counter() - start) * 1000.0

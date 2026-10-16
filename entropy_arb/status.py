@@ -49,6 +49,7 @@ def snapshot(engine) -> dict:
             "lower_bps": engine.cfg.lower_bps,
         },
         "primary_order_type": engine.cfg.primary_order_type,
+        "primary_maker_only": engine.cfg.primary_maker_only,
         "maker_timeout_sec": engine.cfg.maker_timeout_sec,
         "maker_cancel_policy": engine.cfg.maker_cancel_policy,
         "maker_reprice_delay_sec": engine.cfg.maker_reprice_delay_sec,

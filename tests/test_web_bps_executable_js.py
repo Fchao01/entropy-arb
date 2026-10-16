@@ -67,5 +67,23 @@ renderSignals({bps_strategy: {price_basis: 'executable', entry_bps: 5, exit_bps:
 assert.match(get('signal-summary').textContent, /开仓主腿挂单/);
 assert.match(get('signal-rows').innerHTML, /主腿挂单 \/ 对冲腿吃单/);
 assert.match(get('signal-note').textContent, /确认新增成交后才对冲/);
+vm.runInContext(`
+element('task-primary').value = 'arcus';
+refreshStrategyFields();
+renderSignals({primary_maker_only: true,
+  bps_strategy: {price_basis: 'executable', entry_bps: 5, exit_bps: -4},
+  venues: [{fresh: true}], execution_signals: {mode: 'bps', rows: [
+  {action: 'open', primary_buy: true, buy: 'ARCUS', sell: 'RH', order_type: 'maker',
+   comparison: '>=', executable_premium_bps: 7, trigger_premium_bps: 6, hurdle_bps: 5, gap_bps: 1},
+  {action: 'close', primary_buy: false, buy: 'RH', sell: 'ARCUS', order_type: 'maker',
+   comparison: '>=', executable_premium_bps: -3, trigger_premium_bps: -3, hurdle_bps: -4, gap_bps: 1}
+]}}, true);
+`, context);
+assert.match(get('execution-note').textContent, /开仓、平仓、余仓修正均只使用 Post-only/);
+assert.match(get('execution-note').textContent, /绝不自动转吃单/);
+assert.match(get('signal-summary').textContent, /开仓、平仓主腿均挂单/);
+assert.doesNotMatch(get('signal-summary').textContent, /平仓双腿吃单/);
+assert.match(get('signal-note').textContent, /不自动转为 IOC/);
+assert.match(get('signal-note').textContent, /不能保证立即完成/);
 ''', str(source)], capture_output=True, text=True, timeout=15)
     assert result.returncode == 0, result.stdout + result.stderr

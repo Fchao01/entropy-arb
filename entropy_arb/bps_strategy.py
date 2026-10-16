@@ -310,7 +310,8 @@ class BpsStrategy:
                 return None  # A thin book cannot price the entire remaining exit.
             marginal, _ = walk_depth(levels, qty)
             bound = venue.px_round(marginal * (1 + slip if buying else 1 - slip), round_up=not buying)
-            fee = venue.fee_bps / 1e4  # Both exit legs are taker, including maker openings.
+            fee = (self.cfg.primary_fee_bps if self.cfg.primary_maker_only
+                   and venue is self.engine.entropy else venue.fee_bps) / 1e4
             cash += qty * bound * (-1 - fee if buying else 1 - fee)
         return dict(net_usd=cash, net_bps=cash / self.costs.open_notional * 1e4,
                     basis_usd=self.costs.open_notional, slippage_reserve_bps=self.execution_slippage)
@@ -360,7 +361,8 @@ class BpsStrategy:
                 self.reason = '完整往返盘口深度不足'
                 return False
             _, notional = walk_depth(levels, plan.qty)
-            fee = venue.fee_bps / 1e4
+            fee = (self.cfg.primary_fee_bps if self.cfg.primary_maker_only
+                   and venue is self.engine.entropy else venue.fee_bps) / 1e4
             reverse_cash += notional * (1 - fee if opening_buy else -1 - fee)
         basis = plan.buy_notional if buy is self.engine.entropy else plan.sell_notional
         current_cost = max(0, -(plan.exp_edge_usd + reverse_cash) / basis * 1e4)
@@ -917,7 +919,7 @@ class BpsStrategy:
         _, buy_min_base, buy_min_quote = reduction_rules(buy, eng._step, configured_minimum)
         _, sell_min_base, sell_min_quote = reduction_rules(sell, eng._step, configured_minimum)
         minimum_base = max(buy_min_base, sell_min_base) if closing else eng._min_base
-        maker = cfg.primary_order_type == 'maker' and not closing
+        maker = cfg.primary_order_type == 'maker' and (not closing or cfg.primary_maker_only)
         pbuy = buy is eng.entropy
         asks, bids = buy.book.sorted_asks(), sell.book.sorted_bids()
         if not asks or not bids:

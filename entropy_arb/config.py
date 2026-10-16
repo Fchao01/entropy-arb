@@ -205,6 +205,10 @@ class Config:
                 else self.primary.fee_bps)
 
     @property
+    def primary_maker_only(self) -> bool:
+        return self.primary_order_type == "maker" and self.primary.kind == "arcus"
+
+    @property
     def shutdown_grace_sec(self) -> float:
         if self.primary_order_type == "maker":
             return self.maker_timeout_sec + 8 * self.settle_timeout_sec + 20

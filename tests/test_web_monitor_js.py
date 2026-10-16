@@ -32,7 +32,7 @@ state.selected = 'history-test';
 state.detail = {minutes: [], task: {
   id: 'history-test', symbol: 'SPY', primary: 'arcus', hedge: 'lighter-rh',
   mode: 'record', state: 'running', status_stale: false,
-  status: {updated_at: 1792076400, venues: [], primary_order_type: 'maker',
+  status: {updated_at: 1792076400, venues: [], primary_order_type: 'maker', primary_maker_only: true,
     maker_cancel_policy: 'best_price', maker_reprice_delay_sec: .3,
     active_maker: {cancel_policy: 'best_price', state: 'OPEN', at_best_price: true, filled: 0, hedged: 0},
     bps_strategy: {
@@ -50,6 +50,7 @@ assert.match(html, /已确认精度尾差 \+0\.00006940/);
 assert.match(html, /名义敞口 \$0\.053597/);
 assert.match(html, /条件有效且在最优价持续保留/);
 assert.match(html, /最优价排队中/);
+assert.match(html, /Arcus 开仓、平仓、纠偏均只挂单，不转吃单/);
 assert.doesNotMatch(html, /最长等待/);
 assert.match(html, /最后记录距今 1\.0 分钟/);
 assert.ok(html.includes(vm.runInContext('windowTime(1792072800)', context)));

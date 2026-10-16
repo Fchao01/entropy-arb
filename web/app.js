@@ -283,9 +283,10 @@ function renderMonitor() {
   const metrics = task.status;
   const fresh = active(task) && !task.status_stale;
   const metricNote = fresh ? "当前运行会话" : metrics ? "最后快照 · 当前非实时" : "等待首次状态快照";
-  const orderMode = metrics?.primary_order_type === "maker" ? metrics.maker_cancel_policy === "best_price"
+  const orderMode = (metrics?.primary_order_type === "maker" ? metrics.maker_cancel_policy === "best_price"
     ? `主腿挂单 · 条件有效且在最优价持续保留 · 离开最优价 ${number(metrics.maker_reprice_delay_sec, 2)}s 后撤单`
-    : `主腿挂单 · 最长等待 ${number(metrics.maker_timeout_sec, 1)}s` : "主腿吃单";
+    : `主腿挂单 · 最长等待 ${number(metrics.maker_timeout_sec, 1)}s` : "主腿吃单")
+    + (metrics?.primary_maker_only ? " · Arcus 开仓、平仓、纠偏均只挂单，不转吃单" : "");
   const maker = metrics?.active_maker;
   const makerLabel = maker ? ` · 挂单${maker.state === "unresolved" ? "状态未确认" : maker.state === "canceling" ? "撤单确认中" : maker.cancel_policy === "best_price" ? maker.at_best_price === false ? "离开最优价，确认中" : "最优价排队中" : "跟踪中"} · 已成交 ${number(maker.filled, 6)} / 已对冲 ${number(maker.hedged, 6)}` : "";
   const bps = metrics?.bps_strategy;
@@ -321,7 +322,9 @@ function renderSignals(metrics, fresh) {
   const levels = metrics.bps_strategy;
   const thresholds = metrics.thresholds;
   const executableBps = bps && levels?.price_basis === "executable";
-  const openingMode = signal.rows.some((row) => row.action === "open" && row.order_type === "maker") ? "开仓主腿挂单 / 对冲吃单；平仓双腿吃单" : "双腿吃单";
+  const openingMode = signal.rows.some((row) => row.action === "close" && row.order_type === "maker")
+    ? "开仓、平仓主腿均挂单 / 对冲腿吃单；Arcus 纠偏也只挂单"
+    : signal.rows.some((row) => row.action === "open" && row.order_type === "maker") ? "开仓主腿挂单 / 对冲吃单；平仓双腿吃单" : "双腿吃单";
   const summary = executableBps ? `可成交价差 bps · 开仓 ≥ ${signed(levels.entry_bps)} / 平仓 ≥ ${signed(levels.exit_bps)} · ${openingMode}${levels.entries ? " · 本轮点位已锁定" : ""}` : spread ? `实际可成交价差 > ${number(metrics.spread_bps, 3)} bps · 双向、不限批次 · 不依赖历史数据` : bps ? `溢价 bps 策略 · 中间价溢价 ${signed(metrics.premium_bps)} bps · 开仓 ${signed(levels?.entry_bps)} / 参考回归 ${signed(levels?.exit_bps)} bps${levels?.exit_mode === "profit" ? ` · 净收益止盈 ${number(levels.take_profit_bps, 2)} bps · 保守退出 ${money(levels.exit_quote?.net_usd, 4)}` : ""}${levels?.entries ? " · 本轮点位已锁定" : ""}` : `套利阈值策略 · 中间价溢价 ${signed(metrics.premium_bps)} bps · 中线 ${signed(thresholds?.midline_bps)} · 区间 [${signed(thresholds ? thresholds.midline_bps - thresholds.lower_bps : null)} … ${signed(thresholds ? thresholds.midline_bps + thresholds.upper_bps : null)}]`;
   element("signal-summary").textContent = `${fresh ? "当前快照" : "最后快照 · 非实时"} · ${summary}`;
   element("signal-rows").innerHTML = signal.rows.map((row) => {
@@ -336,6 +339,7 @@ function renderSignals(metrics, fresh) {
   element("signal-note").textContent = bps ? "触发指标与门槛均为主腿相对对冲腿的中间价溢价；≤ 条件的 gap = 门槛 − 指标，≥ 条件的 gap = 指标 − 门槛。可成交溢价另按卖腿价格 / 买腿价格计算，不参与上述差值。" : "触发指标为可成交溢价；门槛包含当前方向阈值、配置手续费和仓位附加值。gap = 可成交溢价 − 门槛。";
   if (executableBps) {
     element("signal-note").textContent = "开仓和平仓触发指标分别按对应方向的（卖方买一 / 买方卖一 − 1）× 10,000 计算，两个方向均为 ≥ 门槛。历史分位数使用各自方向的分钟收盘买卖报价重算。开仓按配置选择主腿挂单或吃单：挂单时可成交溢价列使用主腿挂单价，另核验其与对冲盘口的价差及深度，确认新增成交后才对冲；信号失效立即请求撤单。平仓与余仓修正使用吃单。gap ≥ 0 不保证成交或盈利，手续费另计。";
+    if (metrics.primary_maker_only) element("signal-note").textContent = "触发指标仍按对应方向的卖方买一 / 买方卖一计算，开平仓门槛不变。Arcus 主腿开仓和平仓均使用 Post-only，另一腿只对已确认新增成交量吃单对冲；平仓两腿均只减仓。Arcus 余仓修正也只挂单，不自动转为 IOC。价差失效、离开最优价、暂停或停止会按规则撤单并核对最终成交。挂单可能不成交，止损、超时退出和纠偏不能保证立即完成。";
     return;
   }
   if (spread) {
@@ -376,6 +380,19 @@ function drawChart(rows) {
   element("premium-chart").innerHTML = `<svg viewBox="0 0 700 244" role="img" aria-label="最近分钟溢价走势"><defs><linearGradient id="chart-fill" x1="0" x2="0" y1="0" y2="1"><stop offset="0%" stop-color="#6eb89c" stop-opacity=".24"/><stop offset="100%" stop-color="#6eb89c" stop-opacity="0"/></linearGradient></defs>${grid}<path d="${fill}" fill="url(#chart-fill)"/><path d="${path}" fill="none" stroke="#348d72" stroke-width="2" stroke-linejoin="round"/><circle cx="${xValue(last)}" cy="${yValue(last.value)}" r="3.5" fill="#007d68"/><text x="${left}" y="236" fill="#92a99f" font-size="9">${label(first)}</text><text x="${right}" y="236" fill="#92a99f" font-size="9" text-anchor="end">${label(last)}</text></svg>`;
 }
 
+function tradeNumber(value) {
+  if (value == null || String(value).trim() === "") return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function tradeMatchedEdge(row) {
+  const buyFill = tradeNumber(row.buy_fill), sellFill = tradeNumber(row.sell_fill);
+  const buyPrice = tradeNumber(row.buy_avg_px), sellPrice = tradeNumber(row.sell_avg_px);
+  if (!(buyFill > 0 && sellFill > 0 && buyPrice > 0 && sellPrice > 0)) return null;
+  return tradeNumber(row.fill_edge_usd);
+}
+
 function renderLogs() {
   const trades = state.logTab === "trades";
   element("log-output").hidden = trades;
@@ -392,10 +409,11 @@ function renderLogs() {
     const page = Number(state.detail?.trades_page || state.tradesPage || 1);
     const pages = Number(state.detail?.trades_pages || 0);
     state.tradesPage = page;
-    element("trades-output").innerHTML = rows.length ? `<table class="records"><thead><tr><th>时间</th><th>方向</th><th>数量</th><th>买 / 卖成交</th><th>手续费 USD</th><th>成交净价差 USD</th><th>结果</th></tr></thead><tbody>${rows.map((row) => {
-      const profit = Number(row.fill_edge_usd);
-      const profitClass = Number.isFinite(profit) ? profit >= 0 ? "positive" : "negative" : "";
-      return `<tr><td>${timeLabel(Number(row.ts))}</td><td>${escapeHtml(row.direction)}</td><td>${escapeHtml(row.qty)}</td><td>${escapeHtml(row.buy_fill)} / ${escapeHtml(row.sell_fill)}</td><td class="number">${money(row.fees_usd)}</td><td class="number ${profitClass}">${money(row.fill_edge_usd)}</td><td><span class="badge ${row.ok === "1" ? "" : "failed"}">${row.ok === "1" ? "完成" : "异常"}</span></td></tr>`;
+    element("trades-output").innerHTML = rows.length ? `<p class="field-note">本次匹配成交净价差不是平仓盈亏；手续费按 YAML 配置费率估算。单腿成交、未成交或均价缺失时显示 —，不代表零亏损。已实现盈亏请看交易统计（本次运行、按交易所分别 FIFO 配对，未含资金费）。</p><table class="records"><thead><tr><th>时间</th><th>方向</th><th>数量</th><th>买 / 卖成交</th><th>估算手续费 USD</th><th>匹配成交净价差 USD（非平仓盈亏）</th><th>结果</th></tr></thead><tbody>${rows.map((row) => {
+      const edge = tradeMatchedEdge(row);
+      const edgeClass = edge == null ? "" : edge >= 0 ? "positive" : "negative";
+      const edgeNote = edge == null ? "未形成可计算的双腿匹配成交；不能据此判断实际盈亏" : "只计算本次双腿匹配数量的卖出金额减买入金额及配置手续费，不是平仓损益";
+      return `<tr><td>${timeLabel(Number(row.ts))}</td><td>${escapeHtml(row.direction)}</td><td>${escapeHtml(row.qty)}</td><td>${escapeHtml(row.buy_fill)} / ${escapeHtml(row.sell_fill)}</td><td class="number">${money(tradeNumber(row.fees_usd), 4)}</td><td class="number ${edgeClass}" title="${edgeNote}">${money(edge, 4)}</td><td><span class="badge ${row.ok === "1" ? "" : "failed"}">${row.ok === "1" ? "执行已确认" : "需核对"}</span></td></tr>`;
     }).join("")}</tbody></table>` : `<div class="empty-state"><h3>暂无成交记录</h3><p>采集模式不发送订单。实盘执行后，记录会显示在这里。</p></div>`;
     pagination.hidden = !total || pages <= 1;
     pagination.innerHTML = `<span>第 ${page} / ${pages} 页，共 ${total} 条</span><div><button class="button secondary small" data-trades-page="${page - 1}" ${page <= 1 ? "disabled" : ""}>上一页</button><button class="button secondary small" data-trades-page="${page + 1}" ${page >= pages ? "disabled" : ""}>下一页</button></div>`;
@@ -533,7 +551,9 @@ function refreshStrategyFields() {
     element(id).disabled = !visible;
   }
   element("execution-note").textContent = maker
-    ? "主腿按配置 Post-only 挂单；BPS / 阈值条件失效立即请求撤单，条件有效且在买一/卖一时按保留规则排队。仅对确认新增成交量吃单对冲。BPS 平仓与余仓修正仍为吃单，手续费分别按配置计。"
+    ? element("task-primary").value === "arcus"
+      ? "Arcus 主腿开仓、平仓、余仓修正均只使用 Post-only 挂单，绝不自动转吃单。另一腿仅按确认新增成交量吃单对冲，平仓两腿只减仓。挂单费用使用主腿 maker 费率；可能长时间不成交，止损或到期也不保证立即退出。暂停或停止会撤单并核对最终成交，不自动平仓。"
+      : "主腿按配置 Post-only 挂单；BPS / 阈值条件失效立即请求撤单，条件有效且在买一/卖一时按保留规则排队。仅对确认新增成交量吃单对冲。BPS 平仓与余仓修正仍为吃单，手续费分别按配置计。"
     : (spread || executableBps)
     ? "1 bps = 0.01%。手续费按实际账户配置并另计，不参与价格差门槛判断；单笔下单量、每腿持仓上限与滑点保护继续生效。"
     : "1 bps = 0.01%。费率以你的实际账户为准；原套利阈值策略的两个方向门槛另加双腿手续费。最优价保留模式先检查 BPS / 阈值条件：失效立即撤单；有效且在买一/卖一持续排队，离开最优价确认后撤单。部分成交按实际新增数量吃单对冲；确认旧单撤销后才重评新单。";

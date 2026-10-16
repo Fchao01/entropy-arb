@@ -475,13 +475,14 @@ class ArcusVenue:
                     self._remember_order(row)
                     break
 
-    async def place_maker(self, *, is_buy: bool, qty: float, limit_px: float):
+    async def place_maker(self, *, is_buy: bool, qty: float, limit_px: float,
+                          reduce_only: bool = False):
         order = MakerOrder(uuid.uuid4().hex, limit_px, time.time())
         try:
             if not self.ready_to_trade():
                 raise ValueError("Arcus not ready")
             request = self._place_request(is_buy=is_buy, qty=qty, limit_px=limit_px,
-                                          reduce_only=False, client_id=order.client_id,
+                                          reduce_only=reduce_only, client_id=order.client_id,
                                           post_only=True)
         except Exception:
             order.rejected, order.err = True, "Arcus local signing/grid/readiness validation failed"
