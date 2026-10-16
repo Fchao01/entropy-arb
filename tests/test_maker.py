@@ -25,7 +25,14 @@ def setup_engine(primary_buy=True):
     e.cfg.primary_order_type = "maker"
     e.cfg.maker_timeout_sec, e.cfg.settle_timeout_sec = .005, .02
     e.cfg.staleness_sec = 60
-    e.ensure_async_state()
+    # Pure quote/plan tests do not need loop-bound Events. Lifecycle tests
+    # invoke this helper inside asyncio.run(), where those Events belong.
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        pass
+    else:
+        e.ensure_async_state()
     for v in e.venues.values():
         v.px_round = lambda px, round_up: px
         v.volume_usd = 0

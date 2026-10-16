@@ -22,6 +22,7 @@ class MakerOrder:
     rejected: bool = False
     err: Optional[str] = None
     last_query: float = 0.0
+    cancel_requested_at: Optional[float] = None
 
 
 def empty_result(status="not-sent", err=None, unresolved=False):
@@ -48,10 +49,45 @@ async def execute_primary_maker(engine, buy, sell, plan):
     terminal = False
     cancel_at = None
     cancel_sent = False
+    cancel_inflight = False
     cancel_reason = None
     last_cancel_attempt = 0.0
     order = None
+    timeout_task = None
     deadline = time.monotonic() + cfg.maker_timeout_sec
+
+    async def request_cancel(reason):
+        nonlocal cancel_at, cancel_sent, cancel_inflight, cancel_reason, last_cancel_attempt
+        if terminal or order is None:
+            return
+        if cancel_at is None:
+            cancel_at = time.monotonic()
+            cancel_reason = reason
+            order.cancel_requested_at = cancel_at
+            engine.active_maker["state"] = "canceling"
+        if cancel_sent or cancel_inflight or (last_cancel_attempt
+                and time.monotonic() - last_cancel_attempt < 1):
+            return
+        cancel_inflight = True
+        last_cancel_attempt = time.monotonic()
+        engine._record_send(primary)
+        # Log when the request starts, rather than after its ACK arrives.
+        log.info("[MAKER] cancel requested client_id=%s reason=%s elapsed=%.3fs timeout=%.2fs; waiting for final fills",
+                 order.client_id, cancel_reason, time.perf_counter() - start, cfg.maker_timeout_sec)
+        try:
+            await asyncio.wait_for(primary.cancel_maker(order), timeout=cfg.settle_timeout_sec)
+            cancel_sent = True
+        except Exception as error:
+            log.warning("[%s] maker cancel not confirmed: %s", primary.name, type(error).__name__)
+        finally:
+            cancel_inflight = False
+
+    async def cancel_on_timeout():
+        # Account queries and hedge confirmations must not postpone cancelling
+        # the remaining primary order. Confirmed fills are still hedged below.
+        await asyncio.sleep(max(0, deadline - time.monotonic()))
+        await request_cancel('timeout')
+
     engine._record_send(primary)
     log.info("[MAKER] %s %s qty=%.8g price=%.10g timeout=%.2fs",
              primary.name, "BUY" if primary_buy else "SELL", plan.qty, price,
@@ -64,6 +100,8 @@ async def execute_primary_maker(engine, buy, sell, plan):
         if order.rejected:
             pinfo = empty_result("rejected", order.err)
             terminal = True
+        else:
+            timeout_task = asyncio.create_task(cancel_on_timeout(), name="maker-timeout-cancel")
         while not terminal:
             try:
                 state = await asyncio.wait_for(primary.maker_state(order),
@@ -76,7 +114,8 @@ async def execute_primary_maker(engine, buy, sell, plan):
                 terminal = bool(state["terminal"])
                 if pinfo.get("err"):
                     hedge_failed = True
-                engine.active_maker.update(filled=filled, state=state["status"])
+                engine.active_maker.update(filled=filled, state=(
+                    "canceling" if cancel_at is not None and not terminal else state["status"]))
             except Exception as error:
                 detail = type(error).__name__
                 if getattr(error, 'status', None) is not None:
@@ -148,35 +187,23 @@ async def execute_primary_maker(engine, buy, sell, plan):
                     reason = 'timeout'
                 elif not engine._maker_quote_valid(buy, sell, plan, price):
                     reason = 'quote-invalid:signal/depth/readiness'
-            if reason is not None and cancel_at is None:
-                cancel_reason = reason
-                cancel_at = time.monotonic()
-                engine.active_maker["state"] = "canceling"
-            if cancel_at is not None and not cancel_sent and time.monotonic() - last_cancel_attempt >= 1:
-                last_cancel_attempt = time.monotonic()
-                engine._record_send(primary)
-                try:
-                    await asyncio.wait_for(primary.cancel_maker(order), timeout=cfg.settle_timeout_sec)
-                    cancel_sent = True
-                except Exception as error:
-                    log.warning("[%s] maker cancel not confirmed: %s", primary.name, type(error).__name__)
-                log.info("[MAKER] cancel requested client_id=%s reason=%s elapsed=%.3fs timeout=%.2fs; waiting for final fills",
-                         order.client_id, cancel_reason, time.perf_counter() - start, cfg.maker_timeout_sec)
+            if reason is not None:
+                await request_cancel(reason)
             if cancel_at is not None and time.monotonic() - cancel_at >= cfg.settle_timeout_sec:
                 pinfo.update(status="cancel-unconfirmed", unresolved=True,
                              err="maker final state unknown; check exchange open orders before restarting")
                 break
-            await asyncio.sleep(0.1)
+            await asyncio.sleep(min(0.1, cfg.settle_timeout_sec / 4))
     except Exception as error:
         # Placement APIs retain the client id on ambiguous transport errors.
         # An unexpected adapter failure must halt too, not be treated as zero-fill.
         pinfo.update(status="maker-error", unresolved=True, err=type(error).__name__)
         if order is not None:
-            try:
-                await asyncio.wait_for(primary.cancel_maker(order), timeout=cfg.settle_timeout_sec)
-            except Exception:
-                pass
+            await request_cancel('maker-error')
     finally:
+        if timeout_task is not None:
+            timeout_task.cancel()
+            await asyncio.gather(timeout_task, return_exceptions=True)
         if terminal and not hinfo.get("unresolved"):
             engine.active_maker = None
         if pinfo.get("unresolved") or hinfo.get("unresolved") or hedge_failed:

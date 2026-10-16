@@ -506,13 +506,23 @@ class ArcusVenue:
                 oid = order.order_id or self._clients.get(order.client_id)
                 if not self._orders_ready or oid in self._orders:
                     break
-        # A live orders subscription is authoritative. Do not force an HTTP
-        # lookup over an already received state on every new maker order:
-        # HTTP indexing can lag the stream and cause a false immediate cancel.
-        if not self._orders_ready or oid not in self._orders:
-            await self._lookup_order(order.client_id, oid, int(order.sent_at * 1e9))
+        # Prefer the stream while resting, but actively verify after cancel:
+        # a connected stream can miss its terminal update and retain OPEN.
+        # Never let a lagging HTTP response overwrite an already known final.
+        cancel_query = (order.cancel_requested_at is not None
+                        and self._terminal_result(self._orders.get(oid, {})) is None
+                        and (order.last_query < order.cancel_requested_at
+                             or time.monotonic() - order.last_query >= 1.0))
+        if not self._orders_ready or oid not in self._orders or cancel_query:
+            # Timestamp attempts too, so a failing lookup is not retried at
+            # the 100 ms lifecycle poll rate while the WS remains connected.
             order.last_query = time.monotonic()
+            await self._lookup_order(order.client_id, oid, int(order.sent_at * 1e9))
             oid = oid or self._clients.get(order.client_id)
+            if cancel_query:
+                checked = self._orders.get(oid, {})
+                log.info('[ARCUS] maker cancel check client_id=%s status=%s state=%s',
+                         order.client_id, checked.get('status'), checked.get('state'))
         row = self._orders.get(oid)
         if row is None:
             raise RuntimeError("Arcus maker state unknown")
