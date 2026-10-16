@@ -23,6 +23,7 @@ def state(filled, terminal=False, status=None):
 def setup_engine(primary_buy=True):
     e = make_engine(midline=0, upper=1, lower=1)
     e.cfg.primary_order_type = "maker"
+    e.cfg.maker_cancel_policy = "timeout"
     e.cfg.maker_timeout_sec, e.cfg.settle_timeout_sec = .005, .02
     e.cfg.staleness_sec = 60
     # Pure quote/plan tests do not need loop-bound Events. Lifecycle tests

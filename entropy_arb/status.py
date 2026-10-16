@@ -50,6 +50,8 @@ def snapshot(engine) -> dict:
         },
         "primary_order_type": engine.cfg.primary_order_type,
         "maker_timeout_sec": engine.cfg.maker_timeout_sec,
+        "maker_cancel_policy": engine.cfg.maker_cancel_policy,
+        "maker_reprice_delay_sec": engine.cfg.maker_reprice_delay_sec,
         "strategy_mode": engine.cfg.strategy_mode,
         "spread_bps": engine.cfg.spread_bps,
         "bps_strategy": engine.bps_strategy.snapshot() if engine.bps_strategy else None,

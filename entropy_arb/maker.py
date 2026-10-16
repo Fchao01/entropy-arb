@@ -52,6 +52,7 @@ async def execute_primary_maker(engine, buy, sell, plan):
     cancel_inflight = False
     cancel_reason = None
     last_cancel_attempt = 0.0
+    away_since = None
     order = None
     timeout_task = None
     deadline = time.monotonic() + cfg.maker_timeout_sec
@@ -72,8 +73,8 @@ async def execute_primary_maker(engine, buy, sell, plan):
         last_cancel_attempt = time.monotonic()
         engine._record_send(primary)
         # Log when the request starts, rather than after its ACK arrives.
-        log.info("[MAKER] cancel requested client_id=%s reason=%s elapsed=%.3fs timeout=%.2fs; waiting for final fills",
-                 order.client_id, cancel_reason, time.perf_counter() - start, cfg.maker_timeout_sec)
+        log.info("[MAKER] cancel requested client_id=%s reason=%s elapsed=%.3fs policy=%s; waiting for final fills",
+                 order.client_id, cancel_reason, time.perf_counter() - start, cfg.maker_cancel_policy)
         try:
             await asyncio.wait_for(primary.cancel_maker(order), timeout=cfg.settle_timeout_sec)
             cancel_sent = True
@@ -82,26 +83,70 @@ async def execute_primary_maker(engine, buy, sell, plan):
         finally:
             cancel_inflight = False
 
-    async def cancel_on_timeout():
-        # Account queries and hedge confirmations must not postpone cancelling
-        # the remaining primary order. Confirmed fills are still hedged below.
-        await asyncio.sleep(max(0, deadline - time.monotonic()))
-        await request_cancel('timeout')
+    def cancel_decision():
+        nonlocal away_since
+        if cancel_reason:
+            return cancel_reason
+        if hedge_failed:
+            return 'hedge-failed'
+        if engine.stop.is_set():
+            return 'stop-requested'
+        if engine.manual_paused:
+            return 'manual-pause'
+        if engine.halted:
+            return 'engine-halted'
+        # Signal/hedge validity always has priority over queue position.
+        if not engine._maker_quote_valid(buy, sell, plan, price):
+            return 'quote-invalid:signal/depth/readiness'
+        if cfg.maker_cancel_policy == 'timeout':
+            return 'timeout' if time.monotonic() >= deadline else None
+        at_best = engine._maker_at_best_price(primary_buy, price)
+        engine.active_maker['at_best_price'] = at_best
+        if at_best:
+            away_since = None
+            return None
+        if away_since is None:
+            away_since = time.monotonic()
+        if time.monotonic() - away_since >= cfg.maker_reprice_delay_sec:
+            return 'away-from-best-price'
+        return None
+
+    async def monitor_quote():
+        nonlocal cancel_reason, hedge_failed
+        # Independently monitor validity/priority even while an account query
+        # or hedge is slow. A best-price order has no total resting deadline.
+        try:
+            while not terminal:
+                reason = cancel_decision()
+                if reason:
+                    await request_cancel(reason)
+                delay = min(0.1, cfg.settle_timeout_sec / 4)
+                if cfg.maker_cancel_policy == 'timeout' and cancel_at is None:
+                    delay = min(delay, max(0.001, deadline - time.monotonic()))
+                await asyncio.sleep(delay)
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            hedge_failed = True
+            cancel_reason = 'quote-monitor-error:' + type(error).__name__
+            await request_cancel(cancel_reason)
 
     engine._record_send(primary)
-    log.info("[MAKER] %s %s qty=%.8g price=%.10g timeout=%.2fs",
+    log.info("[MAKER] %s %s qty=%.8g price=%.10g policy=%s %s",
              primary.name, "BUY" if primary_buy else "SELL", plan.qty, price,
-             cfg.maker_timeout_sec)
+             cfg.maker_cancel_policy, f'timeout={cfg.maker_timeout_sec:.2f}s'
+             if cfg.maker_cancel_policy == 'timeout' else '最优价持续保留；信号失效立即撤单')
     try:
         order = await primary.place_maker(is_buy=primary_buy, qty=plan.qty, limit_px=price)
         engine.active_maker = {"venue": primary.name, "client_id": str(order.client_id),
                                "price": price, "qty": plan.qty, "filled": 0.0,
-                               "hedged": 0.0, "state": "waiting"}
+                               "hedged": 0.0, "state": "waiting",
+                               "cancel_policy": cfg.maker_cancel_policy}
         if order.rejected:
             pinfo = empty_result("rejected", order.err)
             terminal = True
         else:
-            timeout_task = asyncio.create_task(cancel_on_timeout(), name="maker-timeout-cancel")
+            timeout_task = asyncio.create_task(monitor_quote(), name="maker-quote-monitor")
         while not terminal:
             try:
                 state = await asyncio.wait_for(primary.maker_state(order),
@@ -173,20 +218,7 @@ async def execute_primary_maker(engine, buy, sell, plan):
 
             if terminal:
                 break
-            reason = cancel_reason
-            if reason is None:
-                if hedge_failed:
-                    reason = 'hedge-failed'
-                elif engine.stop.is_set():
-                    reason = 'stop-requested'
-                elif engine.manual_paused:
-                    reason = 'manual-pause'
-                elif engine.halted:
-                    reason = 'engine-halted'
-                elif time.monotonic() >= deadline:
-                    reason = 'timeout'
-                elif not engine._maker_quote_valid(buy, sell, plan, price):
-                    reason = 'quote-invalid:signal/depth/readiness'
+            reason = cancel_decision()
             if reason is not None:
                 await request_cancel(reason)
             if cancel_at is not None and time.monotonic() - cancel_at >= cfg.settle_timeout_sec:

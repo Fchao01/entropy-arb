@@ -268,8 +268,18 @@ class Engine:
         log.info("strategy config=%s thresholds={midline_bps: %+.3f, upper_bps: %.3f, lower_bps: %.3f}",
                  self.config_path or "<in-memory>", cfg.midline_bps,
                  cfg.upper_bps, cfg.lower_bps)
-        log.info("primary execution=%s maker_timeout=%.2fs primary_fee=%.3fbps",
-                 cfg.primary_order_type, cfg.maker_timeout_sec, cfg.primary_fee_bps)
+        if cfg.primary_order_type == 'maker' and cfg.maker_cancel_policy == 'best_price':
+            log.info('primary execution=maker maker_policy=best_price reprice_delay=%.3fs '
+                     'primary_fee=%.3fbps (no total timeout)',
+                     cfg.maker_reprice_delay_sec, cfg.primary_fee_bps)
+        else:
+            log.info("primary execution=%s maker_timeout=%.2fs primary_fee=%.3fbps",
+                     cfg.primary_order_type, cfg.maker_timeout_sec, cfg.primary_fee_bps)
+        if cfg.primary_order_type == 'maker':
+            log.info('[MAKER POLICY] policy=%s reprice_delay=%.3fs; %s',
+                     cfg.maker_cancel_policy, cfg.maker_reprice_delay_sec,
+                     '信号有效且在最优价时持续保留，不设总等待上限'
+                     if cfg.maker_cancel_policy == 'best_price' else '按最长等待时间撤单')
         if cfg.strategy_mode == "spread":
             log.info("[SPREAD] executable price spread > %.3f bps; both directions; "
                      "no history, batch limit or profit target; fees reported separately", cfg.spread_bps)
@@ -407,15 +417,29 @@ class Engine:
             take_fraction=self.cfg.take_fraction, cap_notional=cap_notional,
             min_base=self._min_base, min_notional=self._min_notional, size_step=self._step)
 
+    def _maker_at_best_price(self, primary_buy, price):
+        best = self.entropy.book.best_bid() if primary_buy else self.entropy.book.best_ask()
+        if best is None or not math.isfinite(best) or best <= 0:
+            return False
+        # A quote improving on the last public BBO also retains priority;
+        # our small own order may not yet appear in the public snapshot.
+        return ((price >= best if primary_buy else price <= best)
+                or math.isclose(price, best, rel_tol=1e-12, abs_tol=1e-12))
+
     def _maker_quote_valid(self, buy, sell, plan, price):
         if (not self.entropy.book.is_fresh(self.cfg.staleness_sec)
                 or not self.hedge.book.is_fresh(self.cfg.staleness_sec)
                 or not self.entropy.ready_to_trade() or not self.hedge.ready_to_trade()
+                or self._venue_limited(self.hedge) or not self._venue_rate_ok(self.hedge)
                 or self._venue_down):
             return False
         if self.bps_strategy and plan.action == "bps_open":
             strategy = self.bps_strategy
             entry = strategy.locked_entry
+            if (entry is None or strategy.awaiting_levels
+                    or (self.cfg.bps_levels == 'rolling' and (strategy.window_end is None
+                        or time.time() - strategy.window_end > 120))):
+                return False
             premium = self.premium_bps()
             if premium is None or (premium > entry if strategy.long else premium < entry):
                 return False

@@ -283,9 +283,11 @@ function renderMonitor() {
   const metrics = task.status;
   const fresh = active(task) && !task.status_stale;
   const metricNote = fresh ? "当前运行会话" : metrics ? "最后快照 · 当前非实时" : "等待首次状态快照";
-  const orderMode = metrics?.primary_order_type === "maker" ? `主腿挂单 · 等待 ${number(metrics.maker_timeout_sec, 1)}s` : "主腿吃单";
+  const orderMode = metrics?.primary_order_type === "maker" ? metrics.maker_cancel_policy === "best_price"
+    ? `主腿挂单 · 条件有效且在最优价持续保留 · 离开最优价 ${number(metrics.maker_reprice_delay_sec, 2)}s 后撤单`
+    : `主腿挂单 · 最长等待 ${number(metrics.maker_timeout_sec, 1)}s` : "主腿吃单";
   const maker = metrics?.active_maker;
-  const makerLabel = maker ? ` · 挂单${maker.state === "unresolved" ? "状态未确认" : maker.state === "canceling" ? "撤单确认中" : "跟踪中"} · 已成交 ${number(maker.filled, 6)} / 已对冲 ${number(maker.hedged, 6)}` : "";
+  const makerLabel = maker ? ` · 挂单${maker.state === "unresolved" ? "状态未确认" : maker.state === "canceling" ? "撤单确认中" : maker.cancel_policy === "best_price" ? maker.at_best_price === false ? "离开最优价，确认中" : "最优价排队中" : "跟踪中"} · 已成交 ${number(maker.filled, 6)} / 已对冲 ${number(maker.hedged, 6)}` : "";
   const bps = metrics?.bps_strategy;
   const historyRange = bps?.coverage?.history_start_ts != null ? ` · 最新参考历史 ${windowTime(bps.coverage.history_start_ts)} → ${windowTime(bps.coverage.history_end_ts)} · 最后记录距今 ${number(bps.coverage.latest_data_age_sec / 60, 1)} 分钟` : "";
   const coverageLabel = bps?.coverage ? ` · 有效数据 ${bps.coverage.valid_minutes}/${bps.window_minutes}（${number(bps.coverage.coverage_pct, 1)}%）` : "";
@@ -425,7 +427,7 @@ async function refreshDetail() {
   }
 }
 
-const fieldMap = {"spread-bps": ["strategy", "spread_bps", 1], "strategy-mode": ["strategy", "mode", "threshold"], "bps-levels": ["bps", "levels", "rolling"], "bps-history-mode": ["bps", "history_mode", "records"], "bps-direction": ["bps", "direction", "long_primary"], "bps-window": ["bps", "window_minutes", 120], "bps-min-valid": ["bps", "min_valid_minutes", 30], "bps-entry-percentile": ["bps", "entry_percentile", 10], "bps-exit-percentile": ["bps", "exit_percentile", 75], "bps-entry": ["bps", "entry_bps", -9], "bps-exit": ["bps", "exit_bps", -6], "bps-exit-mode": ["bps", "exit_mode", "levels"], "bps-take-profit": ["bps", "take_profit_bps", 1], "bps-stop-loss": ["bps", "stop_loss_bps", 10], "bps-max-hold": ["bps", "max_hold_sec", 900], "bps-min-gap": ["bps", "min_gap_bps", 2], "bps-entry-confirm": ["bps", "entry_confirm_sec", 2], "bps-cycle-cooldown": ["bps", "cycle_cooldown_sec", 30], "bps-add-step": ["bps", "add_step_bps", .5], "bps-execution-slip": ["bps", "execution_slippage_bps", 1], "bps-cost-buffer": ["bps", "cost_buffer_bps", 0], "bps-add-interval": ["bps", "add_interval_sec", 60], "bps-position-cap": ["bps", "max_position_usd", 1000], "primary-order-type": ["execution", "primary_order_type", "taker"], "maker-timeout": ["execution", "maker_timeout_sec", 5], "primary-maker-fee": ["primary", "maker_fee_bps", 0], "midline": ["thresholds", "midline_bps", 0], "upper": ["thresholds", "upper_bps", 4], "lower": ["thresholds", "lower_bps", 4], "order-cap": ["sizing", "max_order_notional_usd", 500], "primary-cap": ["primary", "max_position_usd", 1000], "hedge-cap": ["hedge", "max_position_usd", 1000], "primary-fee": ["primary", "taker_fee_bps", 0], "hedge-fee": ["hedge", "taker_fee_bps", 2.25], "primary-symbol": ["primary", "symbol", ""], "hedge-symbol": ["hedge", "symbol", ""]};
+const fieldMap = {"spread-bps": ["strategy", "spread_bps", 1], "strategy-mode": ["strategy", "mode", "threshold"], "bps-levels": ["bps", "levels", "rolling"], "bps-history-mode": ["bps", "history_mode", "records"], "bps-direction": ["bps", "direction", "long_primary"], "bps-window": ["bps", "window_minutes", 120], "bps-min-valid": ["bps", "min_valid_minutes", 30], "bps-entry-percentile": ["bps", "entry_percentile", 10], "bps-exit-percentile": ["bps", "exit_percentile", 75], "bps-entry": ["bps", "entry_bps", -9], "bps-exit": ["bps", "exit_bps", -6], "bps-exit-mode": ["bps", "exit_mode", "levels"], "bps-take-profit": ["bps", "take_profit_bps", 1], "bps-stop-loss": ["bps", "stop_loss_bps", 10], "bps-max-hold": ["bps", "max_hold_sec", 900], "bps-min-gap": ["bps", "min_gap_bps", 2], "bps-entry-confirm": ["bps", "entry_confirm_sec", 2], "bps-cycle-cooldown": ["bps", "cycle_cooldown_sec", 30], "bps-add-step": ["bps", "add_step_bps", .5], "bps-execution-slip": ["bps", "execution_slippage_bps", 1], "bps-cost-buffer": ["bps", "cost_buffer_bps", 0], "bps-add-interval": ["bps", "add_interval_sec", 60], "bps-position-cap": ["bps", "max_position_usd", 1000], "primary-order-type": ["execution", "primary_order_type", "taker"], "maker-cancel-policy": ["execution", "maker_cancel_policy", "best_price"], "maker-reprice-delay": ["execution", "maker_reprice_delay_sec", 0.3], "maker-timeout": ["execution", "maker_timeout_sec", 5], "primary-maker-fee": ["primary", "maker_fee_bps", 0], "midline": ["thresholds", "midline_bps", 0], "upper": ["thresholds", "upper_bps", 4], "lower": ["thresholds", "lower_bps", 4], "order-cap": ["sizing", "max_order_notional_usd", 500], "primary-cap": ["primary", "max_position_usd", 1000], "hedge-cap": ["hedge", "max_position_usd", 1000], "primary-fee": ["primary", "taker_fee_bps", 0], "hedge-fee": ["hedge", "taker_fee_bps", 2.25], "primary-symbol": ["primary", "symbol", ""], "hedge-symbol": ["hedge", "symbol", ""]};
 
 function sectionLines(text, section) {
   const lines = text.split("\n");
@@ -495,13 +497,15 @@ function refreshStrategyFields() {
     setYaml("execution", "primary_order_type", "taker");
   }
   element("primary-order-type").disabled = spread;
-  for (const id of ["maker-timeout", "primary-maker-fee"]) {
-    element(id).closest("label").hidden = spread;
-    element(id).disabled = spread;
+  const maker = !spread && element("primary-order-type").value === "maker";
+  const keepBest = element("maker-cancel-policy").value === "best_price";
+  for (const [id, visible] of [["maker-cancel-policy", maker], ["maker-reprice-delay", maker && keepBest], ["maker-timeout", maker && !keepBest], ["primary-maker-fee", maker]]) {
+    element(id).closest("label").hidden = !visible;
+    element(id).disabled = !visible;
   }
   element("execution-note").textContent = spread
     ? "1 bps = 0.01%。手续费按实际账户配置并另计，不参与价格差门槛判断；单笔下单量、每腿持仓上限与滑点保护继续生效。"
-    : "1 bps = 0.01%。费率以你的实际账户为准；原套利阈值策略的两个方向门槛另加双腿手续费。挂单模式使用主腿挂单费率；部分成交吃单对冲，超时或价差失效撤单。";
+    : "1 bps = 0.01%。费率以你的实际账户为准；原套利阈值策略的两个方向门槛另加双腿手续费。最优价保留模式先检查 BPS / 阈值条件：失效立即撤单；有效且在买一/卖一持续排队，离开最优价确认后撤单。部分成交按实际新增数量吃单对冲；确认旧单撤销后才重评新单。";
 }
 
 function syncFields() {
@@ -576,7 +580,7 @@ element("task-strategy").addEventListener("change", () => applyStrategy().catch(
 for (const [id, [section, key]] of Object.entries(fieldMap)) {
   element(id).addEventListener("input", () => {
     const value = element(id).value;
-    if (["primary-order-type", "strategy-mode", "bps-levels", "bps-history-mode", "bps-direction", "bps-exit-mode"].includes(id)) {
+    if (["primary-order-type", "maker-cancel-policy", "strategy-mode", "bps-levels", "bps-history-mode", "bps-direction", "bps-exit-mode"].includes(id)) {
       setYaml(section, key, value);
       if (id === "bps-direction") {
         for (const [entryId, exitId] of [["bps-entry", "bps-exit"], ["bps-entry-percentile", "bps-exit-percentile"]]) {

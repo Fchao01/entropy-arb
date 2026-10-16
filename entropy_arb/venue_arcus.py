@@ -457,6 +457,9 @@ class ArcusVenue:
         params = {"address": self.address, "accountIndex": self.account_index}
         if order_id:
             row = await self._get("/v1/order/" + quote(order_id, safe=""), **params)
+            if (not isinstance(row, dict) or row.get('orderId') != order_id
+                    or row.get('marketId') != self.market_id):
+                raise RuntimeError('Arcus order lookup returned incomplete or mismatched state')
             self._remember_order(row)
         else:
             # No ACK may mean the request still reached the engine. Find our
@@ -506,14 +509,21 @@ class ArcusVenue:
                 oid = order.order_id or self._clients.get(order.client_id)
                 if not self._orders_ready or oid in self._orders:
                     break
-        # Prefer the stream while resting, but actively verify after cancel:
+        # Prefer the stream while resting, but periodically verify long-lived
+        # makers too: a missed fill must not sit unhedged indefinitely.
+        cached = self._orders.get(oid)
+        if cached is not None and not order.last_query and order.cancel_requested_at is None:
+            order.last_query = time.monotonic()
+        periodic_query = (cached is not None and self._terminal_result(cached) is None
+                          and time.monotonic() - order.last_query >= 5.0)
+        # Actively verify after cancel:
         # a connected stream can miss its terminal update and retain OPEN.
         # Never let a lagging HTTP response overwrite an already known final.
         cancel_query = (order.cancel_requested_at is not None
                         and self._terminal_result(self._orders.get(oid, {})) is None
                         and (order.last_query < order.cancel_requested_at
                              or time.monotonic() - order.last_query >= 1.0))
-        if not self._orders_ready or oid not in self._orders or cancel_query:
+        if not self._orders_ready or oid not in self._orders or cancel_query or periodic_query:
             # Timestamp attempts too, so a failing lookup is not retried at
             # the 100 ms lifecycle poll rate while the WS remains connected.
             order.last_query = time.monotonic()

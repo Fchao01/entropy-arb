@@ -143,3 +143,22 @@ def test_real_arcus_lifecycle_hedges_cancel_race_from_http_without_ws_terminal()
         v._get.assert_awaited_once()
         assert not e.halted and e.active_maker is None
     asyncio.run(run())
+
+
+def test_long_lived_arcus_maker_verifies_fills_without_canceling():
+    async def run():
+        v = signed_venue()
+        v._remember_order(arcus_order(status='OPEN', state='OPEN', filledSize='0',
+                                      remainingSize='.02', avgFillPrice=None, timeInForce='ALO'))
+        v._get = AsyncMock(return_value=arcus_order(filledSize='.02'))
+        tick = [100.0]
+        handle = MakerOrder('client-1', 2500.01, time.time(), order_id='order-1')
+        with patch('entropy_arb.venue_arcus.time', SimpleNamespace(monotonic=lambda: tick[0])):
+            assert not (await v.maker_state(handle))['terminal']
+            v._get.assert_not_awaited()
+            tick[0] = 105.1
+            result = await v.maker_state(handle)
+        assert result['terminal'] and result['filled_base'] == .02
+        assert handle.cancel_requested_at is None
+        v._get.assert_awaited_once()
+    asyncio.run(run())
