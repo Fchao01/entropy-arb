@@ -964,6 +964,7 @@ class TaskManager:
                     raise ConsoleError("策略文件改变了市场路径，请新建任务，避免混合历史数据")
             markets = {market_resource(cfg.entropy), market_resource(cfg.hedge)}
             signers = signer_resources(cfg.entropy) | signer_resources(cfg.hedge) if task["mode"] == "live" else set()
+            startup_warnings = []
             if task["mode"] == "live":
                 if confirmed is not True:
                     raise ConsoleError("实盘启动需要明确确认，程序将发送真实订单")
@@ -986,7 +987,7 @@ class TaskManager:
                     if markets & runtime["markets"]:
                         raise ConsoleError(f"交易市场与实盘任务「{other['name']}」重叠，请勿同时管理同一持仓")
                     if signers & runtime["signers"]:
-                        raise ConsoleError(f"与「{other['name']}」共用签名密钥；多进程实盘请使用独立 API 密钥或子账户")
+                        startup_warnings.append(f"与「{other['name']}」共用签名密钥，已允许启动；多进程可能发生 nonce 冲突或交易所限流")
             directory = self.directory(task_id)
             (directory / "config.yaml").write_text(rendered, encoding="utf-8")
             (directory / "status.json").unlink(missing_ok=True)
@@ -1016,7 +1017,7 @@ class TaskManager:
                 stderr=asyncio.subprocess.STDOUT, start_new_session=True)
             task.update(public)
             task.update(state="running", pid=process.pid, started_at=time.time(), ended_at=None,
-                        exit_code=None, manual_paused=False)
+                        exit_code=None, manual_paused=False, startup_warnings=startup_warnings)
             runtime = dict(process=process, markets=markets, signers=signers,
                            recorder_path=self.configured_path(cfg.recorder_csv),
                            log_path=log_path,
@@ -1025,6 +1026,9 @@ class TaskManager:
             self.running[task_id] = runtime
             runtime["watcher"] = asyncio.create_task(self.watch(task_id, runtime))
             self.audit(task_id, f"START {task['mode']} pid={process.pid}")
+            for warning in startup_warnings:
+                self.audit(task_id, 'WARNING ' + warning)
+                log.warning('[%s] %s', task['symbol'], warning)
             self.save()
             return self.view(task)
 

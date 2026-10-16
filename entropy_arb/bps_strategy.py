@@ -328,6 +328,76 @@ class BpsStrategy:
                     self.engine.hedge.name, self.engine.hedge.position,
                     self.cfg.bps_levels, self.locked_exit)
 
+    def _use_current_basis(self):
+        if self.price_basis == self.cfg.bps_price_basis or self.profit_mode:
+            return False
+        previous = self.price_basis
+        self.locked_price_basis = self.cfg.bps_price_basis
+        self.closing = False
+        self.close_reason = None
+        self.last_add_premium = None
+        self.adopted_position = True
+        self.awaiting_levels = self.cfg.bps_levels == 'rolling'
+        self.locked_entry, self.locked_exit = ((None, None) if self.awaiting_levels else (self.entry, self.exit))
+        self.reason = '配对旧仓已切换当前口径，等待历史点位' if self.awaiting_levels else '配对旧仓已切换当前点位'
+        for key in self.engine._armed:
+            self.engine._armed[key] = None
+        log.warning('[BPS ADOPT] paired positions retained; basis %s -> %s; '
+                    'recompute current levels before trading, no flatten required', previous, self.locked_price_basis)
+        return True
+
+    async def verify_existing_pair(self):
+        """Validate a fresh adoption/rebase before enabling strategy loops."""
+        if self.flat():
+            return
+        self._check_paired_positions()
+        original = self.path.read_text() if self.path.exists() else None
+        state = json.loads(original) if original is not None else None
+        if state is not None:
+            if not isinstance(state, dict) or state.get('identity') != self.identity or state.get('pending'):
+                return  # restore()/recover_pending() retain their strict checks.
+            if state.get('active_maker'):
+                raise RuntimeError('bps 旧主腿订单仍需确认，不能仅凭配对仓位接管')
+            mismatch = any(abs(v.position - state.get('positions', {}).get(v.key, float('inf'))) > self.tolerance
+                           for v in self.engine.venues.values())
+            switching = (state.get('locked_price_basis') or 'mid') != self.cfg.bps_price_basis
+            if not mismatch and not switching:
+                return
+        else:
+            mismatch = False
+        for attempt in range(2):
+            if self.engine.stop.is_set():
+                raise RuntimeError('bps 旧仓核验已停止')
+            for venue in self.engine.venues.values():
+                timeout = max(10, self.cfg.settle_timeout_sec)
+                try:
+                    has_orders = await asyncio.wait_for(venue.has_open_orders(), timeout)
+                    live = await asyncio.wait_for(venue.fetch_position(), timeout)
+                except Exception as error:
+                    raise RuntimeError(f'bps 旧仓查询失败 ({type(error).__name__})，未接管') from error
+                if has_orders is not False:
+                    raise RuntimeError('bps 接管旧仓前存在未成交订单，等待确认')
+                if (not isinstance(live, (int, float)) or isinstance(live, bool)
+                        or not math.isfinite(live) or abs(live - venue.position) > self.tolerance):
+                    raise RuntimeError('bps 接管旧仓时实时仓位变化，等待稳定后重试')
+            if attempt == 0:
+                try:
+                    await asyncio.wait_for(self.engine.stop.wait(), PENDING_RECOVERY_RECHECK_SEC)
+                except asyncio.TimeoutError:
+                    pass
+                else:
+                    raise RuntimeError('bps 旧仓核验已停止')
+        current = self.path.read_text() if self.path.exists() else None
+        if current != original:
+            raise RuntimeError('bps 旧仓核验期间状态文件变化，未接管')
+        if mismatch:
+            archive = self.path.with_name(f'{self.path.name}.adopted-{time.time_ns()}.bak')
+            with archive.open('x', encoding='utf-8') as output:
+                output.write(original)
+            self._adopt_positions()
+            log.warning('[BPS ADOPT] verified paired positions differ from checkpoint; '
+                        'adopted without flattening; historical costs unknown; archive=%s', archive)
+
     async def recover_pending(self):
         """Verify old orders and stable positions before enabling recovery.
 
@@ -490,6 +560,7 @@ class BpsStrategy:
         self.closing = False
         self.close_reason = None
         self.costs.inherit(positions, time.time())
+        self._use_current_basis()
         # Old ambiguous fills have unknown prices. Do not manufacture P&L.
         self.save()  # durable pending before the first reduce-only repair
         initial_net = sum(positions.values())
@@ -635,6 +706,12 @@ class BpsStrategy:
         if waiting and self.cfg.bps_levels == 'manual':
             self.locked_entry, self.locked_exit = self.entry, self.exit
             self.awaiting_levels = False
+            self.save()
+        if self._use_current_basis():
+            original = self.path.read_text()
+            archive = self.path.with_name(f'{self.path.name}.basis-{time.time_ns()}.bak')
+            with archive.open('x', encoding='utf-8') as output:
+                output.write(original)
             self.save()
         log.info('[BPS] restored cycle entries=%s frozen_exit=%s closing=%s awaiting_levels=%s',
                  self.entries, self.locked_exit, self.closing, self.awaiting_levels)

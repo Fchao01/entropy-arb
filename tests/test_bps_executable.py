@@ -165,7 +165,7 @@ def test_explicit_executable_manual_targets_are_independent_greater_equal_levels
     assert cfg.bps_entry_percentile == 90
 
 
-def test_existing_midpoint_cycle_keeps_old_targets_and_cannot_add_under_new_basis(tmp_path):
+def test_existing_paired_cycle_adopts_current_basis_without_flattening(tmp_path):
     async def run():
         eng = engine_at(tmp_path)
         eng.ensure_async_state()
@@ -175,20 +175,25 @@ def test_existing_midpoint_cycle_keeps_old_targets_and_cannot_add_under_new_basi
         eng.bps_strategy.path.write_text(json.dumps(old))
         eng.cfg.bps_price_basis = 'executable'
         eng.cfg.bps_entry, eng.cfg.bps_exit = 5, 4
+        positions = [v.position for v in eng.venues.values()]
         eng.bps_strategy = BpsStrategy(eng)
         eng.bps_strategy.restore()
-        assert eng.bps_strategy.price_basis == 'mid'
-        books(eng, -10)
-        assert eng._scan(time.time()) is None
-        books(eng, -5)
+        assert eng.bps_strategy.price_basis == 'executable'
+        assert [v.position for v in eng.venues.values()] == positions
+        assert eng.bps_strategy.locked_entry == 5 and eng.bps_strategy.locked_exit == 4
+        quotes(eng, opening=True)
+        candidate = eng._scan(time.time())
+        assert candidate and candidate[2].action == 'bps_open'
+        await execute(eng, candidate)
+        quotes(eng, opening=False)
         candidate = eng._scan(time.time())
         assert candidate and candidate[2].action == 'bps_close'
-        assert candidate[2].cycle_exit_bps == -6
+        assert candidate[2].cycle_exit_bps == 4
         await execute(eng, candidate)
         for _ in range(3):
             if eng.bps_strategy.flat():
                 break
-            books(eng, -5)
+            quotes(eng, opening=False)
             await execute(eng, eng._scan(time.time()))
         assert eng.bps_strategy.flat() and eng.bps_strategy.price_basis == 'executable'
         quotes(eng, opening=True)

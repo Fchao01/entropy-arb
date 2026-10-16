@@ -245,11 +245,18 @@ def test_live_confirmation_credentials_and_signer_conflicts(tmp_path):
             second_payload.update(mode="live", profile="btc-same")
             conflict = await manager.put(second_payload)
             await manager.start(first["id"], True)
-            with pytest.raises(ConsoleError, match="签名密钥"):
-                await manager.start(conflict["id"], True)
+            shared = await manager.start(conflict["id"], True)
+            assert shared['state'] == 'running'
+            assert len(shared['startup_warnings']) == 1
+            assert '共用签名密钥' in shared['startup_warnings'][0]
+            assert first['name'] in shared['startup_warnings'][0]
+            assert 'WARNING' in (manager.directory(conflict['id']) / 'events.log').read_text()
+            await manager.stop(conflict['id'])
+            await manager.running[conflict['id']]['watcher']
             second_payload["profile"] = "btc"
             second = await manager.put(second_payload)
             await manager.start(second["id"], True)
+            assert not manager.view(manager.tasks[second['id']])['startup_warnings']
             assert len(manager.running) == 2
             overlapping = payload("ETH-PAIR")
             overlapping.update(mode="live", profile="btc",

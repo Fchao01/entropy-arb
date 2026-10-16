@@ -306,6 +306,7 @@ class Engine:
             if not recovering_positions:
                 self._check_starting_positions()
             if self.bps_strategy and not recovering_positions:
+                await self.bps_strategy.verify_existing_pair()
                 self.bps_strategy.restore()
 
         for v in self.venues.values():
