@@ -28,7 +28,7 @@ import aiohttp
 
 from .book import ArbPlan, OrderBook, floor_step, plan_arb
 from .bps_strategy import BpsStrategy, recorder_source
-from .maker import execute_primary_maker
+from .maker import execute_primary_maker, rh_hedge_depth
 from .config import Config
 from .recorder import MinuteRecorder
 from .venue_hl import HLVenue
@@ -430,6 +430,11 @@ class Engine:
         # cap_notional limits the BUY leg. A fixed primary SELL quote must
         # not be shrunk a second time using the different primary price.
         available = max(cap_notional / buy_price, self._step) / self.cfg.take_fraction
+        hedge_depth = rh_hedge_depth(self, primary_buy)
+        if hedge_depth is not None:
+            if hedge_depth["capacity_base"] <= 0:
+                return None, "rh_depth_unavailable"
+            available = min(available, hedge_depth["capacity_base"] / self.cfg.take_fraction)
         quote.asks = {price: available}
         quote.bids = {price: available}
         return plan_arb(
@@ -467,6 +472,12 @@ class Engine:
                 or self._venue_limited(self.hedge) or not self._venue_rate_ok(self.hedge)
                 or self._venue_down):
             return False
+        required_qty = plan.qty
+        hedge_depth = rh_hedge_depth(self, buy is self.entropy)
+        if hedge_depth is not None:
+            required_qty = max(0, required_qty - (self.active_maker or {}).get("hedged", 0))
+            if hedge_depth["capacity_base"] < required_qty - self._step / 2:
+                return False
         if self.bps_strategy and plan.action == "bps_open":
             strategy = self.bps_strategy
             entry = strategy.locked_entry
@@ -478,16 +489,16 @@ class Engine:
             if premium is None or (premium < entry if strategy.executable or not strategy.long else premium > entry):
                 return False
             current = strategy.plan(buy, sell, quote=price)
-            return (current is not None and current.qty >= plan.qty - self._step / 2
+            return (current is not None and current.qty >= required_qty - self._step / 2
                     and strategy.entry_check(current, buy, sell, strategy.locked_entry, strategy.locked_exit))
         if self.bps_strategy and plan.action == "bps_close":
             strategy = self.bps_strategy
             if not strategy.profit_mode and not strategy.exit_reached(strategy.signal(closing=True)):
                 return False
             current = strategy.plan(buy, sell, closing=True, quote=price)
-            return current is not None and current.qty >= plan.qty - self._step / 2
+            return current is not None and current.qty >= required_qty - self._step / 2
         current, _ = self._maker_plan_at(buy, sell, plan.buy_notional, price)
-        return current is not None and current.qty >= plan.qty - self._step / 2
+        return current is not None and current.qty >= required_qty - self._step / 2
 
     # -------------------------------------------------------------- strategy
 
@@ -703,6 +714,22 @@ class Engine:
             plan, _ = self._plan(buy, sell, cap)
             if plan is None:
                 return False
+        hedge_depth = rh_hedge_depth(self, buy is self.entropy)
+        if hedge_depth is not None:
+            requested_qty = plan.qty
+            if requested_qty > hedge_depth["capacity_base"]:
+                price = plan.buy_limit if buy is self.entropy else plan.sell_limit
+                if self.bps_strategy:
+                    plan = self.bps_strategy.plan(buy, sell, closing=plan.action == "bps_close", quote=price)
+                else:
+                    plan, _ = self._maker_plan_at(buy, sell, plan.buy_notional, price)
+                if plan is None:
+                    log.warning("[MAKER SIZE] RH depth insufficient for minimum order; no Arcus order sent")
+                    return False
+            log.info("[MAKER SIZE] ARCUS qty=%.8g requested=%.8g RH depth=%.8g fraction=%.4g "
+                     "capacity=%.8g ref=%s limit=%s; thresholds unchanged",
+                     plan.qty, requested_qty, hedge_depth["depth_base"], cfg.take_fraction,
+                     hedge_depth["capacity_base"], hedge_depth["reference_px"], hedge_depth["limit_px"])
         inv_bps = (0.0 if self.bps_strategy or cfg.strategy_mode == "spread"
                    else self._inv_add_bps(buy, sell))
         direction = self.direction_key(sell.key == self.entropy.key)

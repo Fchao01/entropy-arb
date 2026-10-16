@@ -12,6 +12,7 @@ from .book import floor_step, walk_depth
 from .reduction import reduction_rules
 
 log = logging.getLogger("maker")
+RH_HEDGE_RETRY_SEC = 0.1
 
 
 @dataclass
@@ -35,6 +36,29 @@ def empty_result(status="not-sent", err=None, unresolved=False):
             "err": err, "unresolved": unresolved}
 
 
+def rh_hedge_depth(engine, primary_buy):
+    cfg, hedge = engine.cfg, engine.hedge
+    if not (cfg.primary_maker_only and cfg.hedge_venue == "lighter-rh"):
+        return None
+    result = dict(capacity_base=0.0, depth_base=0.0, reference_px=None, limit_px=None,
+                  take_fraction=cfg.take_fraction)
+    if (not hedge.book.is_fresh(cfg.staleness_sec) or not hedge.ready_to_trade()
+            or hedge.key in engine._venue_down or engine._venue_limited(hedge)):
+        return result
+    levels = hedge.book.sorted_bids() if primary_buy else hedge.book.sorted_asks()
+    if any(not math.isfinite(price) or price <= 0 or not math.isfinite(size) or size <= 0
+           for price, size in levels):
+        return result
+    reference = levels[0][0]
+    slip = cfg.hedge_slippage_bps / 1e4
+    limit = hedge.px_round(reference * (1 - slip if primary_buy else 1 + slip), round_up=primary_buy)
+    depth = sum(size for price, size in levels
+                if (price >= limit - 1e-12 if primary_buy else price <= limit + 1e-12))
+    result.update(capacity_base=floor_step(depth * cfg.take_fraction, engine._step),
+                  depth_base=depth, reference_px=reference, limit_px=limit)
+    return result
+
+
 async def execute_primary_maker(engine, buy, sell, plan, *, hedge_enabled=True):
     """Required venue locks remain held until cancel/terminal confirmation.
 
@@ -43,6 +67,7 @@ async def execute_primary_maker(engine, buy, sell, plan, *, hedge_enabled=True):
     met. Unknown hedge outcomes stop further hedge sends to prevent duplicates.
     """
     primary, hedge, cfg = engine.entropy, engine.hedge, engine.cfg
+    bounded_rh_hedge = cfg.primary_maker_only and cfg.hedge_venue == "lighter-rh"
     reducing = plan.action in ("bps_close", "maker_repair")
     primary_buy = primary is buy
     price = plan.buy_limit if primary_buy else plan.sell_limit
@@ -52,6 +77,8 @@ async def execute_primary_maker(engine, buy, sell, plan, *, hedge_enabled=True):
     quote = 0.0
     hedge_prices_known = True
     hedge_failed = False
+    hedge_retry_pending = False
+    hedge_attempt = 0
     terminal = False
     cancel_at = None
     cancel_sent = False
@@ -158,10 +185,10 @@ async def execute_primary_maker(engine, buy, sell, plan, *, hedge_enabled=True):
             terminal = True
         else:
             timeout_task = asyncio.create_task(monitor_quote(), name="maker-quote-monitor")
-        while not terminal:
+        while not terminal or hedge_retry_pending:
             try:
-                state = await asyncio.wait_for(primary.maker_state(order),
-                                               timeout=cfg.settle_timeout_sec)
+                state = (await asyncio.wait_for(primary.maker_state(order), timeout=cfg.settle_timeout_sec)
+                         if not terminal else {**pinfo, "terminal": True})
                 filled = float(state["filled_base"])
                 if (not math.isfinite(filled) or filled < pinfo["filled_base"] - 1e-10
                         or filled > plan.qty + 1e-8):
@@ -181,7 +208,13 @@ async def execute_primary_maker(engine, buy, sell, plan, *, hedge_enabled=True):
                 deadline = min(deadline, time.monotonic())
                 cancel_reason = cancel_reason or ('order-state-unavailable:' + detail)
 
+            if hedge_failed:
+                hedge_retry_pending = False
             remainder = floor_step(pinfo["filled_base"] - hinfo["filled_base"], engine._step)
+            if hedge_retry_pending and (engine.stop.is_set() or engine.manual_paused):
+                hedge_failed = True
+                hedge_retry_pending = False
+                hinfo["err"] = "RH hedge retry stopped by manual pause/stop; exposure remains"
             if hedge_enabled and remainder > 0 and not hedge_failed:
                 levels = hedge.book.sorted_bids() if primary_buy else hedge.book.sorted_asks()
                 enough = sum(size for _, size in levels) >= remainder - 1e-12
@@ -191,18 +224,26 @@ async def execute_primary_maker(engine, buy, sell, plan, *, hedge_enabled=True):
                     minimum_base = hedge.min_base
                     minimum_quote = max(cfg.min_order_notional, hedge.min_quote)
                 if (not hedge.book.is_fresh(cfg.staleness_sec) or not hedge.ready_to_trade()
-                        or not enough or not engine._venue_rate_ok(hedge)):
+                        or not enough or not engine._venue_rate_ok(hedge)
+                        or (bounded_rh_hedge and (hedge.key in engine._venue_down or engine._venue_limited(hedge)))):
                     hedge_failed = True
+                    hedge_retry_pending = False
                     hinfo["err"] = "maker fill cannot be hedged: hedge venue unavailable/depth/budget"
                 elif (remainder >= max(minimum_base, engine._step)
                       and remainder * levels[0][0] >= minimum_quote):
                     px, _ = walk_depth(levels, remainder)
                     is_buy = not primary_buy
-                    slip = (cfg.hedge_slippage_bps if plan.slippage_bps is None
+                    slip = (cfg.hedge_slippage_bps if bounded_rh_hedge or plan.slippage_bps is None
                             else min(cfg.hedge_slippage_bps, plan.slippage_bps)) / 1e4
-                    bound = hedge.px_round(px * (1 + slip if is_buy else 1 - slip),
+                    reference = levels[0][0] if bounded_rh_hedge else px
+                    bound = hedge.px_round(reference * (1 + slip if is_buy else 1 - slip),
                                            round_up=not is_buy)
+                    hedge_attempt += 1
                     engine._record_send(hedge)
+                    log.info("[MAKER-HEDGE SEND] %s %s qty=%.8g ref=%.10g limit=%.10g "
+                             "slippage_bps=%.6g attempt=%d reduce_only=%s",
+                             hedge.name, "BUY" if is_buy else "SELL", remainder, reference, bound,
+                             slip * 1e4, hedge_attempt, reducing)
                     try:
                         result, elapsed = await asyncio.wait_for(engine._timed_send(
                             hedge, is_buy=is_buy, qty=remainder, limit_px=bound,
@@ -212,6 +253,9 @@ async def execute_primary_maker(engine, buy, sell, plan, *, hedge_enabled=True):
                         result = empty_result("hedge-timeout", "maker hedge outcome unknown", True)
                         elapsed = (2 * cfg.settle_timeout_sec + 10) * 1000
                     hedge_ms += elapsed
+                    log.info("[MAKER-HEDGE RESULT] %s attempt=%d status=%s filled=%s/%s unresolved=%s",
+                             hedge.name, hedge_attempt, result.get("status"),
+                             result.get("filled_base"), remainder, result.get("unresolved"))
                     hfilled = float(result["filled_base"])
                     if not math.isfinite(hfilled) or not 0 <= hfilled <= remainder + engine._step / 2:
                         result = empty_result("hedge-invalid", "invalid hedge fill quantity", True)
@@ -230,19 +274,33 @@ async def execute_primary_maker(engine, buy, sell, plan, *, hedge_enabled=True):
                              pinfo["filled_base"], hinfo["filled_base"], hinfo["status"])
                     hedge_failed = (bool(result.get("err") or result.get("unresolved"))
                                     or hfilled < remainder - engine._step / 2)
+                    hedge_retry_pending = (bounded_rh_hedge
+                                           and result.get("status") == "canceled-too-much-slippage"
+                                           and hfilled == 0 and result.get("unresolved") is False
+                                           and not result.get("err"))
+                    if hedge_retry_pending:
+                        hedge_failed = False
+                        if not terminal:
+                            cancel_reason = cancel_reason or "hedge-zero-fill-retry"
+                        log.warning("[MAKER-HEDGE RETRY] %s confirmed zero fill; next attempt uses latest BBO "
+                                    "and configured slippage; no retry-count limit", hedge.name)
                     if hedge_failed and hinfo["err"] is None:
                         hinfo["err"] = "maker hedge incomplete or unresolved"
+                elif hedge_retry_pending:
+                    hedge_retry_pending = False
+                    hedge_failed = True
+                    hinfo["err"] = "RH hedge retry below minimum order size/notional"
 
-            if terminal:
+            if terminal and not hedge_retry_pending:
                 break
             reason = cancel_decision()
             if reason is not None:
                 await request_cancel(reason)
-            if cancel_at is not None and time.monotonic() - cancel_at >= cfg.settle_timeout_sec:
+            if not terminal and cancel_at is not None and time.monotonic() - cancel_at >= cfg.settle_timeout_sec:
                 pinfo.update(status="cancel-unconfirmed", unresolved=True,
                              err="maker final state unknown; check exchange open orders before restarting")
                 break
-            await asyncio.sleep(min(0.1, cfg.settle_timeout_sec / 4))
+            await asyncio.sleep(RH_HEDGE_RETRY_SEC if hedge_retry_pending else min(0.1, cfg.settle_timeout_sec / 4))
     except Exception as error:
         # Placement APIs retain the client id on ambiguous transport errors.
         # An unexpected adapter failure must halt too, not be treated as zero-fill.

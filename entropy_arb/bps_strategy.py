@@ -15,6 +15,7 @@ from .book import ArbPlan, crossable_base, floor_step, walk_depth
 from .recorder import prepare_recorder_source
 from .bps_pnl import CycleCosts
 from .reduction import reduction_rules
+from .maker import rh_hedge_depth
 
 log = logging.getLogger('bps')
 PENDING_RECOVERY_RECHECK_SEC = 5.0
@@ -953,6 +954,9 @@ class BpsStrategy:
                 cap = min(venue.cap_usd, cfg.bps_max_position_usd)
                 qty = min(qty, max(0, cap / mid - abs(venue.position)))
         qty = floor_step(qty, eng._step)
+        hedge_depth = rh_hedge_depth(eng, pbuy) if maker else None
+        if hedge_depth is not None:
+            qty = min(qty, hedge_depth['capacity_base'])
         def bounded_tail(quantity):
             # Only tolerate the unavoidable fractional remainder after closing
             # every orderable step, never deliberately strand a small slice
