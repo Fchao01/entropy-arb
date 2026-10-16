@@ -37,6 +37,7 @@ log = logging.getLogger("lighter")
 
 AUTH_REFRESH_SEC = 8 * 60
 REST_TIMEOUT = 10.0
+TAKER_RECHECK_SEC = 10.0
 
 
 def terminal_status(status: str) -> bool:
@@ -152,6 +153,14 @@ class AccountOrdersFeed:
 
 class LighterVenue:
     kind = "lighter"
+    # Official core-concepts: market minimums apply to maker orders. IOC
+    # reductions still require a positive integer base_amount, not min_base.
+    # https://apidocs.lighter.xyz/docs/core-concepts#integer-prices-and-sizes
+    reduce_only_min_quote = 0.0
+
+    @property
+    def reduce_only_min_base(self):
+        return 10.0 ** -self.size_decimals
 
     def __init__(self, conf: VenueConf, session: aiohttp.ClientSession,
                  settle_timeout_sec: float) -> None:
@@ -396,7 +405,7 @@ class LighterVenue:
             raise RuntimeError("Lighter cancellation rejected")
 
     async def send_taker(self, *, is_buy: bool, qty: float, limit_px: float,
-                         reduce_only: bool = False) -> dict:
+                         reduce_only: bool = False, _retry_nonce: bool = True) -> dict:
         """Market order with avg-price protection; settle via account ws."""
         assert self.signer is not None
         from lighter import SignerClient
@@ -419,6 +428,9 @@ class LighterVenue:
         except Exception as e:
             if fut is not None:
                 self.orders_feed.unwatch(coi)
+            confirmed = await self._confirm_taker(coi, qty)
+            if confirmed is not None:
+                return confirmed
             msg = f"{type(e).__name__}: {e}"
             if getattr(e, "status", None) == 429 or "(429)" in str(e):
                 msg = "RATE_LIMITED: " + msg
@@ -429,11 +441,28 @@ class LighterVenue:
                 self.orders_feed.unwatch(coi)
             msg = str(err) if err is not None else \
                 f"tx rejected code={resp.code} msg={getattr(resp, 'message', None)}"
+            # Only an explicit API rejection is safe to re-sign. An accepted
+            # transaction or a transport exception goes through same-ID lookup.
+            if _retry_nonce and 'invalid nonce' in msg.lower():
+                manager = getattr(self.signer, 'nonce_manager', None)
+                refresh = getattr(manager, 'async_hard_refresh_nonce', None)
+                if refresh is not None:
+                    try:
+                        await asyncio.wait_for(refresh(self.conf.lighter_creds.api_key_index), REST_TIMEOUT)
+                    except Exception as error:
+                        log.warning('[%s] nonce refresh failed (%s)', self.name, type(error).__name__)
+                    else:
+                        log.warning('[%s] API rejected nonce before acceptance; refreshed nonce, retry once', self.name)
+                        return await self.send_taker(is_buy=is_buy, qty=qty, limit_px=limit_px,
+                                                     reduce_only=reduce_only, _retry_nonce=False)
             if "rate limit" in msg.lower():
                 msg = "RATE_LIMITED: " + msg
             return {"status": "send-failed", "filled_base": 0.0, "avg_px": None,
                     "err": msg, "unresolved": False}
         if fut is None:
+            confirmed = await self._confirm_taker(coi, qty)
+            if confirmed is not None:
+                return confirmed
             return {"status": "sent-unconfirmed", "filled_base": 0.0,
                     "avg_px": None, "err": None, "unresolved": True}
         try:
@@ -442,10 +471,34 @@ class LighterVenue:
                     "avg_px": info.get("avg_px"), "err": None, "unresolved": False}
         except asyncio.TimeoutError:
             self.orders_feed.unwatch(coi)
-            log.warning("[%s] no settle confirmation for coi %d in %.1fs",
+            log.warning("[%s] WS settlement delayed for coi %d after %.1fs; checking the same order via REST/WS",
                         self.name, coi, self.settle_timeout)
+            confirmed = await self._confirm_taker(coi, qty)
+            if confirmed is not None:
+                return confirmed
             return {"status": "timeout", "filled_base": 0.0, "avg_px": None,
                     "err": None, "unresolved": True}
+
+    async def _confirm_taker(self, coi, qty):
+        """Look up the original IOC after a transport/WS delay; never resubmit."""
+        order = MakerOrder(coi, 0, time.time())
+        deadline = time.monotonic() + TAKER_RECHECK_SEC
+        while time.monotonic() < deadline:
+            try:
+                state = await asyncio.wait_for(self.maker_state(order),
+                                               min(REST_TIMEOUT, deadline - time.monotonic()))
+                filled, price = state['filled_base'], state.get('avg_px')
+                if (state['terminal'] and math.isfinite(filled) and 0 <= filled <= qty + 1e-12
+                        and (filled == 0 or (price is not None and math.isfinite(price) and price > 0))):
+                    log.info('[%s] IOC RECHECK confirmed coi=%d status=%s filled=%.8g/%.8g',
+                             self.name, coi, state['status'], filled, qty)
+                    return dict(status=state['status'], filled_base=filled, avg_px=price,
+                                err=None, unresolved=False)
+            except Exception as error:
+                log.warning('[%s] IOC RECHECK coi=%d not yet confirmed (%s)',
+                            self.name, coi, type(error).__name__)
+            await asyncio.sleep(min(.25, max(0, deadline - time.monotonic())))
+        return None
 
     # -------------------------------------------------------------- accounts
 

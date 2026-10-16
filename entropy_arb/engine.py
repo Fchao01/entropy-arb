@@ -36,6 +36,7 @@ from .venue_lighter import LighterVenue
 from .venue_arcus import ArcusVenue
 from .telegram import TelegramNotifier, hedge_message, trade_message
 from .execution_stats import ExecutionStats
+from .reduction import reduction_rules
 
 log = logging.getLogger("engine")
 
@@ -571,7 +572,9 @@ class Engine:
         if unresolved:
             self._reconcile_evt.set()
         else:
-            await self._maybe_hedge()
+            # An error-count pause blocks new opportunities, but must not
+            # prevent reduction of exposure from this confirmed execution.
+            await self._maybe_hedge(allow_halted=True)
         if self.bps_strategy:
             self.bps_strategy.after_execution(plan, before_qty, unresolved)
         self._update_evt.set()  # freed venues may have a queued opportunity
@@ -779,9 +782,11 @@ class Engine:
             self.consec_errors += 1
             if self.consec_errors >= cfg.max_consecutive_errors:
                 self.halted = True
+                if self.bps_strategy:
+                    self.bps_strategy.reason = f'连续 {self.consec_errors} 次下单失败，暂停新订单'
                 log.critical("HALTED after %d consecutive execution problems "
-                             "— flatten manually and restart / 连续执行异常，"
-                             "引擎已停止，请手动平仓后重启", self.consec_errors)
+                             "— new orders stopped; check orders and positions before restarting / "
+                             "连续执行异常，暂停新订单；核对订单与持仓后重启", self.consec_errors)
         if sent_ok and (cfg.primary_order_type == "taker" or bfill or sfill):
             self.trades += 1
             self.total_exp_edge += plan.exp_edge_usd * (matched / plan.qty if cfg.primary_order_type == "maker" else 1)
@@ -863,8 +868,8 @@ class Engine:
                 f"startup positions are unbalanced (net {net:+.8g}); no orders sent / "
                 "启动时已有仓位不平衡，已拒绝启动，不会自动平仓；请核对两边账户和旧仓位")
 
-    async def _maybe_hedge(self) -> None:
-        if self.bps_strategy and self.halted:
+    async def _maybe_hedge(self, *, allow_halted=False) -> None:
+        if self.bps_strategy and self.halted and not allow_halted:
             return
         if self._position_uncertain:
             return
@@ -877,16 +882,60 @@ class Engine:
                 break
             confirmed = await self._hedge(net)
             remaining = sum(v.position for v in self.venues.values())
-            # Only retry a confirmed partial reduction. Unknown outcomes must
+            # Only retry confirmed reductions. Unknown outcomes must
             # never be sent twice, nor can an untradeable dust tail be enlarged.
-            if not confirmed or abs(remaining) >= abs(net) - 1e-12:
+            if not confirmed or (self.halted and not allow_halted):
+                break
+            # A confirmed zero-fill IOC is safe to retry at the current book;
+            # it is not an ambiguous order and must not require manual recovery.
+            if not self.bps_strategy and abs(remaining) >= abs(net) - 1e-12:
                 break
             net = remaining
         remaining = sum(v.position for v in self.venues.values())
         balanced = self.bps_strategy.net_balanced() if self.bps_strategy else abs(remaining) <= tolerance
-        if self.cfg.primary_order_type == "maker" and not balanced:
+        if self.cfg.primary_order_type == "maker" and not balanced and not self.halted:
             self.halted = True
+            if self.bps_strategy:
+                self.bps_strategy.pending = True
+                self.bps_strategy.reason = self.bps_strategy.confirmed_residual_reason()
+                self.bps_strategy.save()
             log.critical("[MAKER] residual base %.8g exceeds tolerance; stopped new quotes", remaining)
+
+    def _reduction_order(self, venue, net):
+        """One shared sizing check for actual repairs and their diagnostics."""
+        if venue.key in self._venue_down or not venue.book.is_fresh(self.cfg.staleness_sec):
+            return 0, None, '行情或连接不可用'
+        if self._vlock(venue.key).locked():
+            return 0, None, '等待该腿订单或持仓查询完成'
+        ref = venue.book.best_bid() if net > 0 else venue.book.best_ask()
+        if ref is None or not math.isfinite(ref) or ref <= 0:
+            return 0, None, '缺少有效减仓报价'
+        slip = self.cfg.hedge_slippage_bps / 1e4
+        limit = venue.px_round(ref * (1 - slip), False) if net > 0 else venue.px_round(ref * (1 + slip), True)
+        if not math.isfinite(limit) or limit <= 0:
+            return 0, None, '减仓保护价无效'
+        step, minimum_base, minimum_quote = reduction_rules(venue, self._step, self.cfg.min_order_notional)
+        qty = floor_step(min(abs(net), abs(venue.position),
+                             self.cfg.max_order_notional / max(ref, limit)), step)
+        blockers = []
+        if qty <= 0:
+            blockers.append(f'余量不足数量步长 {step:.8g}')
+        elif qty < minimum_base:
+            blockers.append(f'可减数量 {qty:.8g} < 减仓最小数量 {minimum_base:.8g}')
+        if qty * limit < minimum_quote:
+            blockers.append(f'减仓金额 ${qty * limit:.4f} < 最小金额 ${minimum_quote:.4f}')
+        return qty, limit, '；'.join(blockers) or None
+
+    def residual_block_reason(self, net):
+        reasons = []
+        for venue in self.venues.values():
+            if venue.position * net <= 0:
+                continue
+            _, _, reason = self._reduction_order(venue, net)
+            if reason is None:
+                return '本轮修正后仍有剩余差额'
+            reasons.append(f'{venue.name}：{reason}')
+        return '；'.join(reasons) or '没有可用于 reduce-only 修正的同向仓位'
 
     async def _hedge(self, net: float) -> bool:
         """Reduce the venue that carries the imbalance back toward net zero
@@ -894,27 +943,16 @@ class Engine:
         cfg = self.cfg
         is_sell = net > 0
         sgn = 1.0 if net > 0 else -1.0
-        slip = cfg.hedge_slippage_bps / 1e4
+        blockers = []
         for v in sorted(self.venues.values(),
                         key=lambda x: (self._venue_limited(x), -x.position * sgn)):
             if v.position * sgn <= 0:
                 continue
-            if v.key in self._venue_down \
-                    or not v.book.is_fresh(cfg.staleness_sec):
-                continue  # unreachable or blind: cannot hedge here
+            qty, limit, blocked = self._reduction_order(v, net)
+            if blocked:
+                blockers.append(f'{v.name}：{blocked}')
+                continue
             lk = self._vlock(v.key)
-            if lk.locked():
-                continue
-            qty = floor_step(min(abs(net), abs(v.position)), self._step)
-            if qty < v.min_base:
-                continue
-            ref = v.book.best_bid() if is_sell else v.book.best_ask()
-            if ref is None:
-                continue
-            limit = v.px_round(ref * (1 - slip), False) if is_sell \
-                else v.px_round(ref * (1 + slip), True)
-            if qty * limit < max(cfg.min_order_notional, v.min_quote):
-                continue
             await lk.acquire()  # verified free, no awaits since: fast path
             try:
                 log.warning("[HEDGE] net %+.6g — %s %.6g on %s @%.6g",
@@ -939,7 +977,9 @@ class Engine:
                     self._reconcile_evt.set()
                     if self.bps_strategy:
                         self.halted = self.bps_strategy.pending = True
-                        self.bps_strategy.reason = '残余仓位对冲失败或未确认，暂停新订单'
+                        self.bps_strategy.reason = (f'{v.name} 修正订单结果未确认，暂停新订单'
+                                                    if info.get('unresolved') else
+                                                    f'{v.name} 修正订单提交失败，暂停新订单')
                         self.bps_strategy.save()
                 else:
                     fill = info["filled_base"]
@@ -968,8 +1008,8 @@ class Engine:
             finally:
                 lk.release()
             return hedge_ok
-        log.warning("[HEDGE] net %+.6g below hedgeable minimum — carrying "
-                    "(next reconcile retries)", net)
+        log.warning('[HEDGE BLOCKED] net=%+.8g %s; %s', net, cfg.symbol,
+                    '；'.join(blockers) or '没有可减的同向仓位')
         return False
 
     def _notify_hedge(self, venue, side, qty, status, fill, ok, net,
@@ -1031,7 +1071,8 @@ class Engine:
                     raise ValueError('non-finite position')
                 if self.bps_strategy and not strict and abs(r - v.position) > self.bps_strategy.tolerance:
                     self._position_uncertain.add(v.key)
-                    self.bps_strategy.reason = '等待两边实时仓位复核'
+                    if not self.halted:
+                        self.bps_strategy.reason = '等待两边实时仓位复核'
                     log.warning('[BPS] %s position discrepancy local=%+.8g REST=%+.8g; verifying before adoption',
                                 v.name, v.position, r)
                     # REST account snapshots can lag account-order fills.
@@ -1057,7 +1098,8 @@ class Engine:
                         f"[{v.name}] cannot fetch starting position: {e!r}")
                 if self.bps_strategy:
                     self._position_uncertain.add(v.key)
-                    self.bps_strategy.reason = '等待两边实时仓位复核'
+                    if not self.halted:
+                        self.bps_strategy.reason = '等待两边实时仓位复核'
                 # exchange unreachable (e.g. scheduled maintenance): pause
                 # trading and keep probing until it answers again
                 n = self._venue_fetch_fails.get(v.key, 0) + 1

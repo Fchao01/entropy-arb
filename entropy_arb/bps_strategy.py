@@ -14,6 +14,7 @@ from pathlib import Path
 from .book import ArbPlan, crossable_base, floor_step, walk_depth
 from .recorder import prepare_recorder_source
 from .bps_pnl import CycleCosts
+from .reduction import reduction_rules
 
 log = logging.getLogger('bps')
 PENDING_RECOVERY_RECHECK_SEC = 5.0
@@ -224,14 +225,22 @@ class BpsStrategy:
         for venue, price, position in zip(eng.venues.values(), prices, positions):
             if position * net <= 0:
                 continue
-            qty = floor_step(min(abs(net), abs(position)), eng._step)
-            if qty > 0 and qty >= venue.min_base and qty * price >= max(venue.min_quote, self.cfg.min_order_notional):
+            step, minimum_base, minimum_quote = reduction_rules(venue, eng._step, self.cfg.min_order_notional)
+            qty = floor_step(min(abs(net), abs(position)), step)
+            if qty > 0 and qty >= minimum_base and qty * price >= minimum_quote:
                 return False
         return True
 
     def net_balanced(self):
         net = sum(v.position for v in self.engine.venues.values())
         return math.isfinite(net) and (abs(net) <= 1e-12 or self.precision_dust())
+
+    def confirmed_residual_reason(self):
+        net = sum(v.position for v in self.engine.venues.values())
+        prices = self._dust_prices()
+        value = f'（名义敞口约 ${abs(net) * max(prices):.4f}）' if prices else ''
+        return (f'成交已确认，剩余净仓位 {net:+.8g} {self.cfg.symbol}{value}未消除；'
+                f'{self.engine.residual_block_reason(net)}；暂停新订单')
 
     def only_dust_positions(self, positions=None):
         positions = positions if positions is not None else [v.position for v in self.engine.venues.values()]
@@ -534,7 +543,7 @@ class BpsStrategy:
         if any(abs(position) > 1e-12 for _, position in verified):
             sign = 1 if self.long else -1
             positions = {v.key: position for v, position in verified}
-            if positions[self.engine.entropy.key] * sign < 0 or positions[self.engine.hedge.key] * sign > 0:
+            if positions[self.engine.entropy.key] * sign < -1e-12 or positions[self.engine.hedge.key] * sign > 1e-12:
                 raise RuntimeError('bps 旧仓方向与配置不同，不能自动恢复；保留 pending')
             self.startup_recovery = dict(original=original, state=state, positions=positions)
             self.pending = True
@@ -672,11 +681,12 @@ class BpsStrategy:
             limit = (excess.px_round(excess.book.best_bid() * (1 - slip), False) if net > 0
                      else excess.px_round(excess.book.best_ask() * (1 + slip), True))
             cap_price = max(excess.book.best_ask(), limit)
-            qty = floor_step(min(abs(net), self.cfg.max_order_notional / cap_price), eng._step)
-            minimum = max(excess.min_base, max(self.cfg.min_order_notional, excess.min_quote) / limit)
-            minimum = round(math.ceil(minimum / eng._step - 1e-9) * eng._step, 12)
+            step, min_base, min_quote = reduction_rules(excess, eng._step, self.cfg.min_order_notional)
+            qty = floor_step(min(abs(net), self.cfg.max_order_notional / cap_price), step)
+            minimum = max(min_base, min_quote / limit)
+            minimum = round(math.ceil(minimum / step - 1e-9) * step, 12)
             if self.tolerance < abs(net) - qty < minimum:
-                qty = floor_step(abs(net) - minimum, eng._step)
+                qty = floor_step(abs(net) - minimum, step)
             if qty < minimum:
                 raise RuntimeError('bps 差额低于最小下单规模或单笔上限不足以拆分；保留 pending')
             confirmed = await eng._hedge(math.copysign(qty, net))
@@ -684,7 +694,7 @@ class BpsStrategy:
             if not confirmed or eng.halted:
                 raise RuntimeError('bps 自动修正成交未确认或失败；保留 pending，禁止重复补单')
             remaining = sum(v.position for v in eng.venues.values())
-            if abs(remaining) >= abs(net) - self.tolerance:
+            if abs(remaining) >= abs(net) - 1e-12:
                 raise RuntimeError('bps 自动修正未减少差额或低于最小下单金额；保留 pending')
             # Let account REST catch up before another reduction or verification.
             try:
@@ -894,6 +904,12 @@ class BpsStrategy:
 
     def plan(self, buy, sell, closing=False, quote=None):
         eng, cfg = self.engine, self.cfg
+        # Closing plans retain the venue minimums; the configured opening
+        # notional floor must not strand an otherwise valid close.
+        configured_minimum = 0 if closing else cfg.min_order_notional
+        _, buy_min_base, buy_min_quote = reduction_rules(buy, eng._step, configured_minimum)
+        _, sell_min_base, sell_min_quote = reduction_rules(sell, eng._step, configured_minimum)
+        minimum_base = max(buy_min_base, sell_min_base) if closing else eng._min_base
         maker = cfg.primary_order_type == 'maker' and not closing and not self.executable
         pbuy = buy is eng.entropy
         asks, bids = buy.book.sorted_asks(), sell.book.sorted_bids()
@@ -937,15 +953,15 @@ class BpsStrategy:
                                                  for v in eng.venues.values()]))
         if closing:
             paired = min(max(0, -buy.position), max(0, sell.position))
-            minimum_tail = max(eng._min_base, buy.min_quote / asks[0][0],
-                               sell.min_quote / (bids[-1][0] * (1 - slip)))
+            minimum_tail = max(minimum_base, buy_min_quote / asks[0][0],
+                               sell_min_quote / (bids[-1][0] * (1 - slip)))
             minimum_tail = round(math.ceil(minimum_tail / eng._step - 1e-9) * eng._step, 12)
             residual = paired - qty
             if eng._step / 2 <= residual < minimum_tail and not bounded_tail(qty):
                 # A per-order cap or limited depth must not strand an
                 # untradeable last slice. Leave at least one valid order.
                 qty = floor_step(max(0, paired - minimum_tail), eng._step)
-        if qty <= 0 or qty < eng._min_base:
+        if qty <= 0 or qty < minimum_base:
             return None
         bp, bn = walk_depth(asks, qty)
         sp, sn = walk_depth(bids, qty)
@@ -956,17 +972,17 @@ class BpsStrategy:
                 bounded = min(bounded, max(0, remaining) / price)
         if bounded < qty:
             qty = floor_step(bounded, eng._step)
-            if qty <= 0 or qty < eng._min_base:
+            if qty <= 0 or qty < minimum_base:
                 return None
             bp, bn = walk_depth(asks, qty)
             sp, sn = walk_depth(bids, qty)
         if closing and eng._step / 2 <= paired - qty < minimum_tail and not bounded_tail(qty):
             qty = floor_step(max(0, paired - minimum_tail), eng._step)
-            if qty <= 0 or qty < eng._min_base:
+            if qty <= 0 or qty < minimum_base:
                 return None
             bp, bn = walk_depth(asks, qty)
             sp, sn = walk_depth(bids, qty)
-        minimum = max(buy.min_quote, sell.min_quote) if closing else eng._min_notional
+        minimum = max(buy_min_quote, sell_min_quote) if closing else eng._min_notional
         if min(bn, sn) < minimum:
             return None
         bf = cfg.primary_fee_bps if maker and pbuy else buy.fee_bps
@@ -997,8 +1013,9 @@ class BpsStrategy:
             return None
         if not self.net_balanced():
             eng.halted = self.pending = True
-            self.reason = '两边已确认仓位不匹配，暂停新订单'
+            self.reason = self.confirmed_residual_reason()
             self.save()
+            log.critical('[BPS PAUSED] %s', self.reason)
             return None
         if any(not eng._venue_rate_ok(v) or v.book.last_update_ts <= v.last_traded_ts
                for v in eng.venues.values()):
@@ -1111,14 +1128,17 @@ class BpsStrategy:
 
     def after_execution(self, plan, before_qty, unresolved):
         eng = self.engine
+        already_halted = eng.halted
         if (unresolved or eng.halted or eng.active_maker is not None
                 or eng._position_uncertain or not self.net_balanced()):
             eng.halted = self.pending = True
             if unresolved or eng.active_maker is not None or eng._position_uncertain:
-                self.reason = '订单或对冲结果未确认，暂停新订单'
-            elif not self.net_balanced():
-                self.reason = '已确认仓位差额超过精度/金额上限或修正失败，暂停新订单'
+                self.reason = ('两边实时仓位尚未核实，暂停新订单' if eng._position_uncertain else
+                               '订单或对冲结果未确认，暂停新订单')
+            elif not already_halted:
+                self.reason = self.confirmed_residual_reason()
             self.save()
+            log.critical('[BPS PAUSED] %s', self.reason)
             return
         if self.flat():
             self.last_cycle_net_usd = self.costs.cash if self.costs.known else None
