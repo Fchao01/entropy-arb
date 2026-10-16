@@ -9,6 +9,7 @@ const number = (value, digits = 2) => value == null || !Number.isFinite(Number(v
 const signed = (value, digits = 2) => value == null ? "—" : `${Number(value) >= 0 ? "+" : ""}${number(value, digits)}`;
 const money = (value, digits = 2) => value == null ? "—" : `$${number(value, digits)}`;
 const timeLabel = (timestamp) => timestamp ? new Date(timestamp * 1000).toLocaleString("zh-CN", {hour12: false}) : "—";
+const windowTime = (timestamp) => timestamp == null || !Number.isFinite(Number(timestamp)) ? "—" : new Date(Number(timestamp) * 1000).toLocaleString("zh-CN", {timeZone: "Asia/Shanghai", hour12: false});
 const duration = (task) => {
   if (!task.started_at) return "—";
   const seconds = Math.max(0, Math.floor((active(task) ? Date.now() / 1000 : task.ended_at || Date.now() / 1000) - task.started_at));
@@ -609,7 +610,6 @@ async function openThreshold(task) {
   element("threshold-dialog").showModal();
   try {
     const result = await api(`/api/tasks/${task.id}/threshold`);
-    const windowTime = (timestamp) => new Date(timestamp * 1000).toLocaleString("zh-CN", {timeZone: "Asia/Shanghai", hour12: false});
     element("threshold-window").textContent = `${windowTime(result.window_start)} → ${windowTime(result.window_end)}（上海时间，左闭右开） · ${result.rows} 条有效分钟数据 · 首尾跨度 ${number(result.span_hours, 1)} 小时 · ${result.primary_order_type === "maker" ? "主腿挂单 / 对冲吃单" : "双腿吃单"} · 配置手续费合计 ${number(result.fees_bps, 2)} bps · 数据：${result.data_path || "—"} · 配置：${result.config_path || "—"}`;
     element("threshold-current").textContent = `当前：中线 ${number(result.current.midline_bps, 1)} / 上带 ${number(result.current.upper_bps, 1)} / 下带 ${number(result.current.lower_bps, 1)} bps`;
     element("threshold-midline").value = result.suggested.midline_bps;
