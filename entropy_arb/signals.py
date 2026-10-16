@@ -39,9 +39,9 @@ def execution_signals(engine):
             gap = None if trigger is None or target is None else (
                 target - trigger if comparison == '<=' else trigger - target)
             rows.append(dict(action=action, primary_buy=primary_buy, buy=buy.name, sell=sell.name,
-                             order_type='maker' if maker and action == 'open' and not strategy.executable else 'taker',
+                             order_type='maker' if maker and action == 'open' else 'taker',
                              executable_premium_bps=executable_premium(
-                                 engine, buy, sell, maker=maker and action == 'open' and not strategy.executable),
+                                 engine, buy, sell, maker=maker and action == 'open'),
                              trigger_premium_bps=trigger, hurdle_bps=target, trigger_basis=basis,
                              comparison=comparison, gap_bps=gap,
                              has_position=bool(strategy.entries),

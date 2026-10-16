@@ -454,8 +454,8 @@ class Engine:
                     or (self.cfg.bps_levels == 'rolling' and (strategy.window_end is None
                         or time.time() - strategy.window_end > 120))):
                 return False
-            premium = self.premium_bps()
-            if premium is None or (premium > entry if strategy.long else premium < entry):
+            premium = strategy.signal()
+            if premium is None or (premium < entry if strategy.executable or not strategy.long else premium > entry):
                 return False
             current = strategy.plan(buy, sell, quote=price)
             return (current is not None and current.qty >= plan.qty - self._step / 2
@@ -693,7 +693,7 @@ class Engine:
         buy_bound = buy.px_round(plan.buy_limit * (1 + slip), round_up=False)
         sell_bound = sell.px_round(plan.sell_limit * (1 - slip), round_up=True)
         send_started = time.perf_counter()
-        if cfg.primary_order_type == "maker" and not closing and not (self.bps_strategy and self.bps_strategy.executable):
+        if cfg.primary_order_type == "maker" and not closing:
             (binfo, buy_send_ms), (sinfo, sell_send_ms) = await execute_primary_maker(self, buy, sell, plan)
         else:
             self._record_send(buy)

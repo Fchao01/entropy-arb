@@ -620,8 +620,6 @@ def load_config(config_file: str = "config.yaml", env_file: str = ".env", *,
     primary_order_type = _get(raw, "execution", "primary_order_type", "taker")
     if primary_order_type not in ("taker", "maker"):
         raise ConfigError("execution.primary_order_type must be taker or maker / 主腿成交方式必须为 taker 或 maker")
-    if strategy_mode == 'bps' and bps['price_basis'] == 'executable':
-        primary_order_type = 'taker'
     if strategy_mode == "spread" and primary_order_type != "taker":
         raise ConfigError("spread strategy requires taker / 实际可成交价差策略使用吃单成交")
     maker_timeout_sec = float(_get(raw, "execution", "maker_timeout_sec", 5.0))

@@ -32,8 +32,11 @@ syncFields();
 assert.equal(get('bps-price-basis').value, 'executable');
 assert.equal(get('bps-entry-percentile').value, 90);
 assert.equal(get('bps-exit-percentile').value, 75);
-assert.equal(get('primary-order-type').value, 'taker');
-assert.equal(get('primary-order-type').disabled, true);
+assert.equal(get('primary-order-type').value, 'maker');
+assert.equal(get('primary-order-type').disabled, false);
+assert.equal(get('maker-cancel-policy').hidden, false);
+assert.equal(get('primary-maker-fee').disabled, false);
+assert.match(get('config-yaml').value, /primary_order_type: maker/);
 vm.runInContext('syncFields()', context);
 assert.equal(get('bps-entry-percentile').value, 90);
 vm.runInContext(`
@@ -54,5 +57,15 @@ assert.match(get('signal-rows').innerHTML, /双腿吃单/);
 assert.match(get('signal-rows').innerHTML, /≥/);
 assert.match(get('signal-note').textContent, /卖方买一/);
 assert.doesNotMatch(get('signal-note').textContent, /中间价溢价/);
+vm.runInContext(`
+renderSignals({bps_strategy: {price_basis: 'executable', entry_bps: 5, exit_bps: -4},
+  venues: [{fresh: true}], execution_signals: {mode: 'bps', rows: [
+  {action: 'open', primary_buy: true, buy: 'ARCUS', sell: 'RH', order_type: 'maker',
+   comparison: '>=', executable_premium_bps: 7, trigger_premium_bps: 6, hurdle_bps: 5, gap_bps: 1}
+]}}, true);
+`, context);
+assert.match(get('signal-summary').textContent, /开仓主腿挂单/);
+assert.match(get('signal-rows').innerHTML, /主腿挂单 \/ 对冲腿吃单/);
+assert.match(get('signal-note').textContent, /确认新增成交后才对冲/);
 ''', str(source)], capture_output=True, text=True, timeout=15)
     assert result.returncode == 0, result.stdout + result.stderr

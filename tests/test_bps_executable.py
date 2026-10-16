@@ -146,13 +146,13 @@ def test_missing_quote_history_never_falls_back_to_midpoint_thresholds(tmp_path)
 
 
 @pytest.mark.parametrize('long,entry,exit,expected', [(True, 10, 75, (90, 75)), (False, 80, 20, (80, 80))])
-def test_legacy_rolling_config_migrates_historical_tails_and_uses_taker(tmp_path, long, entry, exit, expected):
+def test_legacy_rolling_config_migrates_historical_tails_and_preserves_maker(tmp_path, long, entry, exit, expected):
     path = tmp_path / 'config.yaml'
     path.write_text(f'strategy:\n  mode: bps\nbps:\n  levels: rolling\n  direction: {"long_primary" if long else "short_primary"}\n'
                     f'  entry_percentile: {entry}\n  exit_percentile: {exit}\nexecution:\n  primary_order_type: maker\n')
     cfg = load_config(str(path), symbol='ETH', hedge_venue='lighter', credential_env={})
     assert cfg.bps_price_basis == 'executable'
-    assert cfg.primary_order_type == 'taker'
+    assert cfg.primary_order_type == 'maker'
     assert (cfg.bps_entry_percentile, cfg.bps_exit_percentile) == expected
 
 

@@ -917,7 +917,7 @@ class BpsStrategy:
         _, buy_min_base, buy_min_quote = reduction_rules(buy, eng._step, configured_minimum)
         _, sell_min_base, sell_min_quote = reduction_rules(sell, eng._step, configured_minimum)
         minimum_base = max(buy_min_base, sell_min_base) if closing else eng._min_base
-        maker = cfg.primary_order_type == 'maker' and not closing and not self.executable
+        maker = cfg.primary_order_type == 'maker' and not closing
         pbuy = buy is eng.entropy
         asks, bids = buy.book.sorted_asks(), sell.book.sorted_bids()
         if not asks or not bids:

@@ -321,7 +321,8 @@ function renderSignals(metrics, fresh) {
   const levels = metrics.bps_strategy;
   const thresholds = metrics.thresholds;
   const executableBps = bps && levels?.price_basis === "executable";
-  const summary = executableBps ? `可成交价差 bps · 开仓 ≥ ${signed(levels.entry_bps)} / 平仓 ≥ ${signed(levels.exit_bps)} · 双腿吃单${levels.entries ? " · 本轮点位已锁定" : ""}` : spread ? `实际可成交价差 > ${number(metrics.spread_bps, 3)} bps · 双向、不限批次 · 不依赖历史数据` : bps ? `溢价 bps 策略 · 中间价溢价 ${signed(metrics.premium_bps)} bps · 开仓 ${signed(levels?.entry_bps)} / 参考回归 ${signed(levels?.exit_bps)} bps${levels?.exit_mode === "profit" ? ` · 净收益止盈 ${number(levels.take_profit_bps, 2)} bps · 保守退出 ${money(levels.exit_quote?.net_usd, 4)}` : ""}${levels?.entries ? " · 本轮点位已锁定" : ""}` : `套利阈值策略 · 中间价溢价 ${signed(metrics.premium_bps)} bps · 中线 ${signed(thresholds?.midline_bps)} · 区间 [${signed(thresholds ? thresholds.midline_bps - thresholds.lower_bps : null)} … ${signed(thresholds ? thresholds.midline_bps + thresholds.upper_bps : null)}]`;
+  const openingMode = signal.rows.some((row) => row.action === "open" && row.order_type === "maker") ? "开仓主腿挂单 / 对冲吃单；平仓双腿吃单" : "双腿吃单";
+  const summary = executableBps ? `可成交价差 bps · 开仓 ≥ ${signed(levels.entry_bps)} / 平仓 ≥ ${signed(levels.exit_bps)} · ${openingMode}${levels.entries ? " · 本轮点位已锁定" : ""}` : spread ? `实际可成交价差 > ${number(metrics.spread_bps, 3)} bps · 双向、不限批次 · 不依赖历史数据` : bps ? `溢价 bps 策略 · 中间价溢价 ${signed(metrics.premium_bps)} bps · 开仓 ${signed(levels?.entry_bps)} / 参考回归 ${signed(levels?.exit_bps)} bps${levels?.exit_mode === "profit" ? ` · 净收益止盈 ${number(levels.take_profit_bps, 2)} bps · 保守退出 ${money(levels.exit_quote?.net_usd, 4)}` : ""}${levels?.entries ? " · 本轮点位已锁定" : ""}` : `套利阈值策略 · 中间价溢价 ${signed(metrics.premium_bps)} bps · 中线 ${signed(thresholds?.midline_bps)} · 区间 [${signed(thresholds ? thresholds.midline_bps - thresholds.lower_bps : null)} … ${signed(thresholds ? thresholds.midline_bps + thresholds.upper_bps : null)}]`;
   element("signal-summary").textContent = `${fresh ? "当前快照" : "最后快照 · 非实时"} · ${summary}`;
   element("signal-rows").innerHTML = signal.rows.map((row) => {
     const prefix = row.action === "open" ? "开仓 · " : row.action === "close" ? "平仓 · " : "";
@@ -334,7 +335,7 @@ function renderSignals(metrics, fresh) {
   }).join("");
   element("signal-note").textContent = bps ? "触发指标与门槛均为主腿相对对冲腿的中间价溢价；≤ 条件的 gap = 门槛 − 指标，≥ 条件的 gap = 指标 − 门槛。可成交溢价另按卖腿价格 / 买腿价格计算，不参与上述差值。" : "触发指标为可成交溢价；门槛包含当前方向阈值、配置手续费和仓位附加值。gap = 可成交溢价 − 门槛。";
   if (executableBps) {
-    element("signal-note").textContent = "开仓和平仓分别按对应方向的（卖方买一 / 买方卖一 − 1）× 10,000 计算，两个方向均为 ≥ 门槛。历史分位数使用各自方向的分钟收盘买卖报价重算；本批下单量只取达到门槛的盘口深度，下单保护价也受该门槛约束。gap ≥ 0 不保证成交或盈利，手续费另计。";
+    element("signal-note").textContent = "开仓和平仓触发指标分别按对应方向的（卖方买一 / 买方卖一 − 1）× 10,000 计算，两个方向均为 ≥ 门槛。历史分位数使用各自方向的分钟收盘买卖报价重算。开仓按配置选择主腿挂单或吃单：挂单时可成交溢价列使用主腿挂单价，另核验其与对冲盘口的价差及深度，确认新增成交后才对冲；信号失效立即请求撤单。平仓与余仓修正使用吃单。gap ≥ 0 不保证成交或盈利，手续费另计。";
     return;
   }
   if (spread) {
@@ -520,18 +521,20 @@ function refreshStrategyFields() {
     element(id).disabled = !bps || rolling;
   }
   const executableBps = bps && element("bps-price-basis").value === "executable";
-  if (spread || executableBps) {
+  if (spread) {
     element("primary-order-type").value = "taker";
     setYaml("execution", "primary_order_type", "taker");
   }
-  element("primary-order-type").disabled = spread || executableBps;
-  const maker = !spread && !executableBps && element("primary-order-type").value === "maker";
+  element("primary-order-type").disabled = spread;
+  const maker = !spread && element("primary-order-type").value === "maker";
   const keepBest = element("maker-cancel-policy").value === "best_price";
   for (const [id, visible] of [["maker-cancel-policy", maker], ["maker-reprice-delay", maker && keepBest], ["maker-timeout", maker && !keepBest], ["primary-maker-fee", maker]]) {
     element(id).closest("label").hidden = !visible;
     element(id).disabled = !visible;
   }
-  element("execution-note").textContent = (spread || executableBps)
+  element("execution-note").textContent = maker
+    ? "主腿按配置 Post-only 挂单；BPS / 阈值条件失效立即请求撤单，条件有效且在买一/卖一时按保留规则排队。仅对确认新增成交量吃单对冲。BPS 平仓与余仓修正仍为吃单，手续费分别按配置计。"
+    : (spread || executableBps)
     ? "1 bps = 0.01%。手续费按实际账户配置并另计，不参与价格差门槛判断；单笔下单量、每腿持仓上限与滑点保护继续生效。"
     : "1 bps = 0.01%。费率以你的实际账户为准；原套利阈值策略的两个方向门槛另加双腿手续费。最优价保留模式先检查 BPS / 阈值条件：失效立即撤单；有效且在买一/卖一持续排队，离开最优价确认后撤单。部分成交按实际新增数量吃单对冲；确认旧单撤销后才重评新单。";
 }
