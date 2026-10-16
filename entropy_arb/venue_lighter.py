@@ -341,14 +341,40 @@ class LighterVenue:
 
     async def maker_state(self, order):
         feed = self.orders_feed
-        row = feed.latest.get(order.client_id) if feed and feed.ready.is_set() else None
-        # Reconcile periodically even when the stream is connected.
-        if row is None or time.monotonic() - getattr(order, "last_query", 0) > 1:
-            row = await self._maker_lookup(order)
-            order.last_query = time.monotonic()
-            if feed:
-                feed._handle_orders({"orders": {str(self.market_id): [row]}})
-                row = feed.latest[order.client_id]
+        # A confirmed WS fill remains useful during a stream reconnect, and a
+        # terminal WS update must never be discarded because REST is limited.
+        row = feed.latest.get(order.client_id) if feed else None
+        row = row or order.last_state
+        if order.query_lock is None:
+            order.query_lock = asyncio.Lock()
+        async with order.query_lock:
+            row = (feed.latest.get(order.client_id) if feed else None) or row
+            if (not row or not terminal_status(str(row.get('status', '')))) and time.monotonic() >= order.next_query:
+                # Set the deadline before awaiting: cancel_maker and the main
+                # fill loop can request the same order concurrently.
+                order.last_query = time.monotonic()
+                order.next_query = order.last_query + 1
+                try:
+                    found = await self._maker_lookup(order)
+                    order.query_failures = 0
+                    if feed:
+                        feed._handle_orders({"orders": {str(self.market_id): [found]}})
+                        row = feed.latest[order.client_id]
+                    else:
+                        row = found
+                except Exception:
+                    order.query_failures += 1
+                    order.next_query = time.monotonic() + min(8, 2 ** min(order.query_failures, 3))
+                    # Use a known cumulative fill even if periodic REST fails.
+                    row = (feed.latest.get(order.client_id) if feed else None) or row
+                    if row is None:
+                        raise
+            if row is None:
+                # No new confirmation during REST backoff. This is explicitly
+                # nonterminal, never evidence that a cancel succeeded.
+                return dict(status='pending-confirmation', filled_base=0.0,
+                            avg_px=None, err=None, terminal=False)
+            order.last_state = row
         order.order_id = row.get("order_index")
         filled = float(row["filled_base_amount"])
         quote = float(row["filled_quote_amount"])

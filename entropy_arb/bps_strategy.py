@@ -215,10 +215,10 @@ class BpsStrategy:
     def exit_decision(self, now, quote=None):
         if not self.entries:
             return None
-        if self.closing:
-            return self.close_reason or '继续减仓'
         if not self.profit_mode:
             return 'bps 平仓点位' if self.exit_reached(self.engine.premium_bps()) else None
+        if self.closing:
+            return self.close_reason or '继续减仓'
         if (self.cfg.bps_max_hold_sec > 0 and self.costs.started_at
                 and now - self.costs.started_at >= self.cfg.bps_max_hold_sec):
             return '最长持仓到期'
@@ -602,10 +602,18 @@ class BpsStrategy:
         eng, cfg = self.engine, self.cfg
         if eng.halted or self.pending:
             return None
+        if eng._position_uncertain:
+            self.reason = '等待两边实时仓位复核'
+            return None
         if any(not v.book.is_fresh(cfg.staleness_sec) or not v.ready_to_trade()
                or eng._vlock(v.key).locked() or eng._venue_limited(v)
                for v in eng.venues.values()) or eng._venue_down:
             self.reason = '等待可交易的双腿行情'
+            return None
+        if abs(sum(v.position for v in eng.venues.values())) > self.tolerance:
+            eng.halted = self.pending = True
+            self.reason = '两边已确认仓位不匹配，暂停新订单'
+            self.save()
             return None
         if any(not eng._venue_rate_ok(v) or v.book.last_update_ts <= v.last_traded_ts
                for v in eng.venues.values()):
@@ -616,7 +624,7 @@ class BpsStrategy:
         exit_reason = self.exit_decision(now)
         if exit_reason:
             if not self.closing:
-                self.closing = True  # latch across partial fills and restarts
+                self.closing = True
                 self.close_reason = exit_reason
                 try:
                     self.save()
@@ -635,6 +643,19 @@ class BpsStrategy:
                 eng.halted = True
                 log.critical('[BPS] %s', self.reason)
             return (buy, sell, plan) if plan else None
+        if self.closing and not self.profit_mode:
+            # Ordinary level exits are reconsidered for every slice, including
+            # restored cycles. Keep the frozen levels and remaining cost basis;
+            # an entry signal may add again within the existing position caps.
+            self.closing = False
+            self.close_reason = None
+            try:
+                self.save()
+            except OSError:
+                eng.halted = True
+                self.reason = '交易状态无法保存，暂停交易'
+                log.exception('[BPS] checkpoint failed')
+                return None
         if self.profit_mode and self.entries and not self.costs.known:
             self.reason = '旧仓成本未知，等待原 bps 平仓点位；不继续加仓'
             return None
@@ -711,6 +732,7 @@ class BpsStrategy:
             for key in eng._armed:
                 eng._armed[key] = None
         elif plan.action == 'bps_open' and abs(eng.entropy.position) > before_qty + eng._step / 2:
+            self.close_reason = None
             self.entries += 1
             self.last_entry_at = time.time()
             self.last_add_premium = eng.premium_bps()

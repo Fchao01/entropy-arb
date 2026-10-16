@@ -107,6 +107,7 @@ class Engine:
         self._venue_down: Dict[str, float] = {}
         self._venue_probe_at: Dict[str, float] = {}
         self._venue_fetch_fails: Dict[str, int] = {}
+        self._position_uncertain: set = set()
         # per-execution records for the dashboard (newest last)
         self.recent_trades: deque = deque(maxlen=50)
         self.telegram = TelegramNotifier()
@@ -851,18 +852,28 @@ class Engine:
     async def _maybe_hedge(self) -> None:
         if self.bps_strategy and self.halted:
             return
+        if self._position_uncertain:
+            return
         if self.active_maker is not None:
             return  # unknown live order/hedge: position reads alone cannot resolve it
         net = sum(v.position for v in self.venues.values())
         tolerance = self.bps_strategy.tolerance if self.bps_strategy else self.cfg.net_tolerance_base
-        if abs(net) > tolerance:
-            await self._hedge(net)
+        for _ in range(3 if self.bps_strategy else 1):
+            if abs(net) <= tolerance:
+                break
+            confirmed = await self._hedge(net)
             remaining = sum(v.position for v in self.venues.values())
-            if self.cfg.primary_order_type == "maker" and abs(remaining) > self.cfg.net_tolerance_base:
-                self.halted = True
-                log.critical("[MAKER] residual base %.8g exceeds tolerance; stopped new quotes", remaining)
+            # Only retry a confirmed partial reduction. Unknown outcomes must
+            # never be sent twice, nor can an untradeable dust tail be enlarged.
+            if not confirmed or abs(remaining) >= abs(net) - 1e-12:
+                break
+            net = remaining
+        remaining = sum(v.position for v in self.venues.values())
+        if self.cfg.primary_order_type == "maker" and abs(remaining) > tolerance:
+            self.halted = True
+            log.critical("[MAKER] residual base %.8g exceeds tolerance; stopped new quotes", remaining)
 
-    async def _hedge(self, net: float) -> None:
+    async def _hedge(self, net: float) -> bool:
         """Reduce the venue that carries the imbalance back toward net zero
         (reduce-only taker with hedge_slippage_bps price protection)."""
         cfg = self.cfg
@@ -895,8 +906,13 @@ class Engine:
                             net, "SELL" if is_sell else "BUY", qty, v.name, limit)
                 self.hedges += 1
                 self._record_send(v)  # counts toward the budget, never blocked
-                info = await v.send_taker(is_buy=not is_sell, qty=qty,
-                                          limit_px=limit, reduce_only=True)
+                info, _ = await self._timed_send(v, is_buy=not is_sell, qty=qty,
+                                                limit_px=limit, reduce_only=True)
+                fill = info.get('filled_base')
+                if (not isinstance(fill, (int, float)) or not math.isfinite(fill)
+                        or not 0 <= fill <= qty + self._step / 2):
+                    info = dict(status='invalid-hedge-fill', filled_base=0, avg_px=None,
+                                err='invalid residual hedge quantity', unresolved=True)
                 hedge_ok = not info.get("err") and not info.get("unresolved")
                 if info.get("err") or info.get("unresolved"):
                     if info.get("unresolved"):
@@ -906,6 +922,10 @@ class Engine:
                     if str(info.get("err", "")).startswith("RATE_LIMITED"):
                         self._mark_limited(v)
                     self._reconcile_evt.set()
+                    if self.bps_strategy:
+                        self.halted = self.bps_strategy.pending = True
+                        self.bps_strategy.reason = '残余仓位对冲失败或未确认，暂停新订单'
+                        self.bps_strategy.save()
                 else:
                     fill = info["filled_base"]
                     self.execution_stats.record(v.key, not is_sell, fill, info.get("avg_px"),
@@ -932,9 +952,10 @@ class Engine:
                 v.last_traded_ts = time.time()
             finally:
                 lk.release()
-            return
+            return hedge_ok
         log.warning("[HEDGE] net %+.6g below hedgeable minimum — carrying "
                     "(next reconcile retries)", net)
+        return False
 
     def _notify_hedge(self, venue, side, qty, status, fill, ok, net,
                       trade_volume) -> None:
@@ -991,12 +1012,37 @@ class Engine:
                 return  # traded while waiting for the lock
             try:
                 r = await v.fetch_position()
+                if not math.isfinite(r):
+                    raise ValueError('non-finite position')
+                if self.bps_strategy and not strict and abs(r - v.position) > self.bps_strategy.tolerance:
+                    self._position_uncertain.add(v.key)
+                    self.bps_strategy.reason = '等待两边实时仓位复核'
+                    log.warning('[BPS] %s position discrepancy local=%+.8g REST=%+.8g; verifying before adoption',
+                                v.name, v.position, r)
+                    # REST account snapshots can lag account-order fills.
+                    # Keep the venue lock and local fill ledger while verifying.
+                    await asyncio.sleep(0.5)
+                    verified = await v.fetch_position()
+                    if not math.isfinite(verified):
+                        raise ValueError('non-finite verification position')
+                    if abs(verified - v.position) <= self.bps_strategy.tolerance:
+                        log.info('[BPS] %s delayed position snapshot resolved; confirmed fill ledger retained', v.name)
+                        r = v.position
+                    elif abs(verified - r) > self.bps_strategy.tolerance:
+                        log.warning('[BPS] %s position snapshots still changing; new orders blocked until rechecked', v.name)
+                        self._reconcile_evt.set()
+                        return
+                    else:
+                        r = verified
             except asyncio.CancelledError:
                 raise
             except Exception as e:
                 if strict:
                     raise RuntimeError(
                         f"[{v.name}] cannot fetch starting position: {e!r}")
+                if self.bps_strategy:
+                    self._position_uncertain.add(v.key)
+                    self.bps_strategy.reason = '等待两边实时仓位复核'
                 # exchange unreachable (e.g. scheduled maintenance): pause
                 # trading and keep probing until it answers again
                 n = self._venue_fetch_fails.get(v.key, 0) + 1
@@ -1013,10 +1059,11 @@ class Engine:
                                 v.name, n, e)
                 return
             if v.key in self._venue_down:
-                log.warning("[%s] API recovered after %.0fs outage — "
-                            "trading RESUMED", v.name,
-                            now - self._venue_down.pop(v.key))
+                log.warning("[%s] API recovered after %.0fs outage; %s", v.name,
+                            now - self._venue_down.pop(v.key),
+                            'engine remains HALTED' if self.halted else 'other trading checks still apply')
                 self._update_evt.set()
+            self._position_uncertain.discard(v.key)
             self._venue_fetch_fails[v.key] = 0
             delta = r - v.position
             if abs(delta) > 1e-12:

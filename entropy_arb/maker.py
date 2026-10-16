@@ -23,6 +23,10 @@ class MakerOrder:
     err: Optional[str] = None
     last_query: float = 0.0
     cancel_requested_at: Optional[float] = None
+    next_query: float = 0.0
+    query_failures: int = 0
+    query_lock: object = None
+    last_state: object = None
 
 
 def empty_result(status="not-sent", err=None, unresolved=False):
@@ -238,7 +242,11 @@ async def execute_primary_maker(engine, buy, sell, plan):
             await asyncio.gather(timeout_task, return_exceptions=True)
         if terminal and not hinfo.get("unresolved"):
             engine.active_maker = None
-        if pinfo.get("unresolved") or hinfo.get("unresolved") or hedge_failed:
+        repairable = (engine.bps_strategy is not None and terminal
+                      and not pinfo.get('unresolved') and not hinfo.get('unresolved'))
+        if hedge_failed and repairable:
+            log.warning('[MAKER] confirmed primary/hedge quantities differ; reduce-only residual repair before new orders')
+        if pinfo.get("unresolved") or hinfo.get("unresolved") or (hedge_failed and not repairable):
             engine.halted = True
             if pinfo.get("unresolved") or hinfo.get("unresolved"):
                 if engine.active_maker is None:

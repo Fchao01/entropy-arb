@@ -150,7 +150,7 @@ def test_old_yaml_batch_limit_does_not_block_repeated_entries(tmp_path, legacy_l
     asyncio.run(scenario())
 
 
-def test_partial_close_latches_and_maker_open_is_hedged_only_after_fill(tmp_path):
+def test_partial_close_rechecks_level_and_allows_capped_add_after_retreat(tmp_path):
     async def scenario():
         eng = engine_at(tmp_path, maker=True)
         eng.ensure_async_state()
@@ -169,10 +169,19 @@ def test_partial_close_latches_and_maker_open_is_hedged_only_after_fill(tmp_path
             venue.send_taker = AsyncMock(side_effect=partial)
         await execute(eng, eng._scan(time.time()))
         assert eng.bps_strategy.closing
-        books(eng, -10)  # still close the residual, do not reopen on price retreat
+        books(eng, -8)  # neither exit nor entry; keep the remaining paired position
+        positions = [v.position for v in eng.venues.values()]
+        assert eng._scan(time.time()) is None
+        assert not eng.bps_strategy.closing
+        assert [v.position for v in eng.venues.values()] == positions
+        books(eng, -10)
         candidate = eng._scan(time.time())
-        assert candidate and candidate[2].action == 'bps_close'
+        assert candidate and candidate[2].action == 'bps_open'
         assert eng.entropy.send_taker.call_args.kwargs['reduce_only'] is True
+        eng.cfg.bps_max_position_usd = abs(eng.entropy.position) * eng.entropy.book.mid()
+        assert eng._scan(time.time()) is None
+        books(eng, -5.5)
+        assert eng._scan(time.time())[2].action == 'bps_close'
     asyncio.run(scenario())
 
 
@@ -356,7 +365,7 @@ def test_config_rejects_invalid_bps(tmp_path, extra):
         load_config(str(path), symbol='ETH', hedge_venue='arcus', credential_env={})
 
 
-def test_levels_are_frozen_from_the_validated_plan_and_close_survives_restart(tmp_path):
+def test_levels_are_frozen_but_restored_close_must_recheck_current_signal(tmp_path):
     async def scenario():
         eng = engine_at(tmp_path)
         eng.ensure_async_state()
@@ -372,7 +381,8 @@ def test_levels_are_frozen_from_the_validated_plan_and_close_survives_restart(tm
         assert restored.closing
         eng.bps_strategy = restored
         books(eng, -10)
-        assert eng._scan(time.time())[2].action == 'bps_close'
+        assert eng._scan(time.time())[2].action == 'bps_open'
+        assert not restored.closing
     asyncio.run(scenario())
 
 
