@@ -109,6 +109,7 @@ class Engine:
         self._venue_probe_at: Dict[str, float] = {}
         self._venue_fetch_fails: Dict[str, int] = {}
         self._position_uncertain: set = set()
+        self._residual_repair_lock = None
         # per-execution records for the dashboard (newest last)
         self.recent_trades: deque = deque(maxlen=50)
         self.telegram = TelegramNotifier()
@@ -130,6 +131,8 @@ class Engine:
             self._feed_stop = asyncio.Event()
             if self._stop_requested:
                 self.stop.set()
+        if self._residual_repair_lock is None:
+            self._residual_repair_lock = asyncio.Lock()
 
     # ------------------------------------------------------------- utilities
 
@@ -148,12 +151,16 @@ class Engine:
         return len(dq) < v.orders_per_min
 
     def _venue_limited(self, v) -> bool:
-        return time.time() < self._venue_limited_until.get(v.key, 0.0)
+        return time.time() < max(self._venue_limited_until.get(v.key, 0.0), getattr(v, 'rate_limit_until', 0.0))
 
     def _mark_limited(self, v) -> None:
-        self._venue_limited_until[v.key] = time.time() + self.cfg.rate_limit_pause_sec
+        now = time.time()
+        self._venue_limited_until[v.key] = max(now + self.cfg.rate_limit_pause_sec,
+                                              getattr(v, 'rate_limit_until', 0.0),
+                                              self._venue_limited_until.get(v.key, 0.0))
         log.warning("[%s] rate limited — trading paused for %.0fs",
-                    v.name, self.cfg.rate_limit_pause_sec)
+                    v.name, self._venue_limited_until[v.key] - now)
+        self._schedule_poke(self._venue_limited_until[v.key] - now)
 
     def _record_send(self, v) -> None:
         self._sends.setdefault(v.key, deque()).append(time.time())
@@ -869,6 +876,15 @@ class Engine:
                 "启动时已有仓位不平衡，已拒绝启动，不会自动平仓；请核对两边账户和旧仓位")
 
     async def _maybe_hedge(self, *, allow_halted=False) -> None:
+        self.ensure_async_state()
+        # A cooldown can span several periodic reconciliations. Exactly one
+        # owner may finish the repair; another caller must not use a stale net.
+        if self._residual_repair_lock.locked():
+            return
+        async with self._residual_repair_lock:
+            await self._repair_residual(allow_halted=allow_halted)
+
+    async def _repair_residual(self, *, allow_halted=False) -> None:
         if self.bps_strategy and self.halted and not allow_halted:
             return
         if self._position_uncertain:
@@ -877,14 +893,33 @@ class Engine:
             return  # unknown live order/hedge: position reads alone cannot resolve it
         net = sum(v.position for v in self.venues.values())
         tolerance = self.bps_strategy.tolerance if self.bps_strategy else self.cfg.net_tolerance_base
-        for _ in range(3 if self.bps_strategy else 1):
+        attempts = 0
+        while attempts < (3 if self.bps_strategy else 1):
             if (self.bps_strategy.net_balanced() if self.bps_strategy else abs(net) <= tolerance):
                 break
+            candidates = [v for v in self.venues.values() if v.position * net > 0]
+            if self.bps_strategy and candidates and all(self._venue_limited(v) for v in candidates):
+                until = min(max(self._venue_limited_until.get(v.key, 0), getattr(v, 'rate_limit_until', 0))
+                            for v in candidates)
+                self.bps_strategy.pending = True
+                self.bps_strategy.reason = '限流冷却中，等待自动修正已确认仓位差额；暂不开新订单'
+                self.bps_strategy.save()
+                try:
+                    await asyncio.wait_for(self.stop.wait(), max(.01, until - time.time()))
+                except asyncio.TimeoutError:
+                    continue
+                break
+            attempts += 1
             confirmed = await self._hedge(net)
             remaining = sum(v.position for v in self.venues.values())
             # Only retry confirmed reductions. Unknown outcomes must
             # never be sent twice, nor can an untradeable dust tail be enlarged.
-            if not confirmed or (self.halted and not allow_halted):
+            if not confirmed:
+                if (self.bps_strategy and not self.halted
+                        and any(v.position * net > 0 and self._venue_limited(v) for v in self.venues.values())):
+                    continue  # Explicit rejection: wait for cooldown before another repair.
+                break
+            if self.halted and not allow_halted:
                 break
             # A confirmed zero-fill IOC is safe to retry at the current book;
             # it is not an ambiguous order and must not require manual recovery.
@@ -905,6 +940,8 @@ class Engine:
         """One shared sizing check for actual repairs and their diagnostics."""
         if venue.key in self._venue_down or not venue.book.is_fresh(self.cfg.staleness_sec):
             return 0, None, '行情或连接不可用'
+        if self._venue_limited(venue):
+            return 0, None, '交易所限流冷却中'
         if self._vlock(venue.key).locked():
             return 0, None, '等待该腿订单或持仓查询完成'
         ref = venue.book.best_bid() if net > 0 else venue.book.best_ask()
@@ -976,10 +1013,14 @@ class Engine:
                         self._mark_limited(v)
                     self._reconcile_evt.set()
                     if self.bps_strategy:
-                        self.halted = self.bps_strategy.pending = True
-                        self.bps_strategy.reason = (f'{v.name} 修正订单结果未确认，暂停新订单'
-                                                    if info.get('unresolved') else
-                                                    f'{v.name} 修正订单提交失败，暂停新订单')
+                        self.bps_strategy.pending = True
+                        if not info.get('unresolved') and str(info.get('err', '')).startswith('RATE_LIMITED'):
+                            self.bps_strategy.reason = f'{v.name} 修正订单被限流拒绝，等待冷却后自动修正'
+                        else:
+                            self.halted = True
+                            self.bps_strategy.reason = (f'{v.name} 修正订单结果未确认，暂停新订单'
+                                                        if info.get('unresolved') else
+                                                        f'{v.name} 修正订单提交失败，暂停新订单')
                         self.bps_strategy.save()
                 else:
                     fill = info["filled_base"]

@@ -17,7 +17,8 @@ def venue_fixture(monkeypatch):
     venue.signer = SimpleNamespace(create_order=AsyncMock(return_value=(None, SimpleNamespace(code=200), None)))
     venue.orders_feed = AccountOrdersFeed('RH', '', 0, 1, None)
     monkeypatch.setitem(sys.modules, 'lighter', SimpleNamespace(SignerClient=SimpleNamespace(
-        ORDER_TYPE_MARKET=1, ORDER_TIME_IN_FORCE_IMMEDIATE_OR_CANCEL=0, DEFAULT_IOC_EXPIRY=0)))
+        ORDER_TYPE_MARKET=1, ORDER_TIME_IN_FORCE_IMMEDIATE_OR_CANCEL=0, DEFAULT_IOC_EXPIRY=0,
+        ORDER_TYPE_LIMIT=0, ORDER_TIME_IN_FORCE_POST_ONLY=2, DEFAULT_28_DAY_ORDER_EXPIRY=999999)))
     monkeypatch.setattr('entropy_arb.venue_lighter.TAKER_RECHECK_SEC', .03)
     return venue
 

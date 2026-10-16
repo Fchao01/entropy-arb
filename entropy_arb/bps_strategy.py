@@ -860,7 +860,7 @@ class BpsStrategy:
                         log.info('[BPS] 旧仓点位已锁定 entry=%+.3f exit=%+.3f', entry, exit)
                     previous = minute
                     last_error = None
-                    if not self.engine.halted and not self.closing:
+                    if not self.engine.halted and not self.closing and not self.pending:
                         self.reason = '持仓中' if self.entries else '等待开仓点位'
                     log.info('[BPS LEVELS] csv=%s window=%d valid=%d/%d coverage=%.1f%% '
                              'required=%d missing=%d low_samples=%d invalid_premium=%d source_filtered=%d '
@@ -879,7 +879,7 @@ class BpsStrategy:
                     if reason != last_error:
                         log.info('[BPS LEVELS] %s', reason)
                     last_error = reason
-                    if not self.engine.halted and not self.closing:
+                    if not self.engine.halted and not self.closing and not self.pending:
                         self.reason = reason
                 self.engine._update_evt.set()
             try:
@@ -1012,6 +1012,12 @@ class BpsStrategy:
             return None
         if eng._position_uncertain:
             self.reason = '等待两边实时仓位复核'
+            return None
+        limited = [v for v in eng.venues.values() if eng._venue_limited(v)]
+        if limited:
+            self.reason = f'{" / ".join(v.name for v in limited)} 限流冷却中，冷却后自动重评 BPS 点位'
+            until = min(max(eng._venue_limited_until.get(v.key, 0), getattr(v, 'rate_limit_until', 0)) for v in limited)
+            eng._schedule_poke(max(.01, until - time.time()))
             return None
         if any(not v.book.is_fresh(cfg.staleness_sec) or not v.ready_to_trade()
                or eng._vlock(v.key).locked() or eng._venue_limited(v)

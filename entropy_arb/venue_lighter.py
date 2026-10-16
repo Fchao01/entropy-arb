@@ -38,6 +38,7 @@ log = logging.getLogger("lighter")
 AUTH_REFRESH_SEC = 8 * 60
 REST_TIMEOUT = 10.0
 TAKER_RECHECK_SEC = 10.0
+RATE_LIMIT_COOLDOWN_SEC = 60.0
 
 
 def terminal_status(status: str) -> bool:
@@ -191,6 +192,8 @@ class LighterVenue:
         self.signer = None
         self.orders_feed: Optional[AccountOrdersFeed] = None
         self._coi = int(time.time() * 1000)
+        self.rate_limit_until = 0.0
+        self._nonce_refresh_required = False
 
     # ------------------------------------------------------------------ REST
 
@@ -313,6 +316,14 @@ class LighterVenue:
     async def place_maker(self, *, is_buy: bool, qty: float, limit_px: float):
         from lighter import SignerClient
         order = MakerOrder(self._next_coi(), limit_px, time.time())
+        if time.time() < self.rate_limit_until:
+            order.rejected, order.err = True, self._rate_limit_result()['err']
+            return order
+        if self._nonce_refresh_required:
+            if not await self._refresh_nonce():
+                order.rejected, order.err = True, 'nonce resynchronization failed; no maker order sent'
+                return order
+            self._nonce_refresh_required = False
         try:
             _tx, resp, err = await asyncio.wait_for(self.signer.create_order(
                 market_index=self.market_id, client_order_index=order.client_id,
@@ -323,9 +334,13 @@ class LighterVenue:
                 reduce_only=False, order_expiry=SignerClient.DEFAULT_28_DAY_ORDER_EXPIRY),
                 timeout=self.settle_timeout)
             if err is not None or (getattr(resp, "code", 200) or 200) != 200:
-                order.rejected, order.err = True, "Lighter maker transaction rejected"
-        except Exception:
-            pass  # ambiguous submission: resolve by client index, never resend
+                order.rejected = True
+                order.err = (self._rate_limit_rejected()['err'] if self._is_rate_limit_rejection(resp, err)
+                             else 'Lighter maker transaction rejected')
+        except Exception as error:
+            if getattr(error, 'status', None) == 429:
+                order.rejected, order.err = True, self._rate_limit_rejected(getattr(error, 'headers', None))['err']
+            # Other exceptions are ambiguous: resolve by client index, never resend.
         return order
 
     async def _maker_lookup(self, order):
@@ -408,6 +423,13 @@ class LighterVenue:
                          reduce_only: bool = False, _retry_nonce: bool = True) -> dict:
         """Market order with avg-price protection; settle via account ws."""
         assert self.signer is not None
+        if time.time() < self.rate_limit_until:
+            return self._rate_limit_result()
+        if self._nonce_refresh_required:
+            if not await self._refresh_nonce():
+                return dict(status='send-failed', filled_base=0.0, avg_px=None,
+                            err='nonce resynchronization failed after rate-limit rejection; no order sent', unresolved=False)
+            self._nonce_refresh_required = False
         from lighter import SignerClient
         coi = self._next_coi()
         fut = self.orders_feed.watch(coi) if self.orders_feed else None
@@ -428,6 +450,10 @@ class LighterVenue:
         except Exception as e:
             if fut is not None:
                 self.orders_feed.unwatch(coi)
+            if getattr(e, 'status', None) == 429:
+                # The HTTP request was explicitly rejected, not accepted with
+                # an unknown fill. Do not poll for an order that never existed.
+                return self._rate_limit_rejected(getattr(e, 'headers', None))
             confirmed = await self._confirm_taker(coi, qty)
             if confirmed is not None:
                 return confirmed
@@ -441,20 +467,15 @@ class LighterVenue:
                 self.orders_feed.unwatch(coi)
             msg = str(err) if err is not None else \
                 f"tx rejected code={resp.code} msg={getattr(resp, 'message', None)}"
+            if self._is_rate_limit_rejection(resp, err):
+                return self._rate_limit_rejected()
             # Only an explicit API rejection is safe to re-sign. An accepted
             # transaction or a transport exception goes through same-ID lookup.
             if _retry_nonce and 'invalid nonce' in msg.lower():
-                manager = getattr(self.signer, 'nonce_manager', None)
-                refresh = getattr(manager, 'async_hard_refresh_nonce', None)
-                if refresh is not None:
-                    try:
-                        await asyncio.wait_for(refresh(self.conf.lighter_creds.api_key_index), REST_TIMEOUT)
-                    except Exception as error:
-                        log.warning('[%s] nonce refresh failed (%s)', self.name, type(error).__name__)
-                    else:
-                        log.warning('[%s] API rejected nonce before acceptance; refreshed nonce, retry once', self.name)
-                        return await self.send_taker(is_buy=is_buy, qty=qty, limit_px=limit_px,
-                                                     reduce_only=reduce_only, _retry_nonce=False)
+                if await self._refresh_nonce():
+                    log.warning('[%s] API rejected nonce before acceptance; refreshed nonce, retry once', self.name)
+                    return await self.send_taker(is_buy=is_buy, qty=qty, limit_px=limit_px,
+                                                 reduce_only=reduce_only, _retry_nonce=False)
             if "rate limit" in msg.lower():
                 msg = "RATE_LIMITED: " + msg
             return {"status": "send-failed", "filled_base": 0.0, "avg_px": None,
@@ -478,6 +499,49 @@ class LighterVenue:
                 return confirmed
             return {"status": "timeout", "filled_base": 0.0, "avg_px": None,
                     "err": None, "unresolved": True}
+
+    @staticmethod
+    def _is_rate_limit_rejection(response, error):
+        message = str(error if error is not None else getattr(response, 'message', '')).lower()
+        return (getattr(response, 'code', None) in (429, 23000)
+                or any(text in message for text in ('too many requests', 'ratelimit', 'rate limit')))
+
+    def _rate_limit_result(self):
+        delay = max(0, math.ceil(self.rate_limit_until - time.time()))
+        return dict(status='rate-limited', filled_base=0.0, avg_px=None,
+                    err=f'RATE_LIMITED: request not accepted; cooldown {delay}s', unresolved=False)
+
+    def _rate_limit_rejected(self, headers=None):
+        try:
+            retry_after = float((headers or {}).get('Retry-After', 0))
+            if not math.isfinite(retry_after):
+                retry_after = 0
+        except (TypeError, ValueError):
+            retry_after = 0
+        delay = max(RATE_LIMIT_COOLDOWN_SEC, retry_after)
+        self.rate_limit_until = max(self.rate_limit_until, time.time() + delay)
+        self._nonce_refresh_required = True
+        log.warning('[%s] rate-limit rejection confirmed, zero fill; cooldown %.0fs, then resync nonce; '
+                    'L1-address limits are shared across tasks', self.name, delay)
+        return self._rate_limit_result()
+
+    async def _refresh_nonce(self):
+        manager = getattr(self.signer, 'nonce_manager', None)
+        refresh = getattr(manager, 'async_hard_refresh_nonce', None)
+        synchronous = getattr(manager, 'hard_refresh_nonce', None)
+        try:
+            index = self.conf.lighter_creds.api_key_index
+            if refresh is not None:
+                await asyncio.wait_for(refresh(index), REST_TIMEOUT)
+            elif synchronous is not None:
+                await asyncio.wait_for(asyncio.to_thread(synchronous, index), REST_TIMEOUT)
+            else:
+                log.warning('[%s] SDK nonce refresh unavailable', self.name)
+                return False
+            return True
+        except Exception as error:
+            log.warning('[%s] nonce refresh failed (%s)', self.name, type(error).__name__)
+            return False
 
     async def _confirm_taker(self, coi, qty):
         """Look up the original IOC after a transport/WS delay; never resubmit."""
