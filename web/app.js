@@ -145,7 +145,7 @@ function renderTasks() {
   }
   const options = state.tasks.map((task) => `<option value="${task.id}">${escapeHtml(task.symbol)} · ${escapeHtml(task.name)}</option>`).join("");
   if (element("monitor-select").innerHTML !== options) element("monitor-select").innerHTML = options;
-  if (!state.tasks.some((task) => task.id === state.selected)) state.selected = state.tasks[0]?.id || null;
+  if (!state.tasks.some((task) => task.id === state.selected)) selectMonitorTask(state.tasks[0]?.id || null);
   if (state.selected) element("monitor-select").value = state.selected;
   element("monitor-empty").hidden = state.tasks.length > 0;
   element("monitor-content").hidden = !state.tasks.length;
@@ -154,10 +154,13 @@ function renderTasks() {
 async function refresh() {
   if (!state.authenticated || state.polling) return;
   state.polling = true;
+  let serverConnected = false;
   try {
     const result = await api("/api/tasks");
+    serverConnected = true;
     state.tasks = result.tasks;
     element("connection-label").textContent = "服务器已连接";
+    element("connection-label").title = "";
     element("connection-dot").parentElement.classList.remove("bad-connection");
     document.querySelector(".server-pill").classList.remove("bad-connection");
     document.querySelector(".server-pill").lastChild.textContent = " SERVER CONNECTED";
@@ -165,10 +168,16 @@ async function refresh() {
     if (state.page === "monitor") {await refreshDetail(); await refreshTriple();}
     if (element("task-detail-dialog").open) await refreshTaskDetails();
   } catch (error) {
-    element("connection-label").textContent = "连接中断";
-    element("connection-dot").parentElement.classList.add("bad-connection");
-    document.querySelector(".server-pill").classList.add("bad-connection");
-    document.querySelector(".server-pill").lastChild.textContent = " SERVER DISCONNECTED";
+    element("connection-label").textContent = serverConnected ? "服务器已连接 · 页面刷新失败" : "连接中断";
+    element("connection-label").title = error.message;
+    element("connection-dot").parentElement.classList.toggle("bad-connection", !serverConnected);
+    document.querySelector(".server-pill").classList.toggle("bad-connection", !serverConnected);
+    document.querySelector(".server-pill").lastChild.textContent = serverConnected ? " SERVER CONNECTED" : " SERVER DISCONNECTED";
+    if (state.page === "monitor") {
+      state.detail = null;
+      state.logs = null;
+      clearMonitor(`监控刷新失败：${error.message}`);
+    }
   } finally {state.polling = false;}
 }
 
@@ -243,8 +252,33 @@ element("tri-overview").addEventListener("click", (event) => {
   renderTriple();
 });
 
+function clearMonitor(message = "正在加载所选任务…") {
+  element("monitor-summary").textContent = message;
+  element("monitor-stats").replaceChildren();
+  element("venue-cards").textContent = message;
+  element("signal-summary").textContent = message;
+  element("signal-rows").innerHTML = '<tr><td colspan="6" class="table-empty">暂无当前任务信号</td></tr>';
+  element("signal-note").textContent = "等待当前任务快照，暂不展示余额与信号。";
+  element("premium-chart").textContent = message;
+  element("log-output").textContent = message;
+  element("trades-output").textContent = message;
+  element("trades-pagination").hidden = true;
+  element("trades-pagination").replaceChildren();
+  element("download-minutes").removeAttribute("href");
+  element("download-logs").removeAttribute("href");
+}
+
+function selectMonitorTask(taskId) {
+  if (state.selected === taskId) return;
+  state.selected = taskId;
+  state.tradesPage = 1;
+  state.detail = null;
+  state.logs = null;
+  clearMonitor();
+}
+
 function renderMonitor() {
-  if (!state.detail || state.detail.task.id !== state.selected) return;
+  if (!state.detail || state.detail.task.id !== state.selected) {clearMonitor(); return;}
   const task = state.detail.task;
   const metrics = task.status;
   const fresh = active(task) && !task.status_stale;
@@ -369,15 +403,26 @@ function renderLogs() {
   }
 }
 
+let monitorRequest = 0;
 async function refreshDetail() {
+  const request = ++monitorRequest;
   const selected = state.selected;
   if (!selected || !state.authenticated) return;
   const tradeQuery = `?trades_page=${state.tradesPage}&trades_page_size=${state.tradesPageSize}`;
-  const [detail, logs] = await Promise.all([api(`/api/tasks/${selected}${tradeQuery}`), api(`/api/tasks/${selected}/logs`)]);
-  if (state.selected !== selected) return;
-  state.detail = detail;
-  state.logs = logs;
-  renderMonitor();
+  try {
+    const [detail, logs] = await Promise.all([api(`/api/tasks/${selected}${tradeQuery}`), api(`/api/tasks/${selected}/logs`)]);
+    if (state.selected !== selected || request !== monitorRequest) return;
+    if (detail.task?.id !== selected) throw new Error("返回的任务与所选任务不一致");
+    state.detail = detail;
+    state.logs = logs;
+    renderMonitor();
+  } catch (error) {
+    if (state.selected !== selected || request !== monitorRequest) return;
+    state.detail = null;
+    state.logs = null;
+    clearMonitor(`监控刷新失败：${error.message}`);
+    throw error;
+  }
 }
 
 const fieldMap = {"spread-bps": ["strategy", "spread_bps", 1], "strategy-mode": ["strategy", "mode", "threshold"], "bps-levels": ["bps", "levels", "rolling"], "bps-history-mode": ["bps", "history_mode", "records"], "bps-direction": ["bps", "direction", "long_primary"], "bps-window": ["bps", "window_minutes", 120], "bps-min-valid": ["bps", "min_valid_minutes", 30], "bps-entry-percentile": ["bps", "entry_percentile", 10], "bps-exit-percentile": ["bps", "exit_percentile", 75], "bps-entry": ["bps", "entry_bps", -9], "bps-exit": ["bps", "exit_bps", -6], "bps-exit-mode": ["bps", "exit_mode", "levels"], "bps-take-profit": ["bps", "take_profit_bps", 1], "bps-stop-loss": ["bps", "stop_loss_bps", 10], "bps-max-hold": ["bps", "max_hold_sec", 900], "bps-min-gap": ["bps", "min_gap_bps", 2], "bps-entry-confirm": ["bps", "entry_confirm_sec", 2], "bps-cycle-cooldown": ["bps", "cycle_cooldown_sec", 30], "bps-add-step": ["bps", "add_step_bps", .5], "bps-execution-slip": ["bps", "execution_slippage_bps", 1], "bps-cost-buffer": ["bps", "cost_buffer_bps", 0], "bps-add-interval": ["bps", "add_interval_sec", 60], "bps-position-cap": ["bps", "max_position_usd", 1000], "primary-order-type": ["execution", "primary_order_type", "taker"], "maker-timeout": ["execution", "maker_timeout_sec", 5], "primary-maker-fee": ["primary", "maker_fee_bps", 0], "midline": ["thresholds", "midline_bps", 0], "upper": ["thresholds", "upper_bps", 4], "lower": ["thresholds", "lower_bps", 4], "order-cap": ["sizing", "max_order_notional_usd", 500], "primary-cap": ["primary", "max_position_usd", 1000], "hedge-cap": ["hedge", "max_position_usd", 1000], "primary-fee": ["primary", "taker_fee_bps", 0], "hedge-fee": ["hedge", "taker_fee_bps", 2.25], "primary-symbol": ["primary", "symbol", ""], "hedge-symbol": ["hedge", "symbol", ""]};
@@ -667,7 +712,7 @@ element("task-rows").addEventListener("click", (event) => {
   if (action === "edit") openEditor(task);
   else if (action === "detail") openTaskDetails(task);
   else if (action === "threshold") openThreshold(task);
-  else if (action === "monitor") {state.selected = task.id; state.tradesPage = 1; element("monitor-select").value = task.id; navigate("monitor");}
+  else if (action === "monitor") {selectMonitorTask(task.id); element("monitor-select").value = task.id; navigate("monitor");}
   else if (action === "start") {
     if (task.mode === "live") confirm(`启动 ${task.symbol} 实盘交易`, "程序会使用所选凭据发送真实订单。请核对手续费、阈值、仓位上限和账户整体风险；多进程实盘必须使用独立签名密钥。", () => operate(task, "start", {confirm_live: true}), task.symbol, true);
     else operate(task, "start").catch((error) => toast(error.message, true));
@@ -689,11 +734,7 @@ element("confirm-cancel").addEventListener("click", () => element("confirm-dialo
 element("search").addEventListener("input", renderTasks);
 element("state-filter").addEventListener("change", renderTasks);
 element("monitor-select").addEventListener("change", () => {
-  state.selected = element("monitor-select").value;
-  state.tradesPage = 1;
-  state.detail = null;
-  state.logs = null;
-  element("log-output").textContent = "加载中…";
+  selectMonitorTask(element("monitor-select").value);
   refreshDetail().catch((error) => toast(error.message, true));
 });
 document.querySelectorAll("[data-log-tab]").forEach((button) => button.addEventListener("click", () => {state.logTab = button.dataset.logTab; renderMonitor();}));
@@ -768,7 +809,7 @@ element("task-detail-dialog").addEventListener("close", () => {state.detailTask 
 element("detail-refresh").addEventListener("click", refreshTaskDetails);
 element("detail-follow").addEventListener("change", renderDetailLogs);
 document.querySelectorAll("[data-detail-tab]").forEach((button) => button.addEventListener("click", () => {state.detailTab = button.dataset.detailTab; renderDetailLogs();}));
-element("detail-monitor").addEventListener("click", () => {state.selected = state.detailTask; state.tradesPage = 1; element("task-detail-dialog").close(); navigate("monitor");});
+element("detail-monitor").addEventListener("click", () => {selectMonitorTask(state.detailTask); element("monitor-select").value = state.selected; element("task-detail-dialog").close(); navigate("monitor");});
 
 let libraryRequest = 0;
 function renderCredentials(fields) {

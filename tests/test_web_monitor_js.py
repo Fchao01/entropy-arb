@@ -49,3 +49,90 @@ assert.equal(vm.runInContext('windowTime(NaN)', context), '—');
 assert.match(vm.runInContext('windowTime(0)', context), /1970/);
 ''', str(source)], capture_output=True, text=True, timeout=15)
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_monitor_does_not_retain_another_tasks_balances_after_errors():
+    node = shutil.which('node')
+    if not node:
+        pytest.skip('Node.js is only needed to execute this frontend regression test')
+    source = Path(__file__).resolve().parents[1] / 'web' / 'app.js'
+    result = subprocess.run([node, '-e', r'''
+const fs = require('node:fs');
+const vm = require('node:vm');
+const assert = require('node:assert/strict');
+const source = fs.readFileSync(process.argv[1], 'utf8');
+const utilities = source.slice(0, source.indexOf('async function api('));
+const monitor = source.slice(source.indexOf('function clearMonitor('), source.indexOf('\nfunction renderSignals('));
+const detail = source.slice(source.indexOf('let monitorRequest ='), source.indexOf('\nconst fieldMap ='));
+const refresh = source.slice(source.indexOf('async function refresh()'), source.indexOf('\nfunction renderTriple('));
+const nodes = new Map();
+function node(id) {
+  if (!nodes.has(id)) nodes.set(id, {
+    html: '', get innerHTML() {return this.html;}, set innerHTML(v) {this.html = v;},
+    get textContent() {return this.html;}, set textContent(v) {this.html = v;},
+    replaceChildren() {this.html = '';}, removeAttribute(key) {delete this[key];},
+    classList: {remove() {}, toggle() {}}, lastChild: {}, parentElement: {classList: {remove() {}, toggle() {}}},
+  });
+  return nodes.get(id);
+}
+const context = vm.createContext({
+  location: {pathname: '/monitor'},
+  document: {getElementById: node, querySelector: node},
+  badge: () => '', stat: () => '', renderSignals() {}, drawChart() {}, renderLogs() {},
+  refreshTriple() {}, renderTasks() {}, refreshTaskDetails() {},
+});
+vm.runInContext(utilities + '\n' + monitor + '\n' + detail + '\n' + refresh, context);
+const run = code => vm.runInContext(code, context);
+const snapshot = id => ({minutes: [], task: {id, symbol: 'SPY', primary: 'arcus',
+  hedge: 'lighter-rh', mode: 'live', state: 'running', status_stale: false,
+  status: {venues: [{name: 'ARCUS'}, {name: 'RH'}]}}});
+(async () => {
+  run("state.authenticated = true; state.selected = 'old'");
+  node('venue-cards').innerHTML = 'RH $100 / LIGHTER $200';
+  node('signal-rows').innerHTML = 'buy RH / sell LIGHTER';
+  node('download-minutes').href = '/api/tasks/old/download/minutes';
+  run("selectMonitorTask('new')");
+  assert.doesNotMatch(node('venue-cards').textContent, /LIGHTER|\$200/);
+  assert.doesNotMatch(node('signal-rows').innerHTML, /LIGHTER/);
+  assert.equal(node('download-minutes').href, undefined);
+  context.api = async path => path.endsWith('/logs') ? {} : snapshot('new');
+  await run('refreshDetail()');
+  assert.match(node('venue-cards').innerHTML, /ARCUS/);
+  assert.doesNotMatch(node('venue-cards').innerHTML, /LIGHTER/);
+
+  // A renderer throwing after a successful API call must clear the last balances.
+  const broken = snapshot('new');
+  broken.task.status.bps_strategy = {coverage: {get history_start_ts() {
+    throw new ReferenceError('windowTime is not defined');
+  }}};
+  context.api = async path => path.endsWith('/logs') ? {} : broken;
+  await assert.rejects(run('refreshDetail()'), /windowTime is not defined/);
+  assert.match(node('monitor-summary').textContent, /监控刷新失败/);
+  assert.doesNotMatch(node('venue-cards').textContent, /ARCUS/);
+  assert.equal(run('state.detail'), null);
+
+  // Reject data explicitly belonging to another task.
+  context.api = async path => path.endsWith('/logs') ? {} : snapshot('wrong');
+  await assert.rejects(run('refreshDetail()'), /返回的任务与所选任务不一致/);
+  assert.equal(run('state.detail'), null);
+
+  // A late response/failure for an older request must not overwrite the new page.
+  const pending = [];
+  context.api = path => new Promise((resolve, reject) => pending.push({path, resolve, reject}));
+  const first = run('refreshDetail()');
+  const second = run('refreshDetail()');
+  pending[2].resolve(snapshot('new')); pending[3].resolve({});
+  await second;
+  pending[0].reject(new Error('obsolete request')); pending[1].resolve({});
+  await first;
+  assert.match(node('venue-cards').innerHTML, /ARCUS/);
+
+  // A client rendering failure is not a disconnected server.
+  context.api = async () => ({tasks: []});
+  context.renderTasks = () => {throw new ReferenceError('render failed');};
+  await run('refresh()');
+  assert.equal(node('connection-label').textContent, '服务器已连接 · 页面刷新失败');
+  assert.equal(node('connection-label').title, 'render failed');
+})().catch(error => {console.error(error); process.exitCode = 1;});
+''', str(source)], capture_output=True, text=True, timeout=15)
+    assert result.returncode == 0, result.stdout + result.stderr
