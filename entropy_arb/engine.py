@@ -285,6 +285,7 @@ class Engine:
             log.info("[SPREAD] executable price spread > %.3f bps; both directions; "
                      "no history, batch limit or profit target; fees reported separately", cfg.spread_bps)
 
+        recovering_positions = False
         if self.record_only:
             log.warning("RECORD-ONLY — collecting minute data, no strategy, "
                         "no orders")
@@ -296,15 +297,21 @@ class Engine:
                      " ".join(f"{v.name}={v.position:+.6g}"
                               for v in self.venues.values()),
                      sum(v.position for v in self.venues.values()))
-            self._check_starting_positions()
             if self.bps_strategy:
-                await self.bps_strategy.recover_pending()
+                recovering_positions = await self.bps_strategy.recover_pending()
+            if not recovering_positions:
+                self._check_starting_positions()
+            if self.bps_strategy and not recovering_positions:
                 self.bps_strategy.restore()
 
         for v in self.venues.values():
             # Account/order streams must stay alive while a stop is canceling
             # a resting maker order and hedging its last fills.
             tasks += v.start_tasks(self._feed_stop, self._update_evt.set, live)
+        if recovering_positions:
+            await self.bps_strategy.finish_startup_recovery()
+            self._check_starting_positions()
+            self.bps_strategy.restore()
         if cfg.recorder_enabled or self.record_only:
             self.recorder = MinuteRecorder(cfg.recorder_csv, self.entropy.book,
                                            self.hedge.book, cfg.staleness_sec,

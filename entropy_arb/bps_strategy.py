@@ -136,6 +136,7 @@ class BpsStrategy:
         self.locked_entry = self.locked_exit = None
         self.closing = False
         self.pending = False
+        self.startup_recovery = None
         self.adopted_position = False
         self.awaiting_levels = False
         self.last_entry_at = 0.0
@@ -297,11 +298,12 @@ class BpsStrategy:
                     self.cfg.bps_levels, self.locked_exit)
 
     async def recover_pending(self):
-        """Before streams/execution start, verify an unresolved cycle is flat.
+        """Verify old orders and stable positions before enabling recovery.
 
         Read authoritative orders and then positions twice, allowing account
         REST state to catch up. Never clear uncertainty on a failed/partial
-        response, or reuse costs from manually closed positions.
+        response, or reuse costs from ambiguous/manual fills. Nonflat positions
+        defer reduce-only repair until account and market feeds are ready.
         """
         if not self.path.exists():
             return
@@ -333,11 +335,12 @@ class BpsStrategy:
                 raise RuntimeError(f'bps 自动核验未通过 [{venue.name}]：'
                                    '存在未成交订单或未能确认订单为空；保留 pending')
             if (not isinstance(position, (int, float)) or isinstance(position, bool)
-                    or not math.isfinite(position) or abs(position) > 1e-12):
+                    or not math.isfinite(position)):
                 raise RuntimeError(f'bps 自动核验未通过 [{venue.name}]：'
-                                   '实时持仓未归零或数据无效；保留 pending')
+                                   '实时持仓数据无效；保留 pending')
             return venue, position
 
+        await self._resolve_saved_maker(state.get('active_maker'))
         verified = []
         for attempt in range(2):
             if self.engine.stop.is_set():
@@ -347,6 +350,9 @@ class BpsStrategy:
             for result in results:
                 if isinstance(result, BaseException):
                     raise result
+            if verified and any(abs(position - old_position) > 1e-12
+                                for (_, position), (_, old_position) in zip(results, verified)):
+                raise RuntimeError('bps 两次实时持仓不同，等待旧订单及仓位稳定；保留 pending')
             verified = results
             log.info('[BPS RECOVERY] 第 %d/2 次核验通过：%s；均无未成交订单',
                      attempt + 1, ' '.join(f'{v.name}={p:+.8g}' for v, p in verified))
@@ -359,6 +365,18 @@ class BpsStrategy:
                     raise RuntimeError('bps 自动核验已停止，保留 pending')
         if self.engine.stop.is_set():
             raise RuntimeError('bps 自动核验已停止，保留 pending')
+        if any(abs(position) > 1e-12 for _, position in verified):
+            sign = 1 if self.long else -1
+            positions = {v.key: position for v, position in verified}
+            if positions[self.engine.entropy.key] * sign < 0 or positions[self.engine.hedge.key] * sign > 0:
+                raise RuntimeError('bps 旧仓方向与配置不同，不能自动恢复；保留 pending')
+            self.startup_recovery = dict(original=original, state=state, positions=positions)
+            self.pending = True
+            for venue, position in verified:
+                venue.position = position
+            log.warning('[BPS RECOVERY] 旧订单已核验，两次仓位稳定；等待行情后仅减少多余仓位 net=%+.8g',
+                        sum(positions.values()))
+            return True
         try:
             if self.path.read_text() != original:
                 raise RuntimeError('bps 核验期间状态文件变化，保留 pending')
@@ -376,6 +394,149 @@ class BpsStrategy:
             raise RuntimeError('bps 核验通过但状态归档/保存失败，已停止启动') from error
         log.warning('[BPS RECOVERY] 两次核验均为零持仓、无未成交订单，已自动解除旧 pending；'
                     '原状态归档至 %s；旧轮盈亏未重建', archive)
+
+    async def _resolve_saved_maker(self, saved):
+        """Cancel only a durably recorded own maker; never all account orders."""
+        if not saved:
+            return  # Legacy checkpoints rely on the two no-open-order checks.
+        from .maker import MakerOrder
+        primary = self.engine.entropy
+        if saved.get('venue') != primary.name or not saved.get('client_id'):
+            raise RuntimeError('bps 旧挂单标识无效；保留 pending')
+        client_id = saved['client_id']
+        if primary.kind == 'lighter':
+            client_id = int(client_id)
+        elif primary.kind == 'hl':
+            from hyperliquid.utils.types import Cloid
+            client_id = Cloid.from_str(client_id)
+        order = MakerOrder(client_id, saved['price'], time.time())
+        deadline = time.monotonic() + max(30, 2 * self.cfg.settle_timeout_sec)
+        cancel_sent = False
+        while time.monotonic() < deadline and not self.engine.stop.is_set():
+            try:
+                result = await asyncio.wait_for(primary.maker_state(order), self.cfg.settle_timeout_sec)
+                if result['terminal']:
+                    log.warning('[BPS RECOVERY] 旧主腿挂单已确认终态 client_id=%s status=%s filled=%s',
+                                saved['client_id'], result['status'], result['filled_base'])
+                    return
+                if not cancel_sent and result['status'] != 'pending-confirmation':
+                    order.cancel_requested_at = time.monotonic()
+                    await asyncio.wait_for(primary.cancel_maker(order), self.cfg.settle_timeout_sec)
+                    cancel_sent = True
+            except Exception as error:
+                log.warning('[BPS RECOVERY] 旧挂单查询/撤单尚未确认 (%s)，稍后重试', type(error).__name__)
+            try:
+                await asyncio.wait_for(self.engine.stop.wait(), 1)
+            except asyncio.TimeoutError:
+                pass
+        raise RuntimeError('bps 旧挂单最终状态仍未确认；保留 pending，未发送仓位修正单')
+
+    async def finish_startup_recovery(self):
+        """Only run after feeds start, and before any strategy/reconcile loop."""
+        recovery, eng = self.startup_recovery, self.engine
+        if not recovery:
+            return
+        original, state, positions = recovery['original'], recovery['state'], recovery['positions']
+        if self.path.read_text() != original:
+            raise RuntimeError('bps 核验期间状态文件变化；保留 pending')
+        archive = self.path.with_name(f'{self.path.name}.recovered-{time.time_ns()}.bak')
+        with archive.open('x', encoding='utf-8') as output:
+            output.write(original)
+        self.entries = max(1, int(state.get('entries', 1)))
+        last_entry = state.get('last_entry_at', 0.0)
+        if not isinstance(last_entry, (float, int)) or not math.isfinite(last_entry):
+            raise RuntimeError('bps 旧加仓时间无效；保留 pending')
+        self.last_entry_at = last_entry
+        self.locked_entry, self.locked_exit = state.get('locked_entry'), state.get('locked_exit')
+        valid_levels = all(isinstance(x, (float, int)) and math.isfinite(x)
+                           for x in (self.locked_entry, self.locked_exit))
+        self.awaiting_levels = not valid_levels and self.cfg.bps_levels == 'rolling'
+        if not valid_levels:
+            self.locked_entry, self.locked_exit = ((self.entry, self.exit)
+                                                  if not self.awaiting_levels else (None, None))
+        self.adopted_position = True
+        self.closing = False
+        self.close_reason = None
+        self.costs.inherit(positions, time.time())
+        # Old ambiguous fills have unknown prices. Do not manufacture P&L.
+        self.save()  # durable pending before the first reduce-only repair
+        initial_net = sum(positions.values())
+        deadline = time.monotonic() + max(30, 2 * self.cfg.settle_timeout_sec)
+        for _ in range(3):
+            net = sum(v.position for v in eng.venues.values())
+            if abs(net) <= self.tolerance:
+                break
+            while not eng.stop.is_set() and time.monotonic() < deadline:
+                if all(v.ready_to_trade() and v.book.is_fresh(self.cfg.staleness_sec)
+                       for v in eng.venues.values()):
+                    break
+                try:
+                    await asyncio.wait_for(eng.stop.wait(), .1)
+                except asyncio.TimeoutError:
+                    pass
+            if eng.stop.is_set() or time.monotonic() >= deadline:
+                raise RuntimeError('bps 自动修正等待行情超时或停止；保留 pending')
+            # Recheck that no external order/position changed during feed setup.
+            for venue in eng.venues.values():
+                if await asyncio.wait_for(venue.has_open_orders(), self.cfg.settle_timeout_sec) is not False:
+                    raise RuntimeError('bps 修正前发现未成交订单；保留 pending')
+                live = await asyncio.wait_for(venue.fetch_position(), self.cfg.settle_timeout_sec)
+                if not math.isfinite(live) or abs(live - venue.position) > self.tolerance:
+                    raise RuntimeError('bps 修正前实时仓位变化；保留 pending')
+            if eng.stop.is_set() or not all(v.ready_to_trade() and v.book.is_fresh(self.cfg.staleness_sec)
+                                           for v in eng.venues.values()):
+                raise RuntimeError('bps 修正前行情失效或已停止；保留 pending')
+            excess = next(v for v in eng.venues.values() if v.position * net > 0)
+            slip = self.cfg.hedge_slippage_bps / 1e4
+            limit = (excess.px_round(excess.book.best_bid() * (1 - slip), False) if net > 0
+                     else excess.px_round(excess.book.best_ask() * (1 + slip), True))
+            cap_price = max(excess.book.best_ask(), limit)
+            qty = floor_step(min(abs(net), self.cfg.max_order_notional / cap_price), eng._step)
+            minimum = max(excess.min_base, max(self.cfg.min_order_notional, excess.min_quote) / limit)
+            minimum = round(math.ceil(minimum / eng._step - 1e-9) * eng._step, 12)
+            if self.tolerance < abs(net) - qty < minimum:
+                qty = floor_step(abs(net) - minimum, eng._step)
+            if qty < minimum:
+                raise RuntimeError('bps 差额低于最小下单规模或单笔上限不足以拆分；保留 pending')
+            confirmed = await eng._hedge(math.copysign(qty, net))
+            self.save()
+            if not confirmed or eng.halted:
+                raise RuntimeError('bps 自动修正成交未确认或失败；保留 pending，禁止重复补单')
+            remaining = sum(v.position for v in eng.venues.values())
+            if abs(remaining) >= abs(net) - self.tolerance:
+                raise RuntimeError('bps 自动修正未减少差额或低于最小下单金额；保留 pending')
+            # Let account REST catch up before another reduction or verification.
+            try:
+                await asyncio.wait_for(eng.stop.wait(), PENDING_RECOVERY_RECHECK_SEC)
+            except asyncio.TimeoutError:
+                pass
+            else:
+                raise RuntimeError('bps 自动核验已停止，保留 pending')
+        if abs(sum(v.position for v in eng.venues.values())) > self.tolerance:
+            raise RuntimeError('bps 自动修正后仍有差额；保留 pending，未开启交易')
+        for attempt in range(2):
+            for venue in eng.venues.values():
+                if await asyncio.wait_for(venue.has_open_orders(), self.cfg.settle_timeout_sec) is not False:
+                    raise RuntimeError('bps 修正后发现未成交订单；保留 pending')
+                live = await asyncio.wait_for(venue.fetch_position(), self.cfg.settle_timeout_sec)
+                if not math.isfinite(live) or abs(live - venue.position) > self.tolerance:
+                    raise RuntimeError('bps 修正后仓位尚未确认；保留 pending')
+            if attempt == 0:
+                try:
+                    await asyncio.wait_for(eng.stop.wait(), PENDING_RECOVERY_RECHECK_SEC)
+                except asyncio.TimeoutError:
+                    pass
+                else:
+                    raise RuntimeError('bps 自动核验已停止，保留 pending')
+        if self.flat():
+            self.__init__(eng)
+            self.last_closed_at = time.time()
+        self.pending = False
+        self.startup_recovery = None
+        self.save()
+        log.warning('[BPS RECOVERY] 已自动修正 net=%+.8g -> %+.8g，保留配对仓位；'
+                    '旧状态归档=%s；旧轮成本未知，不补算盈利',
+                    initial_net, sum(v.position for v in eng.venues.values()), archive)
 
     def restore(self):
         state = None
@@ -449,6 +610,7 @@ class BpsStrategy:
                 ('entries', 'locked_entry', 'locked_exit', 'closing', 'pending', 'last_entry_at',
                  'adopted_position', 'awaiting_levels')}
         data.update(identity=self.identity, positions={v.key: v.position for v in self.engine.venues.values()})
+        data['active_maker'] = self.engine.active_maker
         data.update(cycle_costs=self.costs.dump(), last_closed_at=self.last_closed_at,
                     last_add_premium=self.last_add_premium, close_reason=self.close_reason,
                     last_cycle_net_usd=self.last_cycle_net_usd)

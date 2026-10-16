@@ -142,10 +142,13 @@ async def execute_primary_maker(engine, buy, sell, plan):
              if cfg.maker_cancel_policy == 'timeout' else '最优价持续保留；信号失效立即撤单')
     try:
         order = await primary.place_maker(is_buy=primary_buy, qty=plan.qty, limit_px=price)
-        engine.active_maker = {"venue": primary.name, "client_id": str(order.client_id),
+        client_id = order.client_id.to_raw() if hasattr(order.client_id, 'to_raw') else str(order.client_id)
+        engine.active_maker = {"venue": primary.name, "client_id": client_id,
                                "price": price, "qty": plan.qty, "filled": 0.0,
                                "hedged": 0.0, "state": "waiting",
                                "cancel_policy": cfg.maker_cancel_policy}
+        if engine.bps_strategy:
+            engine.bps_strategy.save()  # retain the own order id across restarts
         if order.rejected:
             pinfo = empty_result("rejected", order.err)
             terminal = True
