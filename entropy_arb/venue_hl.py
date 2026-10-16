@@ -409,15 +409,32 @@ class HLVenue:
             fr += float(st.get("withdrawable") or 0.0)
         return eq, fr
 
+    async def has_open_orders(self) -> bool:
+        addr = self._query_address()
+        if not addr:
+            raise RuntimeError(f"[{self.name}] account unavailable for open orders query")
+        rows = await self._info({"type": "frontendOpenOrders", "user": addr,
+                                 "dex": self.conf.hl_dex})
+        if (not isinstance(rows, list)
+                or any(not isinstance(row, dict) or not isinstance(row.get("coin"), str)
+                       for row in rows)):
+            raise RuntimeError(f"[{self.name}] invalid open orders response")
+        return any(row["coin"] == self.coin for row in rows)
+
     async def fetch_position(self) -> float:
         addr = self._query_address()
         assert addr is not None
         st = await self._info({"type": "clearinghouseState", "user": addr,
                                "dex": self.conf.hl_dex})
-        for ap in st.get("assetPositions") or []:
-            pos = ap.get("position") or {}
-            if pos.get("coin") == self.coin:
-                return float(pos.get("szi") or 0.0)
+        if not isinstance(st, dict) or not isinstance(st.get("assetPositions"), list):
+            raise RuntimeError(f"[{self.name}] invalid positions response")
+        for ap in st["assetPositions"]:
+            pos = ap["position"]
+            if pos["coin"] == self.coin:
+                size = float(pos["szi"])
+                if not math.isfinite(size):
+                    raise RuntimeError(f"[{self.name}] invalid position size")
+                return size
         return 0.0
 
     async def close(self) -> None:

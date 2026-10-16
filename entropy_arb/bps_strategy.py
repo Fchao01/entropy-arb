@@ -16,6 +16,7 @@ from .recorder import prepare_recorder_source
 from .bps_pnl import CycleCosts
 
 log = logging.getLogger('bps')
+PENDING_RECOVERY_RECHECK_SEC = 5.0
 
 
 def recorder_source(cfg):
@@ -294,6 +295,87 @@ class BpsStrategy:
                     self.engine.entropy.name, self.engine.entropy.position,
                     self.engine.hedge.name, self.engine.hedge.position,
                     self.cfg.bps_levels, self.locked_exit)
+
+    async def recover_pending(self):
+        """Before streams/execution start, verify an unresolved cycle is flat.
+
+        Read authoritative orders and then positions twice, allowing account
+        REST state to catch up. Never clear uncertainty on a failed/partial
+        response, or reuse costs from manually closed positions.
+        """
+        if not self.path.exists():
+            return
+        try:
+            original = self.path.read_text()
+            state = json.loads(original)
+            if not isinstance(state, dict):
+                raise ValueError('invalid checkpoint')
+        except (OSError, ValueError, TypeError) as error:
+            raise RuntimeError('bps 状态文件损坏，请核对订单和仓位') from error
+        if not state.get('pending'):
+            return
+        if state.get('identity') != self.identity:
+            raise RuntimeError('bps 未确认状态的账户或交易对与当前配置不一致，不能自动解除')
+        log.warning('[BPS RECOVERY] 检测到旧 pending，开始查询两边未成交订单与实时持仓')
+        query_timeout = max(10.0, self.cfg.settle_timeout_sec)
+
+        async def check(venue):
+            try:
+                has_orders = await asyncio.wait_for(venue.has_open_orders(), query_timeout)
+                position = await asyncio.wait_for(venue.fetch_position(), query_timeout)
+            except Exception as error:
+                # Do not include transport exceptions that may contain an
+                # authenticated URL/header or other account secrets.
+                raise RuntimeError(f'bps 自动核验未通过 [{venue.name}]：'
+                                   f'查询失败 ({type(error).__name__})；'
+                                   '保留 pending，未启动交易') from error
+            if has_orders is not False:
+                raise RuntimeError(f'bps 自动核验未通过 [{venue.name}]：'
+                                   '存在未成交订单或未能确认订单为空；保留 pending')
+            if (not isinstance(position, (int, float)) or isinstance(position, bool)
+                    or not math.isfinite(position) or abs(position) > 1e-12):
+                raise RuntimeError(f'bps 自动核验未通过 [{venue.name}]：'
+                                   '实时持仓未归零或数据无效；保留 pending')
+            return venue, position
+
+        verified = []
+        for attempt in range(2):
+            if self.engine.stop.is_set():
+                raise RuntimeError('bps 自动核验已停止，保留 pending')
+            results = await asyncio.gather(*(check(v) for v in self.engine.venues.values()),
+                                           return_exceptions=True)
+            for result in results:
+                if isinstance(result, BaseException):
+                    raise result
+            verified = results
+            log.info('[BPS RECOVERY] 第 %d/2 次核验通过：%s；均无未成交订单',
+                     attempt + 1, ' '.join(f'{v.name}={p:+.8g}' for v, p in verified))
+            if attempt == 0:
+                try:
+                    await asyncio.wait_for(self.engine.stop.wait(), PENDING_RECOVERY_RECHECK_SEC)
+                except asyncio.TimeoutError:
+                    pass
+                else:
+                    raise RuntimeError('bps 自动核验已停止，保留 pending')
+        if self.engine.stop.is_set():
+            raise RuntimeError('bps 自动核验已停止，保留 pending')
+        try:
+            if self.path.read_text() != original:
+                raise RuntimeError('bps 核验期间状态文件变化，保留 pending')
+            archive = self.path.with_name(f'{self.path.name}.recovered-{time.time_ns()}.bak')
+            # Keep the original pending checkpoint in place until save()
+            # atomically replaces it. A disk/write failure must not erase it.
+            with archive.open('x', encoding='utf-8') as output:
+                output.write(original)
+            for venue, position in verified:
+                venue.position = position
+            self.__init__(self.engine)
+            self.last_closed_at = time.time()
+            self.save()
+        except OSError as error:
+            raise RuntimeError('bps 核验通过但状态归档/保存失败，已停止启动') from error
+        log.warning('[BPS RECOVERY] 两次核验均为零持仓、无未成交订单，已自动解除旧 pending；'
+                    '原状态归档至 %s；旧轮盈亏未重建', archive)
 
     def restore(self):
         state = None

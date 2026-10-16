@@ -617,6 +617,19 @@ class ArcusVenue:
         return {"status": "timeout", "filled_base": 0.0, "avg_px": None,
                 "err": None, "unresolved": True}
 
+    async def has_open_orders(self) -> bool:
+        # No status/time filter: include untriggered TPSL orders as well as
+        # resting orders. One row is sufficient to refuse automatic recovery;
+        # an empty first page proves this market has no open orders.
+        data = await self._get("/v1/openOrders", address=self.address,
+                               accountIndex=self.account_index,
+                               market=self.market_name, limit=1)
+        if not isinstance(data, dict) or not isinstance(data.get("orders"), list):
+            raise RuntimeError("[ARCUS] invalid open orders response")
+        if data.get("error"):
+            raise RuntimeError("[ARCUS] open orders query failed")
+        return bool(data["orders"])
+
     async def fetch_position(self) -> float:
         # A position snapshot alone cannot rule out an accepted order that is
         # still in flight. Keep trading disabled until its lifecycle is final.
@@ -629,8 +642,11 @@ class ArcusVenue:
                 raise RuntimeError("[ARCUS] previous order outcome unresolved; trading paused")
         data = await self._get("/v1/positions", address=self.address,
                                accountIndex=self.account_index, market=self.market_name)
-        row = data["positions"].get(str(self.market_id))
-        size = float(row["size"]) if row else 0.0  # signed base size, not abs(side)
+        if not isinstance(data, dict) or not isinstance(data.get("positions"), dict):
+            raise RuntimeError("[ARCUS] invalid positions response")
+        rows = data["positions"]
+        # An absent market is flat; a present but incomplete row is not.
+        size = float(rows[str(self.market_id)]["size"]) if str(self.market_id) in rows else 0.0
         if not math.isfinite(size):
             raise ValueError("[ARCUS] invalid position size")
         self._unresolved_orders.clear()

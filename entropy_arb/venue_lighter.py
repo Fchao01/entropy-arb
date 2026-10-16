@@ -441,13 +441,37 @@ class LighterVenue:
         return (float(acct.get("total_asset_value") or 0.0),
                 float(acct.get("available_balance") or 0.0))
 
+    async def has_open_orders(self) -> bool:
+        from lighter import OrderApi
+        auth, err = self.signer.create_auth_token_with_expiry()
+        if err or not auth:
+            raise RuntimeError(f"[{self.name}] open orders authentication unavailable")
+        method = OrderApi(self.signer.api_client).account_active_orders
+        params = inspect.signature(method).parameters
+        response = await method(**{
+            "account_index": self.conf.lighter_creds.account_index,
+            "market_id": self.market_id,
+            "authorization" if "authorization" in params else "auth": auth,
+        })
+        data = response.to_dict() if hasattr(response, "to_dict") else response
+        if (not isinstance(data, dict) or data.get("code") != 200
+                or not isinstance(data.get("orders"), list)):
+            raise RuntimeError(f"[{self.name}] invalid open orders response")
+        return bool(data["orders"])
+
     async def fetch_position(self) -> float:
         acct = await self._account()
         if acct is None:
             raise RuntimeError(f"[{self.name}] account not found")
-        for p in acct.get("positions") or []:
-            if int(p.get("market_id", -1)) == self.market_id:
-                return float(p.get("sign") or 1.0) * float(p.get("position") or 0.0)
+        if not isinstance(acct.get("positions"), list):
+            raise RuntimeError(f"[{self.name}] invalid positions response")
+        for p in acct["positions"]:
+            if int(p["market_id"]) == self.market_id:
+                size, sign = float(p["position"]), float(p["sign"])
+                if (not math.isfinite(size) or size < 0
+                        or sign not in (-1, 0, 1) or (size > 0 and sign == 0)):
+                    raise RuntimeError(f"[{self.name}] invalid position size/sign")
+                return sign * size
         return 0.0
 
     async def close(self) -> None:

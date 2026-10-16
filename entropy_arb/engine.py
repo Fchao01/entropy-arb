@@ -287,6 +287,7 @@ class Engine:
                      sum(v.position for v in self.venues.values()))
             self._check_starting_positions()
             if self.bps_strategy:
+                await self.bps_strategy.recover_pending()
                 self.bps_strategy.restore()
 
         for v in self.venues.values():
