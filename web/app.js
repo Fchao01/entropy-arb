@@ -1,7 +1,7 @@
 "use strict";
 
 const element = (id) => document.getElementById(id);
-const state = {tasks: [], meta: null, selected: null, page: location.pathname === "/monitor" ? "monitor" : "dex", authenticated: false, editing: null, detail: null, logs: null, logTab: "logs", tradesPage: 1, tradesPageSize: 10, busy: new Set(), polling: false, detailTask: null, detailTab: "logs", detailLogs: null, libraryKind: "yaml", libraryOriginal: null, tri: {candidates: [], snapshot: null, selectedSymbol: null}};
+const state = {tasks: [], meta: null, selected: null, page: location.pathname === "/accounts" ? "accounts" : location.pathname === "/monitor" ? "monitor" : "dex", authenticated: false, editing: null, detail: null, logs: null, logTab: "logs", tradesPage: 1, tradesPageSize: 10, busy: new Set(), polling: false, detailTask: null, detailTab: "logs", detailLogs: null, libraryKind: "yaml", libraryOriginal: null, tri: {candidates: [], snapshot: null, selectedSymbol: null}};
 const venues = {entropy: "Entropy", lighter: "Lighter", "lighter-rh": "RH", tradexyz: "Trade.xyz", arcus: "Arcus"};
 const active = (task) => ["running", "stopping"].includes(task.state);
 const escapeHtml = (value) => String(value ?? "").replace(/[&<>"']/g, (character) => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"}[character]));
@@ -56,11 +56,14 @@ function navigate(page, push = true) {
   state.page = page;
   element("dex-page").hidden = page !== "dex";
   element("monitor-page").hidden = page !== "monitor";
+  element("accounts-page").hidden = page !== "accounts";
   document.querySelectorAll(".nav-link").forEach((link) => link.classList.toggle("active", link.dataset.page === page));
-  element("breadcrumb").textContent = `工作空间 / ${page === "dex" ? "DEX 套利" : "监控"}`;
-  document.title = `${page === "dex" ? "DEX 套利" : "监控"} · Entropy Console`;
-  if (push) history.pushState({}, "", page === "dex" ? "/dex-arbitrage" : "/monitor");
+  const label = page === "dex" ? "DEX 套利" : page === "accounts" ? "账户监控" : "监控";
+  element("breadcrumb").textContent = `工作空间 / ${label}`;
+  document.title = `${label} · Entropy Console`;
+  if (push) history.pushState({}, "", page === "dex" ? "/dex-arbitrage" : `/${page}`);
   if (page === "monitor" && state.authenticated) {refreshDetail().catch((error) => toast(error.message, true)); loadTripleCandidates(); refreshTriple();}
+  if (page === "accounts" && state.authenticated) refreshAccounts();
 }
 
 document.addEventListener("click", (event) => {
@@ -70,7 +73,7 @@ document.addEventListener("click", (event) => {
     navigate(link.dataset.page || "dex");
   }
 });
-window.addEventListener("popstate", () => navigate(location.pathname === "/monitor" ? "monitor" : "dex", false));
+window.addEventListener("popstate", () => navigate(location.pathname === "/accounts" ? "accounts" : location.pathname === "/monitor" ? "monitor" : "dex", false));
 
 function badge(task) {
   let label = {running: "运行中", stopping: "停止中", stopped: "已停止", failed: "异常退出", interrupted: "服务中断"}[task.state] || task.state;
@@ -166,6 +169,7 @@ async function refresh() {
     document.querySelector(".server-pill").lastChild.textContent = " SERVER CONNECTED";
     renderTasks();
     if (state.page === "monitor") {await refreshDetail(); await refreshTriple();}
+    if (state.page === "accounts") await refreshAccounts();
     if (element("task-detail-dialog").open) await refreshTaskDetails();
   } catch (error) {
     element("connection-label").textContent = serverConnected ? "服务器已连接 · 页面刷新失败" : "连接中断";

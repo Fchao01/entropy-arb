@@ -30,6 +30,7 @@ from dotenv import dotenv_values
 
 from .config import ConfigError, HEDGE_VENUES, PRIMARY_VENUES, _SCHEMA, _validate, load_config
 from .market_monitor import MonitorRules, MultiVenueMonitor, discover_candidates
+from .account_monitor import AccountMonitor, VENUES as ACCOUNT_VENUES, account_id
 from .privacy import PrivateLogCapture
 from .run_logs import reset_run_log
 from .thresholds import (ThresholdDataError, ThresholdSuggestion, daily_window,
@@ -207,6 +208,7 @@ class TaskManager:
         self.tasks = {}
         self.closing = False
         self.market_monitor = None
+        self.account_monitor = AccountMonitor(self.data / "accounts.sqlite3")
         self.auto_threshold_task = None
         manifest = self.data / "tasks.json"
         if manifest.exists():
@@ -1129,6 +1131,7 @@ class TaskManager:
                 self.auto_threshold_task = None
             if self.market_monitor is not None:
                 await self.market_monitor.stop()
+            await self.account_monitor.close()
             for task_id in list(self.running):
                 await self.stop(task_id)
             runtimes = list(self.running.values())
@@ -1369,6 +1372,75 @@ def create_app(manager: TaskManager, password: str, secure_cookie=False):
         await monitor.stop()
         return web.json_response(monitor.snapshot())
 
+    def account_query(request):
+        ranges = {"1h": 3600, "24h": 86400, "7d": 7 * 86400, "all": None}
+        period = request.query.get("period", "24h")
+        venue = request.query.get("venue", "all")
+        if period not in ranges or venue not in ("all", *ACCOUNT_VENUES):
+            raise ConsoleError("账户监控筛选参数无效")
+        try:
+            page = int(request.query.get("page", "1"))
+            if page < 1 or page > 1000000:
+                raise ValueError()
+        except ValueError:
+            raise ConsoleError("页码无效")
+        search = request.query.get("search", "").strip()
+        if len(search) > 80:
+            raise ConsoleError("搜索条件过长")
+        since = time.time() - ranges[period] if ranges[period] else 0
+        return since, venue, search, page
+
+    def account_identity(request):
+        venue = request.match_info["venue"]
+        if venue not in ACCOUNT_VENUES:
+            raise ConsoleError("只支持 RH 和 Lighter 账户")
+        try:
+            return venue, account_id(request.match_info["account"])
+        except ValueError as error:
+            raise ConsoleError(str(error))
+
+    async def account_overview(request):
+        values = account_query(request)
+        result = await asyncio.to_thread(manager.account_monitor.store.overview, *values)
+        result["status"] = manager.account_monitor.status()
+        return web.json_response(result)
+
+    async def account_start(request):
+        try:
+            return web.json_response(await manager.account_monitor.start(await body(request)))
+        except ValueError as error:
+            raise ConsoleError(str(error))
+
+    async def account_stop(request):
+        return web.json_response(await manager.account_monitor.stop())
+
+    async def account_detail(request):
+        venue, aid = account_identity(request)
+        since, *_ = account_query(request)
+        result = await asyncio.to_thread(manager.account_monitor.store.detail, venue, aid, since)
+        if result is None:
+            raise web.HTTPNotFound(text="尚未发现该账户，可先添加关注")
+        return web.json_response(result)
+
+    async def account_watch(request):
+        venue, aid = account_identity(request)
+        payload = await body(request)
+        watched = payload.get("watched")
+        if not isinstance(watched, bool):
+            raise ConsoleError("关注状态必须是布尔值")
+        await asyncio.to_thread(manager.account_monitor.store.watch, venue, aid, watched)
+        return web.json_response({"ok": True})
+
+    async def account_refresh(request):
+        venue, aid = account_identity(request)
+        if not manager.account_monitor.running:
+            raise ConsoleError("先启动账户监控，再查询最新公开仓位和跨平台关联")
+        try:
+            await manager.account_monitor.fetch_account(venue, aid)
+        except (aiohttp.ClientError, ValueError, asyncio.TimeoutError) as error:
+            raise ConsoleError("公开账户查询未完成：" + str(error))
+        return await account_detail(request)
+
     async def download(request):
         task = manager.get(request.match_info["id"])
         kind = request.match_info["kind"]
@@ -1392,7 +1464,7 @@ def create_app(manager: TaskManager, password: str, secure_cookie=False):
 
     async def asset(request):
         name = request.match_info["name"]
-        if name not in ("app.js", "style.css"):
+        if name not in ("app.js", "accounts.js", "style.css"):
             raise web.HTTPNotFound()
         return web.FileResponse(STATIC / name)
 
@@ -1401,10 +1473,12 @@ def create_app(manager: TaskManager, password: str, secure_cookie=False):
 
     async def startup(app):
         manager.start_auto_threshold_scheduler()
+        await manager.account_monitor.resume()
 
     app.router.add_get("/", index)
     app.router.add_get("/dex-arbitrage", index)
     app.router.add_get("/monitor", index)
+    app.router.add_get("/accounts", index)
     app.router.add_get("/assets/{name}", asset)
     app.router.add_post("/api/login", login)
     app.router.add_get("/api/session", session)
@@ -1430,6 +1504,12 @@ def create_app(manager: TaskManager, password: str, secure_cookie=False):
     app.router.add_get("/api/market-monitor", market_monitor)
     app.router.add_post("/api/market-monitor/start", market_monitor_start)
     app.router.add_post("/api/market-monitor/stop", market_monitor_stop)
+    app.router.add_get("/api/account-monitor", account_overview)
+    app.router.add_post("/api/account-monitor/start", account_start)
+    app.router.add_post("/api/account-monitor/stop", account_stop)
+    app.router.add_get("/api/account-monitor/{venue}/{account}", account_detail)
+    app.router.add_post("/api/account-monitor/{venue}/{account}/watch", account_watch)
+    app.router.add_post("/api/account-monitor/{venue}/{account}/refresh", account_refresh)
     app.on_startup.append(startup)
     app.on_cleanup.append(cleanup)
     return app

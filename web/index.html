@@ -6,7 +6,8 @@
   <meta name="theme-color" content="#101b20">
   <title>DEX 套利 · Entropy Console</title>
   <link rel="stylesheet" href="/assets/style.css">
-  <script src="/assets/app.js?v=20261017-maker-resting" defer></script>
+  <script src="/assets/app.js?v=20261017-accounts" defer></script>
+  <script src="/assets/accounts.js?v=20261017-accounts" defer></script>
 </head>
 <body>
   <div id="login-view" class="login-view" hidden>
@@ -17,7 +18,7 @@
     <aside class="sidebar">
       <a class="brand" href="/dex-arbitrage"><span class="brand-mark">E</span><span>entropy<span class="brand-sub">ARBITRAGE CONSOLE</span></span></a>
       <div class="workspace-label">工作空间 <span>01</span></div>
-      <nav aria-label="主导航"><a href="/dex-arbitrage" data-page="dex" class="nav-link"><span class="nav-icon">⇄</span> DEX 套利 <span class="nav-count" id="nav-count">0</span></a><a href="/monitor" data-page="monitor" class="nav-link"><span class="nav-icon">▥</span> 监控 <span class="nav-arrow">↗</span></a></nav>
+      <nav aria-label="主导航"><a href="/dex-arbitrage" data-page="dex" class="nav-link"><span class="nav-icon">⇄</span> DEX 套利 <span class="nav-count" id="nav-count">0</span></a><a href="/monitor" data-page="monitor" class="nav-link"><span class="nav-icon">▥</span> 监控 <span class="nav-arrow">↗</span></a><a href="/accounts" data-page="accounts" class="nav-link"><span class="nav-icon">◎</span> 账户监控</a></nav>
       <div class="sidebar-note"><span class="mini-dot"></span><b>你的服务器，你的策略</b><p>任务独立运行，数据独立保存。<br>关闭网页不影响运行。</p></div>
       <div class="sidebar-bottom"><span id="connection-dot" class="mini-dot"></span><div><b id="connection-label">正在连接</b><small>ENTROPY ENGINE</small></div><button id="logout" class="icon-button" title="退出登录" aria-label="退出登录">↪</button></div>
     </aside>
@@ -51,6 +52,24 @@
             <div class="monitor-grid"><section class="panel chart-panel"><div class="panel-heading"><div><h2>溢价走势 <span class="muted">/ bps</span></h2><p>最近 120 条分钟记录 · 主腿中间价相对对冲腿</p></div><a id="download-minutes" class="text-link">导出 CSV ↗</a></div><div id="premium-chart" class="chart-body"></div></section><section class="panel venue-panel"><div class="panel-heading"><div><h2>双腿状态</h2><p>最近状态快照 · 约 2 秒更新</p></div></div><div id="venue-cards"></div><div class="venue-note">采集模式不查询持仓与余额。行情过期时，实盘引擎将暂停套利。</div></section></div>
             <section class="panel log-panel"><div class="panel-heading"><div class="log-tabs" role="tablist"><button class="selected" data-log-tab="logs" role="tab">运行日志</button><button data-log-tab="trades" role="tab">成交记录</button><button data-log-tab="events" role="tab">操作事件</button></div><div class="log-tools"><label><input type="checkbox" id="log-follow" checked> 自动滚动</label><button id="refresh-detail" class="icon-button" title="刷新" aria-label="刷新日志">↻</button><a id="download-logs" class="text-link">下载 ↗</a></div></div><pre id="log-output" class="log-output" tabindex="0"></pre><div id="trades-output" class="table-scroll" hidden></div><div id="trades-pagination" class="trades-pagination" hidden></div><footer class="panel-footer"><span>成交记录默认每页 10 条 · 利润为成交价差净收益（已扣手续费）</span><span>异常退出后不会自动重启</span></footer></section>
           </div>
+        </section>
+        <section id="accounts-page" hidden>
+          <div class="page-heading"><div><div class="eyebrow">PUBLIC ACCOUNT OBSERVATORY</div><h1>账户监控<span class="heading-dot">.</span></h1><p>发现 RH 与 Lighter 活跃账户，观察成交习惯与疑似跨平台对冲。</p></div><span id="accounts-status" class="badge">未启动</span></div>
+          <section class="panel account-controls"><div class="panel-heading"><div><h2>公开数据采集</h2><p>无需交易密钥 · 只观察已采集数据 · 关闭网页继续采集，重启控制台恢复已启用的监控</p></div></div>
+            <form id="accounts-start-form" class="account-toolbar"><label>监控币种<input id="accounts-symbols" value="BTC,ETH" placeholder="BTC,ETH 或 *" maxlength="4000" required></label><label class="account-checkbox"><input id="accounts-recent" type="checkbox"> 补充每市场最近最多 100 笔成交</label><button id="accounts-start" class="button primary" type="submit">启动 / 更换币种</button><button id="accounts-stop" class="button secondary" type="button" disabled>停止采集</button></form>
+            <p class="account-note">* 表示两边全部活跃永续市场；逐步订阅，上市变化需重新启动采集。bps =（RH 中间价 ÷ Lighter 中间价 − 1）× 10,000；只使用成交前 3 秒内两边已收到的报价，缺失显示 —。USDG / USDC 未做汇率换算。公开查询与实盘可能共享 IP 限额。</p>
+            <p id="accounts-error" class="form-error" role="alert"></p><p id="accounts-coverage" class="account-note"></p>
+          </section>
+          <div id="accounts-stats" class="stats-grid"></div>
+          <section class="panel account-ranking"><div class="panel-heading"><div><h2>活跃账户榜</h2><p>账户买卖均计成交额；同一市场撮合成交额仅计一次。非完整注册账户名单，未采集历史不会补成零。</p></div></div>
+            <div class="account-toolbar"><label>统计范围<select id="accounts-period"><option value="1h">近 1 小时</option><option value="24h" selected>近 24 小时</option><option value="7d">近 7 天</option><option value="all">全部已采集</option></select></label><label>平台<select id="accounts-venue"><option value="all">两边</option><option value="lighter-rh">RH</option><option value="lighter">Lighter</option></select></label><label>搜索编号 / 地址<input id="accounts-search" maxlength="80" placeholder="账户编号或 0x 地址"></label></div>
+            <div id="accounts-watches" class="account-watches"></div>
+            <div class="table-scroll"><table class="task-table account-table"><thead><tr><th>平台 / 账户</th><th>公开地址</th><th>成交额</th><th>成交笔数</th><th>平均单笔</th><th>Maker 金额占比</th><th>币种数</th><th>最近成交</th><th>操作</th></tr></thead><tbody id="accounts-rows"><tr><td colspan="9" class="table-empty">启动采集后发现活跃账户，也可直接关注已知编号。</td></tr></tbody></table></div>
+            <div class="account-toolbar"><button id="accounts-prev" class="button secondary small">上一页</button><span id="accounts-pagination">第 1 页</span><button id="accounts-next" class="button secondary small">下一页</button></div>
+            <form id="accounts-watch-form" class="account-toolbar"><label>关注指定账户<select id="accounts-watch-venue"><option value="lighter-rh">RH</option><option value="lighter">Lighter</option></select></label><label>账户编号<input id="accounts-watch-id" inputmode="numeric" pattern="[0-9]{1,16}" placeholder="Account index" required></label><button class="button secondary" type="submit">添加关注并查看</button></form>
+          </section>
+          <section id="account-detail-panel" class="panel account-detail" hidden><div class="panel-heading"><div><h2 id="account-detail-title">账户详情</h2><p id="account-detail-source"></p></div><div class="heading-actions"><button id="account-fetch" class="button secondary small">查询最新仓位与关联</button><button id="account-detail-close" class="icon-button" aria-label="关闭账户详情">×</button></div></div><div id="account-detail-body"></div></section>
+          <section class="panel account-events"><div class="panel-heading"><div><h2>采集事件与缺口</h2><p>断线无法保证全部补回；策略标签是行为推测，成交量不代表盈利。</p></div></div><div id="accounts-events" class="account-note"></div></section>
         </section>
         <footer class="workspace-footer"><span>entropy <span class="muted">/</span> DEX ARBITRAGE CONSOLE</span><span>数据来自运行实例 · 不代表保证收益</span></footer>
       </main>
