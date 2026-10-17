@@ -53,7 +53,7 @@ class TelegramNotifier:
             result = await self._send_unlocked(text)
             # Telegram asks clients to avoid more than one message per second
             # in a chat; serializing here also reduces avoidable 429 responses.
-            self._next_send_at = asyncio.get_running_loop().time() + 1.0
+            self._next_send_at = max(self._next_send_at, asyncio.get_running_loop().time() + 1.0)
             return result
 
     async def _send_unlocked(self, text: str) -> bool:
@@ -76,7 +76,8 @@ class TelegramNotifier:
                     retry_after = 0
                     if response.status == 429:
                         body = await response.json(content_type=None)
-                        retry_after = min(int(body.get("parameters", {}).get("retry_after", 1)), 8)
+                        retry_after = max(1, int(body.get("parameters", {}).get("retry_after", 1)))
+                        self._next_send_at = max(self._next_send_at, asyncio.get_running_loop().time() + retry_after)
                     if response.status >= 500 or response.status == 429:
                         if attempt < 2:
                             await asyncio.sleep(max(retry_after, 0.5))

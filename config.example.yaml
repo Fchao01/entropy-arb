@@ -90,6 +90,7 @@ execution:
   primary_order_type: taker   # taker 吃单 / maker 买一卖一只挂单
   maker_cancel_policy: best_price # 信号有效且在买一/卖一保留；timeout = 按时间撤单
   maker_reprice_delay_sec: 0.3 # 连续离开最优价多久后撤单；信号失效立即撤单
+  maker_requote_delay_sec: 0.5 # 零成交撤单/拒单后重挂间隔；到期重新检查当前条件
   maker_timeout_sec: 5.0      # 仅 timeout 模式：最长等待秒数，范围 (0, 60]
   premium_persist_sec: 0     # edge must persist this long before firing / 信号需持续时间
   cooldown_sec: 0.0            # min gap between executions / 两次执行的最小间隔

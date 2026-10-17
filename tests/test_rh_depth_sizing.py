@@ -127,6 +127,10 @@ def test_resting_quote_checks_remaining_unhedged_size_not_original_quantity(tmp_
     engine.active_maker = {"filled": 0.4, "hedged": 0.4}
     assert engine._maker_quote_valid(buy, sell, plan, price)
     engine.active_maker["hedged"] = 0.3
+    assert engine._maker_quote_valid(buy, sell, plan, price)
+    # An existing order needs 0.45 base, covered by actual 0.7 depth. The
+    # initial take_fraction must not halve that depth again during retention.
+    engine.active_maker["hedged"] = 0.04
     assert not engine._maker_quote_valid(buy, sell, plan, price)
 
 

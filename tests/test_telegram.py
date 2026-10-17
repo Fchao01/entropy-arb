@@ -1,4 +1,8 @@
 import asyncio
+from types import SimpleNamespace
+
+from entropy_arb import telegram as telegram_module
+from entropy_arb.telegram import TelegramNotifier
 
 from entropy_arb import web as web_module
 from entropy_arb.telegram import trade_message
@@ -55,3 +59,40 @@ def test_manager_telegram_test_uses_selected_profile(tmp_path, monkeypatch):
 
     asyncio.run(scenario())
     assert sent == [("test-token", "test-chat", "✅ Telegram 测试消息\n连接成功；后续成交通知会发送到这里。")]
+
+
+def test_full_telegram_retry_after_including_final_failure_applies_to_next_message(monkeypatch):
+    async def run():
+        clock, sleeps = [100.0], []
+        async def sleep(seconds):
+            sleeps.append(seconds)
+            clock[0] += seconds
+        monkeypatch.setattr(telegram_module, 'asyncio', SimpleNamespace(
+            Lock=asyncio.Lock, sleep=sleep, get_running_loop=lambda: SimpleNamespace(time=lambda: clock[0])))
+
+        class Response:
+            def __init__(self, delay):
+                self.delay = delay
+                self.status = 429 if delay else 200
+            async def __aenter__(self):
+                return self
+            async def __aexit__(self, *args):
+                pass
+            async def json(self, **kwargs):
+                return {'ok': False, 'parameters': {'retry_after': self.delay}} if self.delay else {'ok': True}
+            async def text(self):
+                return 'rate limited'
+
+        responses = iter([123, 17, 82, 0])
+        sent_at = []
+        def post(*args, **kwargs):
+            sent_at.append(clock[0])
+            return Response(next(responses))
+        notifier = TelegramNotifier(session=SimpleNamespace(post=post), token='synthetic-token', chat_id='synthetic-chat')
+        assert not await notifier.send('first')
+        assert sleeps == [123, 17]
+        assert await notifier.send('second')
+        assert sleeps == [123, 17, 82]
+        assert sent_at == [100, 223, 240, 322]
+        assert notifier.failed_count == 1 and notifier.sent_count == 1
+    asyncio.run(run())

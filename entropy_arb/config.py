@@ -168,6 +168,7 @@ class Config:
     maker_timeout_sec: float = 5.0
     maker_cancel_policy: str = "best_price"
     maker_reprice_delay_sec: float = 0.3
+    maker_requote_delay_sec: float = 0.5
     strategy_mode: str = "threshold"
     spread_bps: float = 1.0
     bps_levels: str = "rolling"
@@ -291,6 +292,7 @@ _SCHEMA: Dict[str, Any] = {
         "maker_timeout_sec": float,
         "maker_cancel_policy": str,
         "maker_reprice_delay_sec": float,
+        "maker_requote_delay_sec": float,
         "premium_persist_sec": float,
         "cooldown_sec": float,
         "settle_timeout_sec": float,
@@ -635,6 +637,9 @@ def load_config(config_file: str = "config.yaml", env_file: str = ".env", *,
     maker_reprice_delay_sec = float(_get(raw, "execution", "maker_reprice_delay_sec", 0.3))
     if not math.isfinite(maker_reprice_delay_sec) or not 0 <= maker_reprice_delay_sec <= 60:
         raise ConfigError("execution.maker_reprice_delay_sec must be in [0, 60]")
+    maker_requote_delay_sec = float(_get(raw, "execution", "maker_requote_delay_sec", 0.5))
+    if not math.isfinite(maker_requote_delay_sec) or not 0 <= maker_requote_delay_sec <= 60:
+        raise ConfigError("execution.maker_requote_delay_sec must be in [0, 60]")
 
     return Config(
         symbol=symbol,
@@ -644,6 +649,7 @@ def load_config(config_file: str = "config.yaml", env_file: str = ".env", *,
         maker_timeout_sec=maker_timeout_sec,
         maker_cancel_policy=maker_cancel_policy,
         maker_reprice_delay_sec=maker_reprice_delay_sec,
+        maker_requote_delay_sec=maker_requote_delay_sec,
         strategy_mode=strategy_mode,
         spread_bps=spread_bps,
         bps_levels=bps["levels"], bps_direction=bps["direction"],

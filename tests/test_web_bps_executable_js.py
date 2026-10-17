@@ -36,6 +36,8 @@ assert.equal(get('primary-order-type').value, 'maker');
 assert.equal(get('primary-order-type').disabled, false);
 assert.equal(get('maker-cancel-policy').hidden, false);
 assert.equal(get('primary-maker-fee').disabled, false);
+assert.equal(get('maker-requote-delay').value, 0.5);
+assert.equal(get('maker-requote-delay').disabled, false);
 assert.match(get('config-yaml').value, /primary_order_type: maker/);
 vm.runInContext('syncFields()', context);
 assert.equal(get('bps-entry-percentile').value, 90);

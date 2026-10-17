@@ -892,10 +892,63 @@ class BpsStrategy:
             if self.entries and self.profit_mode and not self.engine.halted:
                 self.engine._update_evt.set()  # Hold deadlines are checked even during quiet books.
 
+    def _refresh_dust_levels(self):
+        # Keep the exact inventory and cost ledger open. Only release the
+        # trading levels once every remaining position is unorderable dust.
+        eng = self.engine
+        if (self.profit_mode or not self.entries or self.pending or eng.halted
+                or eng.active_maker is not None or eng._position_uncertain
+                or not self.only_dust_positions() or self.entry is None or self.exit is None):
+            return
+        if (self.locked_entry, self.locked_exit, self.price_basis) == (
+                self.entry, self.exit, self.cfg.bps_price_basis):
+            return
+        self.locked_entry, self.locked_exit = self.entry, self.exit
+        self.locked_price_basis = self.cfg.bps_price_basis
+        self.closing, self.close_reason = False, None
+        self.awaiting_levels = self.adopted_position = False
+        try:
+            self.save()
+        except OSError:
+            eng.halted = True
+            self.reason = '尾仓交易点位无法保存，暂停新订单；真实仓位与成本保留'
+            raise
+        log.info('[BPS DUST LEVELS] use current entry=%+.4f exit=%+.4f; exact residual '
+                 'positions/costs retained, cycle PnL not declared closed', self.entry, self.exit)
+
+    def round_trip_reference(self, plan=None):
+        if not self.executable:
+            return None
+        eng = self.engine
+        target = self.locked_exit if self.entries else self.exit
+        if target is None or target <= -10000:
+            return None
+        buy, sell = (eng.entropy, eng.hedge) if self.long else (eng.hedge, eng.entropy)
+        if plan is None:
+            plan = self.plan(buy, sell)
+        if plan is None:
+            return None
+        anchor = plan.buy_notional / plan.qty if self.long else plan.sell_notional / plan.qty
+        fee = (self.cfg.primary_fee_bps if self.cfg.primary_maker_only else eng.entropy.fee_bps) / 1e4
+        hf = eng.hedge.fee_bps / 1e4
+        ratio = 1 + target / 1e4
+        closing_cash = (anchor * (1 - fee) - anchor / ratio * (1 + hf) if self.long else
+                        anchor * ratio * (1 - hf) - anchor * (1 + fee)) * plan.qty
+        net = plan.exp_edge_usd + closing_cash
+        return dict(net_usd=net, net_bps=net / (anchor * plan.qty) * 1e4,
+                    target_exit_bps=target, nonpositive=net <= 0,
+                    assumption='主腿价格保持不变、目标价差平仓、按配置费率估算；未含资金费及未来滑点')
+
     def snapshot(self):
         return dict(levels=self.cfg.bps_levels, history_mode=self.cfg.bps_history_mode, direction=self.cfg.bps_direction,
                     price_basis=self.price_basis, configured_price_basis=self.cfg.bps_price_basis,
                     open_signal_bps=self.signal(), close_signal_bps=self.signal(closing=True),
+                    round_trip_reference=self.round_trip_reference(),
+                    dust_levels_current=(not self.profit_mode and self.entries > 0 and not self.pending
+                        and not self.engine.halted and self.engine.active_maker is None
+                        and not self.engine._position_uncertain and self.only_dust_positions()
+                        and self.locked_entry == self.entry and self.locked_exit == self.exit
+                        and self.price_basis == self.cfg.bps_price_basis),
                     position_residual=self.residual_status(),
                     exit_mode=self.cfg.bps_exit_mode, exit_quote=self.exit_quote() if self.profit_mode else None,
                     take_profit_bps=self.cfg.bps_take_profit_bps, stop_loss_bps=self.cfg.bps_stop_loss_bps,
@@ -1039,6 +1092,7 @@ class BpsStrategy:
         if any(not eng._venue_rate_ok(v) or v.book.last_update_ts <= v.last_traded_ts
                for v in eng.venues.values()):
             return None
+        self._refresh_dust_levels()
         premium = self.signal()
         if premium is None:
             return None
@@ -1128,6 +1182,7 @@ class BpsStrategy:
             return None
         if plan is None:
             self.reason = '仓位上限或盘口深度不足'
+            eng._armed[key] = None
             return None
         self.reason = '等待开仓成交'
         return buy, sell, plan
@@ -1144,6 +1199,12 @@ class BpsStrategy:
         log.info('[BPS %s] basis=%s signal=%s entry=%s frozen_exit=%s entries=%d',
                  plan.action, self.price_basis, self.signal(closing=plan.action == 'bps_close', plan=plan),
                  self.locked_entry, self.locked_exit, self.entries)
+        if plan.action == 'bps_open':
+            estimate = self.round_trip_reference(plan)
+            if estimate and estimate['nonpositive']:
+                log.warning('[BPS ROUND TRIP] reference net=%+.4fbps; %s; '
+                            'level triggers unchanged, this is not actual realized PnL',
+                            estimate['net_bps'], estimate['assumption'])
 
     def after_execution(self, plan, before_qty, unresolved):
         eng = self.engine
@@ -1160,10 +1221,13 @@ class BpsStrategy:
             log.critical('[BPS PAUSED] %s', self.reason)
             return
         if self.flat():
-            self.last_cycle_net_usd = self.costs.cash if self.costs.known else None
-            log.info('[BPS CYCLE] complete net=%s basis=$%.4f exit_reason=%s',
-                     self.last_cycle_net_usd, self.costs.open_notional, self.close_reason)
-            self.last_closed_at = time.time()
+            had_fills = bool(self.entries or self.costs.started_at or self.costs.open_notional)
+            if had_fills:
+                self.last_cycle_net_usd = self.costs.cash if self.costs.known else None
+                log.info('[BPS CYCLE] complete net=%s basis=$%.4f exit_reason=%s',
+                         self.last_cycle_net_usd, self.costs.open_notional, self.close_reason)
+                self.last_closed_at = time.time()
+                self.last_entry_at = time.time()
             self.last_add_premium = None
             self.costs = CycleCosts()
             self.entries = 0
@@ -1171,7 +1235,6 @@ class BpsStrategy:
             self.locked_price_basis = None
             self.adopted_position = self.awaiting_levels = False
             self.closing = False
-            self.last_entry_at = time.time()
             for key in eng._armed:
                 eng._armed[key] = None
         elif plan.action == 'bps_open' and abs(eng.entropy.position) > before_qty + eng._step / 2:

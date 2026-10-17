@@ -108,6 +108,8 @@ async def execute_primary_maker(engine, buy, sell, plan, *, hedge_enabled=True):
         # Log when the request starts, rather than after its ACK arrives.
         log.info("[MAKER] cancel requested client_id=%s reason=%s elapsed=%.3fs policy=%s; waiting for final fills",
                  order.client_id, cancel_reason, time.perf_counter() - start, cfg.maker_cancel_policy)
+        if cancel_reason.startswith('quote-invalid:'):
+            log.info('[MAKER CHECK] %s', getattr(engine, '_maker_validation', {}))
         try:
             await asyncio.wait_for(primary.cancel_maker(order), timeout=cfg.settle_timeout_sec)
             cancel_sent = True
@@ -130,7 +132,10 @@ async def execute_primary_maker(engine, buy, sell, plan, *, hedge_enabled=True):
             return 'engine-halted'
         # Signal/hedge validity always has priority over queue position.
         if not engine._maker_quote_valid(buy, sell, plan, price):
-            return 'quote-invalid:signal/depth/readiness'
+            detail = getattr(engine, '_maker_validation', {})
+            if engine.active_maker is not None:
+                engine.active_maker['validation'] = detail
+            return 'quote-invalid:' + (detail.get('reason') or 'signal/depth/readiness')
         if cfg.maker_cancel_policy == 'timeout':
             return 'timeout' if time.monotonic() >= deadline else None
         at_best = engine._maker_at_best_price(primary_buy, price)
@@ -313,6 +318,9 @@ async def execute_primary_maker(engine, buy, sell, plan, *, hedge_enabled=True):
             await asyncio.gather(timeout_task, return_exceptions=True)
         if terminal and not hinfo.get("unresolved"):
             engine.active_maker = None
+            if (plan.action != 'maker_repair' and pinfo['filled_base'] == 0
+                    and not pinfo.get('unresolved')):
+                engine._note_maker_zero_fill()
         repairable = (engine.bps_strategy is not None and terminal
                       and not pinfo.get('unresolved') and not hinfo.get('unresolved'))
         if hedge_failed and repairable:

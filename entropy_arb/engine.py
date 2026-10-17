@@ -29,6 +29,7 @@ import aiohttp
 from .book import ArbPlan, OrderBook, floor_step, plan_arb
 from .bps_strategy import BpsStrategy, recorder_source
 from .maker import execute_primary_maker, rh_hedge_depth
+from .maker_quote import check_quote
 from .config import Config
 from .recorder import MinuteRecorder
 from .venue_hl import HLVenue
@@ -79,6 +80,9 @@ class Engine:
         self.halted = False
         self.manual_paused = False
         self.active_maker = None
+        self._maker_validation = {}
+        self._maker_requote_until = 0.0
+        self._margin_blocks = {}
         self._feed_stop = None
         self._control_state = None
         self.consec_errors = 0
@@ -220,7 +224,12 @@ class Engine:
                 if isinstance(result, BaseException):
                     log.error("venue cleanup failed: %s", result)
             if self._telegram_tasks:
-                await asyncio.gather(*self._telegram_tasks, return_exceptions=True)
+                # Orders have already settled. A long Telegram Retry-After
+                # must not hold the stopped trading process open indefinitely.
+                _, waiting = await asyncio.wait(self._telegram_tasks, timeout=3)
+                for task in waiting:
+                    task.cancel()
+                await asyncio.gather(*waiting, return_exceptions=True)
             try:
                 await self.telegram.close()
             except Exception:
@@ -459,46 +468,18 @@ class Engine:
         if plan.action == "maker_repair":
             primary_buy = buy is self.entropy
             net = sum(v.position for v in self.venues.values())
-            return (self.entropy.book.is_fresh(self.cfg.staleness_sec)
+            valid = (self.entropy.book.is_fresh(self.cfg.staleness_sec)
                     and self.entropy.ready_to_trade()
                     and self.entropy.key not in self._venue_down
                     and not self._position_uncertain
                     and (net < 0 if primary_buy else net > 0)
                     and (self.entropy.position < 0 if primary_buy else self.entropy.position > 0)
                     and plan.qty <= min(abs(net), abs(self.entropy.position)) + 1e-12)
-        if (not self.entropy.book.is_fresh(self.cfg.staleness_sec)
-                or not self.hedge.book.is_fresh(self.cfg.staleness_sec)
-                or not self.entropy.ready_to_trade() or not self.hedge.ready_to_trade()
-                or self._venue_limited(self.hedge) or not self._venue_rate_ok(self.hedge)
-                or self._venue_down):
-            return False
-        required_qty = plan.qty
-        hedge_depth = rh_hedge_depth(self, buy is self.entropy)
-        if hedge_depth is not None:
-            required_qty = max(0, required_qty - (self.active_maker or {}).get("hedged", 0))
-            if hedge_depth["capacity_base"] < required_qty - self._step / 2:
-                return False
-        if self.bps_strategy and plan.action == "bps_open":
-            strategy = self.bps_strategy
-            entry = strategy.locked_entry
-            if (entry is None or strategy.awaiting_levels
-                    or (self.cfg.bps_levels == 'rolling' and (strategy.window_end is None
-                        or time.time() - strategy.window_end > 120))):
-                return False
-            premium = strategy.signal()
-            if premium is None or (premium < entry if strategy.executable or not strategy.long else premium > entry):
-                return False
-            current = strategy.plan(buy, sell, quote=price)
-            return (current is not None and current.qty >= required_qty - self._step / 2
-                    and strategy.entry_check(current, buy, sell, strategy.locked_entry, strategy.locked_exit))
-        if self.bps_strategy and plan.action == "bps_close":
-            strategy = self.bps_strategy
-            if not strategy.profit_mode and not strategy.exit_reached(strategy.signal(closing=True)):
-                return False
-            current = strategy.plan(buy, sell, closing=True, quote=price)
-            return current is not None and current.qty >= required_qty - self._step / 2
-        current, _ = self._maker_plan_at(buy, sell, plan.buy_notional, price)
-        return current is not None and current.qty >= required_qty - self._step / 2
+            self._maker_validation = dict(reason=None if valid else 'repair:position-or-readiness',
+                                          net_base=net, remaining_base=plan.qty)
+            return valid
+        self._maker_validation = check_quote(self, buy, sell, plan, price)
+        return self._maker_validation['reason'] is None
 
     # -------------------------------------------------------------- strategy
 
@@ -617,6 +598,30 @@ class Engine:
         self._update_evt.set()  # freed venues may have a queued opportunity
 
     def _scan(self, now: float):
+        candidate = self._scan_candidate(now)
+        if candidate is None:
+            return None
+        buy, sell, plan = candidate
+        blocked = [v for v, sign in ((buy, 1), (sell, -1))
+                   if v.key in self._margin_blocks
+                   and plan.qty > max(0, -v.position * sign) + 1e-12]
+        if blocked:
+            reason = ' / '.join(v.name for v in blocked) + ' 保证金取消后等待可用保证金改善；减仓不受此开仓限制'
+            if self.bps_strategy:
+                self.bps_strategy.reason = reason
+            self._skiplog('[MARGIN WAIT] %s', reason)
+            for key in self._armed:
+                self._armed[key] = None
+            return None
+        if (self.cfg.primary_order_type == 'maker' and now < self._maker_requote_until
+                and (plan.action != 'bps_close' or self.cfg.primary_maker_only)):
+            self._schedule_poke(self._maker_requote_until - now)
+            if self.bps_strategy:
+                self.bps_strategy.reason = '零成交撤单后短暂等待，重新确认信号再挂单'
+            return None
+        return candidate
+
+    def _scan_candidate(self, now: float):
         """Evaluate both directions; returns the best executable
         (buy, sell, plan), or None."""
         cfg = self.cfg
@@ -662,6 +667,10 @@ class Engine:
                 self._schedule_poke(persistence - (now - armed))
                 continue
             if plan is None:
+                continue
+            if any(v.key in self._margin_blocks and plan.qty > max(0, -v.position * sign) + 1e-12
+                   for v, sign in ((buy, 1), (sell, -1))):
+                self._armed[dkey] = None
                 continue
             headroom = self._headroom(buy, sell, plan.buy_limit)
             if headroom < plan.buy_notional:
@@ -829,9 +838,7 @@ class Engine:
                 rate_limited = True
                 self._mark_limited(v)
             elif "margin" in str(info.get("status", "")).lower():
-                log.warning("[%s] margin rejection — collateral exhausted, "
-                            "pausing venue", v.name)
-                self._mark_limited(v)
+                self._mark_margin_block(v)
         sent_ok = not hard_err and not unresolved
         if sent_ok:
             self.consec_errors = 0
@@ -863,11 +870,71 @@ class Engine:
                       edge_shortfall_bps=shortfall_bps)
         trade_volume = bfill * (binfo.get("avg_px") or plan.buy_limit) \
             + sfill * (sinfo.get("avg_px") or plan.sell_limit)
-        self._notify_trade(direction, buy, sell, plan, sent_ok, bfill, sfill,
-                           binfo["status"], sinfo["status"],
-                           None if unresolved else fill_edge, trade_volume)
+        if (cfg.primary_order_type == 'maker' and not bfill and not sfill
+                and not unresolved and not hard_err):
+            self._summarize_zero_fill(binfo['status'], sinfo['status'])
+        else:
+            self._notify_trade(direction, buy, sell, plan, sent_ok, bfill, sfill,
+                               binfo["status"], sinfo["status"],
+                               None if unresolved else fill_edge, trade_volume)
         self.last_trade_ts = time.time()
         return bool(unresolved)
+
+    def _note_maker_zero_fill(self):
+        self._maker_requote_until = time.time() + self.cfg.maker_requote_delay_sec
+        self._schedule_poke(self.cfg.maker_requote_delay_sec)
+        for key in self._armed:
+            self._armed[key] = None
+
+    def _mark_margin_block(self, venue):
+        self._margin_blocks[venue.key] = dict(blocked_at=time.time(),
+            baseline_free=venue.free, baseline_equity=venue.equity, observed_at=None)
+        log.warning('[MARGIN BLOCK] %s status=MARGIN_CANCELED free=%s equity=%s position=%+.8g; '
+                    'opening blocked until a fresh balance improves; reductions remain allowed',
+                    venue.name, venue.free, venue.equity, venue.position)
+        if self.telegram.enabled:
+            text = (f'⚠️ 保证金取消 · {self.cfg.symbol} · {venue.name}\n'
+                    f'可用保证金：{venue.free} · 权益：{venue.equity}\n'
+                    '已暂缓新增风险，等待可用保证金改善后自动重评；正常减仓不受此开仓限制。')
+            task = asyncio.create_task(self.telegram.send(text), name='telegram-margin')
+            self._telegram_tasks.add(task)
+            task.add_done_callback(self._telegram_finished)
+
+    def _observe_margin_balance(self, venue, checked_at):
+        block = self._margin_blocks.get(venue.key)
+        if block is None:
+            return
+        baseline = block['baseline_free']
+        block['observed_at'] = checked_at
+        if baseline is None:
+            block['baseline_free'] = venue.free
+            return
+        if (checked_at - block['blocked_at'] >= 60 and venue.free > 0
+                and venue.free > baseline + max(1e-8, abs(baseline) * 1e-6)):
+            del self._margin_blocks[venue.key]
+            log.info('[MARGIN RECOVERED] %s fresh free collateral improved %s -> %s; re-evaluate signals',
+                     venue.name, baseline, venue.free)
+            self._update_evt.set()
+
+    def _summarize_zero_fill(self, buy_status, sell_status):
+        now = time.time()
+        if not hasattr(self, '_zero_fill_summary'):
+            self._zero_fill_summary = dict(since=now, count=0, statuses={})
+        summary = self._zero_fill_summary
+        summary['count'] += 1
+        key = f'{buy_status}/{sell_status}'
+        summary['statuses'][key] = summary['statuses'].get(key, 0) + 1
+        if now - summary['since'] < 300:
+            return
+        text = (f'📋 挂单汇总 · {self.cfg.symbol}\n最近 {now - summary["since"]:.0f} 秒：'
+                f'{summary["count"]} 批零成交，未记为完成套利\n'
+                + '；'.join(f'{key}: {count}' for key, count in summary['statuses'].items()))
+        log.info('[MAKER SUMMARY] %s', text.replace('\n', ' | '))
+        if self.telegram.enabled:
+            task = asyncio.create_task(self.telegram.send(text), name='telegram-maker-summary')
+            self._telegram_tasks.add(task)
+            task.add_done_callback(self._telegram_finished)
+        self._zero_fill_summary = dict(since=now, count=0, statuses={})
 
     def _notify_trade(self, direction, buy, sell, plan, ok, bfill, sfill,
                       buy_status, sell_status, fill_edge, trade_volume) -> None:
@@ -1302,6 +1369,7 @@ class Engine:
                     checked_at = time.time()
                     self.balance_status[v.key] = dict(state="ready", updated_at=checked_at,
                                                      checked_at=checked_at, error=None)
+                    self._observe_margin_balance(v, checked_at)
                     if previous.get("state") == "error":
                         log.info("[%s] equity poll recovered", v.name)
                 except asyncio.CancelledError:
