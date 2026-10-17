@@ -279,6 +279,12 @@ def test_account_api_is_authenticated_and_validates_mutations(tmp_path):
             result = await (await client.get("/api/account-monitor/lighter/123")).json()
             assert result["account"]["watched"] == 1
             assert result["fills"] == []
+            address = "0x" + "1" * 40
+            local_address = await client.get("/api/account-address/" + address)
+            assert local_address.status == 200
+            assert (await local_address.json())["matched_groups"] == 0
+            assert (await client.get("/api/account-address/not-an-address")).status == 400
+            assert (await client.post("/api/account-address/" + address + "/refresh")).status == 403
             assert (await client.post("/api/account-monitor/lighter/123/refresh", json={}, headers=headers)).status == 400
             for url in ("/api/account-monitor?period=100", "/api/account-monitor?page=0", "/api/account-monitor/arcus/123", "/api/account-monitor/lighter/-1"):
                 assert (await client.get(url)).status == 400

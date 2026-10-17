@@ -14,6 +14,7 @@ import re
 import sqlite3
 import threading
 import time
+from bisect import bisect_left, bisect_right
 from collections import defaultdict, deque
 from contextlib import closing
 from pathlib import Path
@@ -21,10 +22,17 @@ from pathlib import Path
 import aiohttp
 
 from .config import LIGHTER_PROFILES
+from .account_analysis import analyse_strategy, pair_phase, reconstruct_cycles
 
 VENUES = ("lighter-rh", "lighter")
 LABELS = {"lighter-rh": "RH", "lighter": "Lighter"}
 ADDRESS = re.compile(r"0x[0-9a-fA-F]{40}\Z")
+
+
+def wallet_address(value):
+    if not isinstance(value, str) or not ADDRESS.fullmatch(value.strip()) or not int(value.strip(), 16):
+        raise ValueError("请输入非零的 0x 开头、40 位十六进制钱包地址")
+    return value.strip().lower()
 
 
 def finite(value):
@@ -81,6 +89,7 @@ class AccountStore:
     def __init__(self, path: Path):
         self.path = path
         self.lock = threading.RLock()
+        self.evidence_cache = {}
         self.db = sqlite3.connect(str(path), check_same_thread=False, timeout=5)
         self.db.row_factory = sqlite3.Row
         self.db.executescript("""
@@ -93,6 +102,9 @@ class AccountStore:
                 attempted REAL NOT NULL DEFAULT 0, error TEXT,
                 snapshot TEXT, PRIMARY KEY(venue,id));
             CREATE INDEX IF NOT EXISTS account_address ON accounts(address);
+            CREATE TABLE IF NOT EXISTS address_checks (
+                venue TEXT NOT NULL,address TEXT NOT NULL,checked REAL NOT NULL,
+                complete INTEGER NOT NULL,error TEXT,PRIMARY KEY(venue,address));
             CREATE TABLE IF NOT EXISTS trades (
                 venue TEXT NOT NULL, market INTEGER NOT NULL, id TEXT NOT NULL,
                 symbol TEXT NOT NULL, ts REAL NOT NULL, received REAL NOT NULL,
@@ -165,6 +177,17 @@ class AccountStore:
             self.db.execute("INSERT OR IGNORE INTO accounts(venue,id) VALUES (?,?)", (venue, aid))
             self.db.execute("UPDATE accounts SET address=? WHERE venue=? AND id=?", (address, venue, aid))
 
+    def directory_check(self, venue, address, *, complete=False, error=None):
+        with self.lock, self.db:
+            self.db.execute("INSERT OR REPLACE INTO address_checks VALUES (?,?,?,?,?)",
+                            (venue, address, time.time(), int(complete), str(error)[:300] if error else None))
+            self.evidence_cache.clear()
+
+    def checked_address(self, venue, address):
+        with closing(self.reader()) as db:
+            row = db.execute("SELECT * FROM address_checks WHERE venue=? AND address=?", (venue, address)).fetchone()
+            return dict(row) if row else None
+
     def reader(self):
         db = sqlite3.connect(str(self.path), timeout=5)
         db.row_factory = sqlite3.Row
@@ -173,9 +196,12 @@ class AccountStore:
 
     def next_account(self, venue):
         with self.lock:
-            row = self.db.execute("""SELECT id FROM accounts WHERE venue=? AND attempted<?
-                AND (watched=1 OR fetched=0) ORDER BY watched DESC,attempted,id LIMIT 1""",
-                                  (venue, time.time() - 120)).fetchone()
+            row = self.db.execute("""SELECT a.id FROM accounts a WHERE a.venue=? AND a.attempted<?
+                AND (a.watched=1 OR a.fetched=0 OR (a.address IS NOT NULL AND NOT EXISTS
+                    (SELECT 1 FROM address_checks c WHERE c.address=a.address AND c.venue!=a.venue
+                     AND c.error IS NULL AND c.checked>?)))
+                ORDER BY a.watched DESC,a.attempted,a.id LIMIT 1""",
+                                  (venue, time.time() - 120, time.time() - 3600)).fetchone()
             return row[0] if row else None
 
     def overview(self, since, venue="all", search="", page=1):
@@ -206,11 +232,75 @@ class AccountStore:
             total = db.execute("SELECT COUNT(*) FROM (" + query + ")", params).fetchone()[0]
             rows = [dict(r) for r in db.execute(query + " ORDER BY volume DESC,f.venue,f.account LIMIT 50 OFFSET ?",
                                                     params + [(page - 1) * 50])]
+            for row in rows:
+                row["hedge"] = self.account_evidence(db, row, since)
             summary["accounts"] = db.execute("SELECT COUNT(*) FROM accounts").fetchone()[0]
             events = [dict(r) for r in db.execute("SELECT * FROM events ORDER BY id DESC LIMIT 20")]
             watches = [dict(r) for r in db.execute("SELECT venue,id FROM accounts WHERE watched=1 ORDER BY venue,id")]
             summary["gaps"] = db.execute("SELECT COUNT(*) FROM events WHERE kind IN ('gap','overflow','invalid')").fetchone()[0]
             return dict(summary=summary, accounts=rows, total=total, page=page, events=events, watches=watches)
+
+    def account_evidence(self, db, account, since):
+        """Short-lived sample summary, never a claim of an owner's true strategy."""
+        address, venue, aid = account["address"], account["venue"], account["id"]
+        result = dict(code="address_pending", label="待查询地址", reason="公开地址尚未查询，不能判断对冲", matched_groups=0, peers=[], checked_at=time.time())
+        if not address:
+            if account["fetched"]:
+                result.update(code="address_unknown", label="地址不可关联", reason="公开信息未提供可关联地址，无法核验另一平台")
+            return result
+        key = venue, aid, address, int(since // 60)
+        cached = self.evidence_cache.get(key)
+        if cached and time.time() - cached["checked_at"] < 15:
+            return cached
+        peers = [dict(r) for r in db.execute("SELECT venue,id FROM accounts WHERE address=? AND venue!=?", (address, venue))]
+        result["peers"] = peers
+        if not peers:
+            check = db.execute("SELECT * FROM address_checks WHERE address=? AND venue!=?", (address, venue)).fetchone()
+            if check and not check["error"] and check["complete"]:
+                result.update(code="no_peer", label="未查到同地址对边", reason="已查询公开地址目录；不排除使用不同钱包或其他平台对冲")
+            elif check and check["error"]:
+                result.update(code="lookup_failed", label="对边查询失败", reason=check["error"])
+            else:
+                result.update(code="lookup_pending", label="待核验对边", reason="尚未完成另一平台地址查询；打开详情会自动查询")
+        else:
+            own = [dict(r) for r in db.execute("SELECT * FROM fills WHERE venue=? AND account=? AND ts>=? ORDER BY ts DESC LIMIT 2000", (venue, aid, since))]
+            other = [dict(r) for r in db.execute("SELECT f.* FROM fills f JOIN accounts a ON a.venue=f.venue AND a.id=f.account WHERE a.address=? AND f.venue!=? AND f.ts>=? ORDER BY f.ts DESC LIMIT 2000", (address, venue, since))]
+            matches = hedge_matches(own, other, limit=None)
+            result.update(matched_groups=len(matches), own_sample=len(own), peer_sample=len(other))
+            if matches:
+                result.update(code="matched", label=f"疑似对冲 {len(matches)} 组", reason="同地址样本中已找到 3 秒内、数量相差不超过 5% 的双边反向成交")
+            elif not other:
+                result.update(code="peer_no_trades", label="对边尚无成交数据", reason="已关联对边账户，但所选窗口未采集到对边成交；不是没有对冲的证明")
+            else:
+                result.update(code="unmatched", label="双边有成交，未匹配", reason=f"本账户最近 {len(own)} 笔、对边最近 {len(other)} 笔，未满足同币种反向、3 秒、5% 条件")
+        if len(self.evidence_cache) >= 1000:
+            self.evidence_cache.clear()
+        self.evidence_cache[key] = result
+        return result
+
+    def address_detail(self, address, since):
+        address = wallet_address(address)
+        with closing(self.reader()) as db:
+            accounts = [dict(r) for r in db.execute("SELECT venue,id,fetched FROM accounts WHERE address=? ORDER BY venue,id", (address,))]
+            checks = [dict(r) for r in db.execute("SELECT * FROM address_checks WHERE address=?", (address,))]
+            samples, stats = {}, {}
+            for venue in VENUES:
+                params = address, venue, since
+                where = "FROM fills f JOIN accounts a ON a.venue=f.venue AND a.id=f.account WHERE a.address=? AND f.venue=? AND f.ts>=?"
+                stats[venue] = dict(db.execute("SELECT COUNT(*) trades,COALESCE(SUM(f.usd),0) volume,MIN(f.ts) first_trade,MAX(f.ts) last_trade " + where, params).fetchone())
+                samples[venue] = [dict(r) for r in db.execute("SELECT f.* " + where + " ORDER BY f.ts DESC LIMIT 2001", params)][:2000]
+            matches = hedge_matches(samples[VENUES[0]], samples[VENUES[1]], limit=None)
+            boundaries = [r[0] for r in db.execute("SELECT ts FROM events WHERE ts>=? AND kind IN ('gap','overflow','invalid','start','stop')", (since,))]
+            fills = samples[VENUES[0]] + samples[VENUES[1]]
+            cycles, incomplete = reconstruct_cycles(matches, fills, boundaries)
+            paired = {(l["venue"], l["account"], l["market"], l["id"], l["side"]) for p in matches for l in p["legs"]}
+            unmatched = [trade_detail(l) for l in sorted(fills, key=lambda l: l["ts"], reverse=True)
+                         if (l["venue"], l["account"], l["market"], l["id"], l["side"]) not in paired]
+            return dict(address=address, accounts=accounts, checks=checks, stats=stats,
+                        matched_groups=len(matches), complete_cycles=len(cycles), cycles=cycles[:50],
+                        matches=matches[:50], incomplete=incomplete[:20], unmatched=unmatched[:100],
+                        unmatched_count=len(unmatched), strategy=analyse_strategy(cycles, matches),
+                        truncated=any(stats[v]["trades"] > 2000 for v in VENUES), checked_at=time.time())
 
     def detail(self, venue, aid, since):
         with closing(self.reader()) as db:
@@ -242,7 +332,8 @@ class AccountStore:
                         peers=peers, patterns=patterns(fills), cycles=observed_cycles(fills, boundaries),
                         matches=hedge_matches(fills, peer_fills[:2000]),
                         peer_fills=[trade_detail(r) for r in peer_fills[:100]],
-                        peer_analysis_fills=min(len(peer_fills), 2000), peer_truncated=len(peer_fills) > 2000)
+                        peer_analysis_fills=min(len(peer_fills), 2000), peer_truncated=len(peer_fills) > 2000,
+                        hedge=self.account_evidence(db, account, since))
 
     def close(self):
         with self.lock:
@@ -327,24 +418,33 @@ def trade_detail(row):
     return result
 
 
-def hedge_matches(fills, peer_fills, seconds=3.0):
+def hedge_matches(fills, peer_fills, seconds=3.0, limit=50):
     """Greedy, one-to-one candidates among same-address opposite-venue fills.
 
     Excludes liquidation and matches only comparable base quantities; split
     fills and different-wallet hedges may remain unmatched rather than guessed.
     """
-    candidates, used = [], set()
+    candidates, used, pools = [], set(), defaultdict(list)
+    for index, peer in enumerate(peer_fills):
+        if peer["kind"] == "trade":
+            pools[(peer["symbol"], peer["side"])].append((peer["ts"], index, peer))
+    for pool in pools.values():
+        pool.sort(key=lambda value: (value[0], value[1]))
+    times = {key: [item[0] for item in pool] for key, pool in pools.items()}
     for row in sorted(fills, key=lambda r: r["ts"], reverse=True):
         if row["kind"] != "trade":
             continue
-        options = [p for p in peer_fills
+        key = row["symbol"], -row["side"]
+        pool, ticks = pools.get(key, []), times.get(key, [])
+        nearby = pool[bisect_left(ticks, row["ts"] - seconds):bisect_right(ticks, row["ts"] + seconds)]
+        options = [(index, p) for _, index, p in nearby
                    if (p["venue"], p["market"], p["id"], p["account"]) not in used
                    and p["symbol"] == row["symbol"] and p["side"] == -row["side"]
                    and p["kind"] == "trade" and abs(p["ts"] - row["ts"]) <= seconds
                    and abs(p["size"] - row["size"]) / max(p["size"], row["size"]) <= .05]
         if not options:
             continue
-        peer = min(options, key=lambda p: abs(p["ts"] - row["ts"]))
+        _, peer = min(options, key=lambda value: (abs(value[1]["ts"] - row["ts"]), value[0]))
         used.add((peer["venue"], peer["market"], peer["id"], peer["account"]))
         rh, core = (row, peer) if row["venue"] == "lighter-rh" else (peer, row)
         candidates.append(dict(symbol=row["symbol"], ts=row["ts"], account=row["account"],
@@ -354,7 +454,10 @@ def hedge_matches(fills, peer_fills, seconds=3.0):
                                quote_bps=row["bps"], fill_bps=(rh["price"] / core["price"] - 1) * 1e4,
                                total_volume=row["usd"] + peer["usd"],
                                legs=[trade_detail(row), trade_detail(peer)]))
-    return candidates[:50]
+        candidates[-1]["phase"] = pair_phase(candidates[-1])
+        if limit is not None and len(candidates) >= limit:
+            break
+    return candidates
 
 
 class AccountMonitor:
@@ -380,18 +483,26 @@ class AccountMonitor:
         self.config = {"symbols": "BTC,ETH", "recent": False}
         self.backfill = {"done": 0, "total": 0}
 
-    async def request(self, venue, path, **params):
+    async def request(self, venue, path, *, _session=None, **params):
         if path not in ("orderBooks", "account", "accountsByL1Address", "recentTrades"):
             raise ValueError("不是允许的公开查询接口")
         async with self.http_locks[venue]:
             await asyncio.sleep(max(0, self.http_next[venue] - time.monotonic()))
             self.http_next[venue] = time.monotonic() + 4
             url = LIGHTER_PROFILES[venue].api_url + "/api/v1/" + path
-            async with self.session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=12)) as response:
+            async with (_session or self.session).get(url, params=params, timeout=aiohttp.ClientTimeout(total=12)) as response:
                 if response.status in (429, 405):
                     self.http_next[venue] = time.monotonic() + 60
+                try:
+                    data = await response.json()
+                except (aiohttp.ContentTypeError, ValueError):
+                    response.raise_for_status()
+                    raise
+                # Both deployments use HTTP 400/code 21100 for an absent address.
+                # Treat only this exact directory response as a confirmed empty lookup.
+                if path == "accountsByL1Address" and response.status == 400 and data.get("code") == 21100:
+                    return {"code": 200, "sub_accounts": []}
                 response.raise_for_status()
-                data = await response.json()
                 if data.get("code", 200) != 200:
                     if data.get("code") == 23000:
                         self.http_next[venue] = time.monotonic() + 60
@@ -655,13 +766,37 @@ class AccountMonitor:
         address = str(row.get("l1_address", "")).lower()
         if link and ADDRESS.fullmatch(address) and int(address, 16):
             peer_venue = VENUES[1] if venue == VENUES[0] else VENUES[0]
-            peers = await self.request(peer_venue, "accountsByL1Address", l1_address=address)
+            await self.resolve_address(peer_venue, address)
+
+    async def resolve_address(self, venue, address, *, session=None, force=False):
+        address = wallet_address(address)
+        previous = await asyncio.to_thread(self.store.checked_address, venue, address)
+        if previous and not force and time.time() - previous["checked"] < (60 if previous["error"] else 600):
+            return
+        try:
+            peers = await self.request(venue, "accountsByL1Address", l1_address=address, _session=session)
+            if "sub_accounts" not in peers or not isinstance(peers["sub_accounts"], list):
+                raise ValueError("公开账户目录响应格式异常，无法判断是否存在账户")
             for peer in peers.get("sub_accounts") or []:
                 try:
                     peer_id = account_id(peer.get("index", peer.get("account_index")))
                 except ValueError:
                     continue
-                await asyncio.to_thread(self.store.link_account, peer_venue, peer_id, address)
+                await asyncio.to_thread(self.store.link_account, venue, peer_id, address)
+            complete = not bool(peers.get("next_cursor"))
+            await asyncio.to_thread(self.store.directory_check, venue, address, complete=complete)
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            await asyncio.to_thread(self.store.directory_check, venue, address, error=str(error) or type(error).__name__)
+            raise
+
+    async def lookup_address(self, address):
+        address = wallet_address(address)
+        # Address analysis is available even while continuous collection is stopped.
+        async with aiohttp.ClientSession(trust_env=True, timeout=aiohttp.ClientTimeout(total=15, sock_connect=8)) as session:
+            await asyncio.gather(*(self.resolve_address(v, address, session=session, force=True) for v in VENUES), return_exceptions=True)
+        return address
 
     async def _enrich(self):
         while self.running:
@@ -670,7 +805,7 @@ class AccountMonitor:
                 if aid is None:
                     continue
                 try:
-                    await self.fetch_account(venue, aid, link=False)
+                    await self.fetch_account(venue, aid, link=True)
                     self.errors.pop("account/" + venue, None)
                 except asyncio.CancelledError:
                     raise

@@ -7,7 +7,7 @@
   <title>DEX 套利 · Entropy Console</title>
   <link rel="stylesheet" href="/assets/style.css">
   <script src="/assets/app.js?v=20261017-accounts" defer></script>
-  <script src="/assets/accounts.js?v=20261017-hedge-trades" defer></script>
+  <script src="/assets/accounts.js?v=20261017-wallet-analysis" defer></script>
 </head>
 <body>
   <div id="login-view" class="login-view" hidden>
@@ -55,6 +55,11 @@
         </section>
         <section id="accounts-page" hidden>
           <div class="page-heading"><div><div class="eyebrow">PUBLIC ACCOUNT OBSERVATORY</div><h1>账户监控<span class="heading-dot">.</span></h1><p>发现 RH 与 Lighter 活跃账户，观察成交习惯与疑似跨平台对冲。</p></div><span id="accounts-status" class="badge">未启动</span></div>
+          <section class="panel wallet-query" id="wallet-query-panel"><div class="panel-heading"><div><h2>按钱包地址对比 RH / 主网开平仓</h2><p>先看两边何时开仓、何时平仓，再根据完整往返分析交易特征。</p></div></div>
+            <form id="wallet-query-form" class="account-toolbar"><label class="wallet-input-label">钱包地址<input id="wallet-address" placeholder="0x 开头的完整钱包地址" pattern="0x[0-9a-fA-F]{40}" maxlength="42" required></label><label>分析窗口<select id="wallet-period"><option value="1h">近 1 小时</option><option value="24h" selected>近 24 小时</option><option value="7d">近 7 天</option><option value="all">全部已采集</option></select></label><button id="wallet-query-submit" class="button primary" type="submit">查询地址并分析</button></form>
+            <p class="account-note">自动查询此地址在两边的账户，复用本地已采集成交。公开接口无法保证补回完整账户历史；没有对应记录时会说明缺少什么，不把单边成交当成对冲。</p><p id="wallet-query-error" class="form-error" role="alert"></p>
+          </section>
+          <section id="wallet-result" class="panel wallet-result" hidden></section>
           <section class="panel account-controls"><div class="panel-heading"><div><h2>公开数据采集</h2><p>无需交易密钥 · 只观察已采集数据 · 关闭网页继续采集，重启控制台恢复已启用的监控</p></div></div>
             <form id="accounts-start-form" class="account-toolbar"><label>监控币种<input id="accounts-symbols" value="BTC,ETH" placeholder="BTC,ETH 或 *" maxlength="4000" required></label><label class="account-checkbox"><input id="accounts-recent" type="checkbox"> 补充每市场最近最多 100 笔成交</label><button id="accounts-start" class="button primary" type="submit">启动 / 更换币种</button><button id="accounts-stop" class="button secondary" type="button" disabled>停止采集</button></form>
             <p class="account-note">* 表示两边全部活跃永续市场；逐步订阅，上市变化需重新启动采集。bps =（RH 中间价 ÷ Lighter 中间价 − 1）× 10,000；只使用成交前 3 秒内两边已收到的报价，缺失显示 —。USDG / USDC 未做汇率换算。公开查询与实盘可能共享 IP 限额。</p>
@@ -64,7 +69,7 @@
           <section class="panel account-ranking"><div class="panel-heading"><div><h2>活跃账户榜</h2><p>账户买卖均计成交额；同一市场撮合成交额仅计一次。非完整注册账户名单，未采集历史不会补成零。</p></div></div>
             <div class="account-toolbar"><label>统计范围<select id="accounts-period"><option value="1h">近 1 小时</option><option value="24h" selected>近 24 小时</option><option value="7d">近 7 天</option><option value="all">全部已采集</option></select></label><label>平台<select id="accounts-venue"><option value="all">两边</option><option value="lighter-rh">RH</option><option value="lighter">Lighter</option></select></label><label>搜索编号 / 地址<input id="accounts-search" maxlength="80" placeholder="账户编号或 0x 地址"></label></div>
             <div id="accounts-watches" class="account-watches"></div>
-            <div class="table-scroll"><table class="task-table account-table"><thead><tr><th>平台 / 账户</th><th>公开地址</th><th>成交额</th><th>成交笔数</th><th>平均单笔</th><th>Maker 金额占比</th><th>币种数</th><th>最近成交</th><th>操作</th></tr></thead><tbody id="accounts-rows"><tr><td colspan="9" class="table-empty">启动采集后发现活跃账户，也可直接关注已知编号。</td></tr></tbody></table></div>
+            <div class="table-scroll"><table class="task-table account-table"><thead><tr><th>平台 / 账户</th><th>对冲识别 / 对边</th><th>公开地址</th><th>成交额</th><th>成交笔数</th><th>平均单笔</th><th>Maker 金额占比</th><th>币种数</th><th>最近成交</th><th>操作</th></tr></thead><tbody id="accounts-rows"><tr><td colspan="10" class="table-empty">启动采集后发现活跃账户，也可直接关注已知编号。</td></tr></tbody></table></div>
             <div class="account-toolbar"><button id="accounts-prev" class="button secondary small">上一页</button><span id="accounts-pagination">第 1 页</span><button id="accounts-next" class="button secondary small">下一页</button></div>
             <form id="accounts-watch-form" class="account-toolbar"><label>关注指定账户<select id="accounts-watch-venue"><option value="lighter-rh">RH</option><option value="lighter">Lighter</option></select></label><label>账户编号<input id="accounts-watch-id" inputmode="numeric" pattern="[0-9]{1,16}" placeholder="Account index" required></label><button class="button secondary" type="submit">添加关注并查看</button></form>
           </section>

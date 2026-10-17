@@ -30,7 +30,7 @@ from dotenv import dotenv_values
 
 from .config import ConfigError, HEDGE_VENUES, PRIMARY_VENUES, _SCHEMA, _validate, load_config
 from .market_monitor import MonitorRules, MultiVenueMonitor, discover_candidates
-from .account_monitor import AccountMonitor, VENUES as ACCOUNT_VENUES, account_id
+from .account_monitor import AccountMonitor, VENUES as ACCOUNT_VENUES, account_id, wallet_address
 from .privacy import PrivateLogCapture
 from .run_logs import reset_run_log
 from .thresholds import (ThresholdDataError, ThresholdSuggestion, daily_window,
@@ -1405,6 +1405,18 @@ def create_app(manager: TaskManager, password: str, secure_cookie=False):
         result["status"] = manager.account_monitor.status()
         return web.json_response(result)
 
+    async def address_analysis(request):
+        try:
+            address = wallet_address(request.match_info["address"])
+        except ValueError as error:
+            raise ConsoleError(str(error))
+        since, *_ = account_query(request)
+        if request.method == "POST":
+            await manager.account_monitor.lookup_address(address)
+        result = await asyncio.to_thread(manager.account_monitor.store.address_detail, address, since)
+        result["collecting"] = manager.account_monitor.running
+        return web.json_response(result)
+
     async def account_start(request):
         try:
             return web.json_response(await manager.account_monitor.start(await body(request)))
@@ -1505,6 +1517,8 @@ def create_app(manager: TaskManager, password: str, secure_cookie=False):
     app.router.add_post("/api/market-monitor/start", market_monitor_start)
     app.router.add_post("/api/market-monitor/stop", market_monitor_stop)
     app.router.add_get("/api/account-monitor", account_overview)
+    app.router.add_get("/api/account-address/{address}", address_analysis)
+    app.router.add_post("/api/account-address/{address}/refresh", address_analysis)
     app.router.add_post("/api/account-monitor/start", account_start)
     app.router.add_post("/api/account-monitor/stop", account_stop)
     app.router.add_get("/api/account-monitor/{venue}/{account}", account_detail)

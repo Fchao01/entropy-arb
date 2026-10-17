@@ -57,6 +57,28 @@ assert.match(paired, /9007199254740995/);
 assert.match(paired, /08:00:10\.345/);
 assert.match(paired, /data-account-open="42" data-venue="lighter-rh"/);
 assert.match(paired, /<strong>Lighter · 99<\/strong><small>本账户/);
+vm.runInContext(`renderWalletAnalysis({address:'0x1111111111111111111111111111111111111111',
+  collecting:true, checks:[{venue:'lighter-rh',complete:1},{venue:'lighter',complete:1}],
+  accounts:[{venue:'lighter-rh',id:42},{venue:'lighter',id:99}],stats:{
+  'lighter-rh':{trades:2,volume:200},lighter:{trades:2,volume:202}},matched_groups:2,complete_cycles:1,
+  cycles:[{symbol:'BTC',direction:'RH 多 / 主网空',started_at:10,ended_at:20,hold_sec:10,
+  sequence:[{phase:'开仓',symbol:'BTC',fill_bps:-100,legs:[
+    {venue:'lighter-rh',account:42,ts:10,price:99,size:1,usd:99,side:1,maker:1,position_action:'开多',symbol:'BTC',id:'1'},
+    {venue:'lighter',account:99,ts:10.1,price:100,size:1,usd:100,side:-1,maker:0,position_action:'开空',symbol:'BTC',id:'2'}]},
+  {phase:'平仓',symbol:'BTC',fill_bps:0,legs:[
+    {venue:'lighter-rh',account:42,ts:20,price:100,size:1,usd:100,side:-1,maker:1,position_action:'平多',symbol:'BTC',id:'3'},
+    {venue:'lighter',account:99,ts:20.1,price:100,size:1,usd:100,side:1,maker:0,position_action:'平空',symbol:'BTC',id:'4'}]}]}],
+  strategy:{findings:['仅根据观察样本判断，不是策略代码']},matches:[],incomplete:[],unmatched:[],unmatched_count:0});`, context);
+const wallet = element('wallet-result').innerHTML;
+assert.match(wallet, /开仓对比/);
+assert.match(wallet, /平仓对比/);
+assert.match(wallet, /RH · 42/);
+assert.match(wallet, /Lighter 主网 · 99/);
+assert.match(wallet, /开多/);
+assert.match(wallet, /平空/);
+assert.match(wallet, /99\.00000000/);
+assert.match(wallet, /仅根据观察样本判断/);
+assert.equal(element('wallet-result').hidden, false);
 vm.runInContext(`renderAccounts({status: {running: false, connections: {}, config: {symbols: 'BTC'},
   errors: {}, markets: {}, queue_size: 0}, summary: {accounts: 2, trades: 1, market_volume: 100,
   gaps: 0}, total: 2, page: 1, events: [], accounts: [{venue: 'lighter-rh', id: 0,
