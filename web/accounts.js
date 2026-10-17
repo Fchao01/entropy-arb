@@ -8,6 +8,17 @@ const accountParams = () => new URLSearchParams({period: element("accounts-perio
   venue: element("accounts-venue").value, search: element("accounts-search").value.trim(), page: accountState.page});
 const accountPath = (venue, id) => `/api/account-monitor/${encodeURIComponent(venue)}/${encodeURIComponent(id)}`;
 const accountTable = (head, rows, empty) => `<div class="table-scroll"><table class="task-table account-table"><thead><tr>${head.map((h) => `<th>${escapeHtml(h)}</th>`).join("")}</tr></thead><tbody>${rows.length ? rows.join("") : `<tr><td colspan="${head.length}" class="table-empty">${escapeHtml(empty)}</td></tr>`}</tbody></table></div>`;
+const accountTradeTime = (ts) => ts == null || !Number.isFinite(Number(ts)) ? "—" : new Date(Number(ts) * 1000).toLocaleString("zh-CN", {timeZone: "Asia/Shanghai", hour12: false, year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit", fractionalSecondDigits: 3});
+
+function hedgeLegRow(leg, selected) {
+  const own = leg.venue === selected.venue && String(leg.account) === String(selected.id);
+  const identity = `${accountVenue(leg.venue)} · ${escapeHtml(leg.account)}`;
+  return `<tr class="account-hedge-leg"><td>${own ? `<strong>${identity}</strong><small>本账户</small>` : `<button class="text-button" data-account-open="${escapeHtml(leg.account)}" data-venue="${escapeHtml(leg.venue)}">${identity}</button><small>关联对边</small>`}</td>
+    <td>${escapeHtml(leg.symbol)}<small>${escapeHtml(leg.position_action || "开平未知")}</small></td><td>${accountTradeTime(leg.ts)}</td>
+    <td class="${leg.side === 1 ? "positive" : "negative"}">${leg.side === 1 ? "买入" : "卖出"}<small>${leg.maker ? "Maker · 挂单成交" : "Taker · 吃单成交"}</small></td>
+    <td class="number">${number(leg.price, 8)}</td><td class="number">${number(leg.size, 8)}</td><td class="number">${money(leg.usd, 4)}</td>
+    <td><span class="account-fill-id" title="${escapeHtml(leg.id)}">${escapeHtml(leg.id)}</span><small>市场 ${escapeHtml(leg.market)} · ${escapeHtml(leg.kind)}</small></td></tr>`;
+}
 
 function renderAccounts(result) {
   const s = result.status;
@@ -64,7 +75,9 @@ function renderAccountDetail(result) {
   const positions = Array.isArray(snapshot.positions) ? snapshot.positions : Object.values(snapshot.positions || {});
   const patterns = result.patterns.map((p) => `<p><b>${escapeHtml(p.label)}</b> · ${escapeHtml(p.evidence)}</p>`).join("");
   const peers = result.peers.map((p) => `<button class="button secondary small" data-account-open="${p.id}" data-venue="${p.venue}">${accountVenue(p.venue)} · ${p.id}</button>`).join("");
-  const matches = result.matches.map((m) => `<tr><td>${windowTime(m.ts)}</td><td>${escapeHtml(m.symbol)}</td><td>${m.side === 1 ? "本账户买入 / 对边卖出" : "本账户卖出 / 对边买入"}</td><td>${number(m.size, 8)} / ${number(m.peer_size, 8)}</td><td>${escapeHtml(m.peer_account)}</td><td>${signed(m.delay_ms, 0)}</td><td>${signed(m.quote_bps, 3)}</td><td>${signed(m.fill_bps, 3)}</td></tr>`);
+  const legHeaders = ["平台 / 账户", "币种 / 仓位变化", "成交时间（上海）", "方向 / 成交方式", "实际成交价", "实际成交数量", "实际成交额", "成交编号 / 市场"];
+  const matches = result.matches.map((m, i) => `<tr class="account-hedge-group"><td colspan="8"><strong>第 ${i + 1} 组 · ${escapeHtml(m.symbol)}</strong><span>两边成交额 ${money(m.total_volume, 4)}</span><span>对边时间差 ${signed(m.delay_ms, 0)} ms</span><span>中间价 ${signed(m.quote_bps, 3)} bps</span><span>双边成交价 ${signed(m.fill_bps, 3)} bps</span></td></tr>${(m.legs || []).map((leg) => hedgeLegRow(leg, a)).join("")}`);
+  const peerTrades = (result.peer_fills || []).map((leg) => hedgeLegRow(leg, a));
   const cycles = result.cycles.map((c) => `<tr><td>${escapeHtml(c.symbol)}</td><td>${windowTime(c.started_at)}</td><td>${windowTime(c.ended_at)}</td><td>${number(c.hold_sec, 1)}</td><td>${c.count}</td><td>${signed(c.entry_bps, 3)} / ${signed(c.exit_bps, 3)}</td><td>${money(c.cash, 4)}</td></tr>`);
   const fills = result.fills.map((f) => `<tr><td>${windowTime(f.ts)}</td><td>${escapeHtml(f.symbol)}</td><td>${f.side === 1 ? "买" : "卖"} · ${f.maker ? "Maker" : "Taker"}</td><td>${number(f.price, 8)}</td><td>${number(f.size, 8)}</td><td>${money(f.usd)}</td><td>${signed(f.bps, 3)}</td><td>${escapeHtml(f.kind)}</td></tr>`);
   element("account-detail-body").innerHTML = `<div class="account-note">${escapeHtml(a.error || "当前仓位是快照，成交筛选窗口不会改变仓位快照。余额、盈亏字段以交易所公开口径为准。")}</div>
@@ -72,7 +85,9 @@ function renderAccountDetail(result) {
     <div class="account-note"><b>成交行为观察</b>${patterns || "<p>样本不足，或未达到行为标签条件。</p>"}标签不能证明策略或盈利，未成交订单和撤单历史不在公开成交统计内。</div>
     <h3 class="account-subheading">同地址关联账户</h3><div class="account-note account-watches">${peers || "尚无已确认的同地址对边账户，点击上方“查询最新仓位与关联”。"}</div>
     <h3 class="account-subheading">疑似跨平台对冲成交</h3><p class="account-note">同地址、同币种、方向相反、时间相差 ≤ 3 秒且基础数量相差 ≤ 5%，一对一匹配。对边也只取所选窗口最近 2,000 笔${result.peer_truncated ? "（已截取）" : ""}，匹配显示最近 50 组。时间差为对边减本账户；成交溢价按两笔实际价格计算，非同时报价或净利润。拆单、不同钱包和缺口可能漏配，偶合也可能误配。</p>
-    ${accountTable(["时间", "币种", "方向", "两边数量", "对边账户", "时间差 ms", "当时中间价 bps", "双边成交价 bps"], matches, "当前样本没有符合条件的同地址反向成交")}
+    ${accountTable(legHeaders, matches, "当前样本没有符合条件的同地址反向成交")}
+    <h3 class="account-subheading">关联对边最近成交（含未匹配）</h3><p class="account-note">显示同地址另一平台在所选窗口内已采集的最近 100 笔成交，未满足匹配条件的记录也保留。开多、平空等标记按公开成交前仓位推算，未知时标为开平未知。这里的成交额和价差不是净利润，未确认手续费和资金费不填为 0。</p>
+    ${accountTable(legHeaders, peerTrades, result.peers.length ? "已关联对边账户，但所选窗口内尚无本地成交数据；确认对应币种正在采集" : "尚未关联对边账户，请先查询最新仓位与关联")}
     <h3 class="account-subheading">已观察到的完整单平台往返</h3><p class="account-note">仅计交易所成交前仓位能确认从 0 开始、回到 0 且数据未出现中断的往返。成交现金差未扣手续费、资金费，不等于跨平台套利净收益。开平仓 bps 是首末成交时的 RH / Lighter 中间价溢价。</p>
     ${accountTable(["币种", "开始", "结束", "持有秒数", "成交笔数", "首末 bps", "成交现金差（未扣费）"], cycles, "还没有可以确认起止仓位的完整往返")}
     <h3 class="account-subheading">最近成交</h3>${accountTable(["时间", "币种", "方向 / 成交方式", "价格", "数量", "成交额", "当时中间价 bps", "类型"], fills, "本地尚无该账户在所选窗口内的成交")}`;

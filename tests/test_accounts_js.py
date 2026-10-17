@@ -36,6 +36,27 @@ assert.match(html, /&lt;img/);
 assert.doesNotMatch(html, /<img/);
 assert.match(html, /— \/ -1\.000/);
 assert.match(element('account-detail-source').textContent, /快照 —/);
+vm.runInContext(`renderAccountDetail({account: {venue: 'lighter', id: 99, fetched: 0},
+  fills: [], peers: [{venue:'lighter-rh', id:42}], patterns: [], cycles: [], analysis_fills: 0,
+  matches: [{symbol:'BTC', ts:10.123, total_volume:203, delay_ms:-222, quote_bps:null, fill_bps:-196,
+    legs:[{venue:'lighter', account:99, market:8, id:'9007199254740995', symbol:'BTC',
+      ts:10.345, side:-1, maker:1, price:102, size:1, usd:102, position_action:'开空', kind:'trade'},
+      {venue:'lighter-rh', account:42, market:0, id:'9007199254740993', symbol:'BTC',
+      ts:10.123, side:1, maker:0, price:100, size:1.01, usd:101, position_action:'开多',kind:'trade'}]}],
+  peer_fills:[{venue:'lighter-rh',account:42,market:0,id:'9007199254740993',symbol:'BTC',
+    ts:10.123,side:1,maker:0,price:100,size:1.01,usd:101,position_action:'开多',kind:'trade'}]});`, context);
+const paired = element('account-detail-body').innerHTML;
+assert.match(paired, /关联对边最近成交（含未匹配）/);
+assert.match(paired, /两边成交额 \$203\.0000/);
+assert.match(paired, /\$102\.0000/);
+assert.match(paired, /1\.01000000/);
+assert.match(paired, /Maker · 挂单成交/);
+assert.match(paired, /Taker · 吃单成交/);
+assert.match(paired, /9007199254740993/);
+assert.match(paired, /9007199254740995/);
+assert.match(paired, /08:00:10\.345/);
+assert.match(paired, /data-account-open="42" data-venue="lighter-rh"/);
+assert.match(paired, /<strong>Lighter · 99<\/strong><small>本账户/);
 vm.runInContext(`renderAccounts({status: {running: false, connections: {}, config: {symbols: 'BTC'},
   errors: {}, markets: {}, queue_size: 0}, summary: {accounts: 2, trades: 1, market_volume: 100,
   gaps: 0}, total: 2, page: 1, events: [], accounts: [{venue: 'lighter-rh', id: 0,

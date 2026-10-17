@@ -6,7 +6,7 @@ import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
 from entropy_arb.account_monitor import (AccountMonitor, AccountStore, account_id,
-                                       hedge_matches, observed_cycles, symbols_config, timestamp)
+                                       hedge_matches, observed_cycles, symbols_config, timestamp, trade_detail)
 from entropy_arb.web import ROOT, TaskManager, create_app
 
 
@@ -105,6 +105,9 @@ def test_same_address_peers_only_and_link_does_not_overwrite_snapshot(tmp_path):
         store.link_account("lighter", 10, addr)
         detail = store.detail("lighter-rh", 20, 0)
         assert len(detail["matches"]) == 1
+        assert detail["peer_analysis_fills"] == 1
+        assert detail["peer_fills"][0]["account"] == 10
+        assert detail["peer_fills"][0]["position_action"] == "开空"
         peer = store.detail("lighter", 10, 0)["account"]
         assert peer["snapshot"]["positions"] == [{"position": "1"}]
         store.link_account("lighter", 30, addr)
@@ -124,6 +127,57 @@ def test_cross_venue_matching_does_not_reuse_peer_or_match_wrong_size():
     assert hedge_matches(rows, [peer]) == []
     peer["size"], peer["ts"] = 1, 14
     assert hedge_matches(rows, [peer]) == []
+
+
+def test_pair_contains_both_actual_fills_when_viewed_from_either_venue():
+    own = fill("9007199254740993", 10.123, 1, 100, 0)
+    own.update(size=1.01, usd=101, maker=0)
+    peer = fill("9007199254740995", 10.345, -1, 102, 0)
+    peer.update(venue="lighter", market=8, account=99, usd=102, maker=1)
+    pair = hedge_matches([own], [peer])[0]
+    assert pair["total_volume"] == 203
+    assert pair["delay_ms"] == pytest.approx(222)
+    assert pair["legs"][0]["id"] == "9007199254740993"
+    assert pair["legs"][0]["size"] == 1.01
+    assert pair["legs"][1]["size"] == 1
+    assert pair["legs"][1]["usd"] == 102
+    assert pair["legs"][1]["price"] == 102
+    assert pair["legs"][1]["maker"] == 1
+    assert pair["legs"][0]["position_action"] == "开多"
+    assert pair["legs"][1]["position_action"] == "开空"
+    reverse = hedge_matches([peer], [own])[0]
+    assert reverse["legs"][0]["venue"] == "lighter"
+    assert reverse["fill_bps"] == pair["fill_bps"]
+    assert reverse["delay_ms"] == pytest.approx(-222)
+
+
+def test_unmatched_peer_trades_are_still_visible(tmp_path):
+    store = AccountStore(tmp_path / "accounts.db")
+    address = "0x" + "2" * 40
+    try:
+        store.ingest([trade(), trade("2", venue="lighter", ts=102, size=.5, ask_before=0)])
+        for venue, aid in (("lighter-rh", 20), ("lighter", 10)):
+            store.link_account(venue, aid, address)
+        result = store.detail("lighter-rh", 20, 0)
+        assert result["matches"] == []
+        assert len(result["peer_fills"]) == 1
+        assert result["peer_fills"][0]["size"] == .5
+        assert result["peer_fills"][0]["usd"] == 50
+        assert store.detail("lighter-rh", 20, 103)["peer_fills"] == []
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize("before,side,size,expected", [
+    (None, 1, 1, "开平未知"), (0, 1, 1, "开多"), (0, -1, 1, "开空"),
+    (1, -1, 1, "平多"), (-1, 1, 1, "平空"), (1, 1, 1, "加多"),
+    (-1, -1, 1, "加空"), (2, -1, 1, "减多"), (-2, 1, 1, "减空"),
+    (-.5, 1, 1, "平空转多"), (.5, -1, 1, "平多转空"),
+])
+def test_public_position_change_labels(before, side, size, expected):
+    row = fill(1, 10, side, 100, before)
+    row["size"] = size
+    assert trade_detail(row)["position_action"] == expected
 
 
 def test_quotes_are_asof_not_future_or_stale(tmp_path):

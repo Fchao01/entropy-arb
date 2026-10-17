@@ -37,6 +37,7 @@ body{font-size:15px}
 .account-controls .form-error{padding:0 24px;max-height:120px;overflow:auto;overflow-wrap:anywhere}
 .account-table{min-width:850px;width:100%}.account-table td{font-variant-numeric:tabular-nums}.account-table small{display:block;font-size:10px;color:var(--accent);margin-top:5px}
 .account-ranking .table-scroll{max-height:560px;overflow:auto}.account-detail .table-scroll{max-height:360px;overflow:auto}.account-table thead th{position:sticky;top:0;z-index:1;background:#fafcfb}
+.account-hedge-group td{background:#edf5f1;white-space:normal;line-height:1.9}.account-hedge-group strong{color:var(--accent);margin-right:18px}.account-hedge-group span{display:inline-block;margin-right:18px;font-size:10px}.account-fill-id{display:inline-block;max-width:170px;overflow:hidden;text-overflow:ellipsis;vertical-align:bottom}
 .account-watches{display:flex;gap:8px;flex-wrap:wrap;padding:0 24px}.account-subheading{font-size:13px;padding:20px 24px 0;margin:0 0 12px}
 .account-detail{scroll-margin-top:20px}.account-detail .account-table{font-size:11px}.account-event{display:flex;gap:14px;padding:8px 0;border-bottom:1px solid var(--line)}
 .account-event time{flex-shrink:0;font-variant-numeric:tabular-nums}.account-event b{flex-shrink:0;font-weight:500}.account-events .account-note{max-height:270px;overflow:auto}

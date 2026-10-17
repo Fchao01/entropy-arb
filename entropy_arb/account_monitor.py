@@ -240,7 +240,9 @@ class AccountStore:
                 "AND kind IN ('gap','overflow','invalid','start','stop')", (since, venue))]
             return dict(account=account, fills=fills[:100], analysis_fills=len(fills), truncated=truncated,
                         peers=peers, patterns=patterns(fills), cycles=observed_cycles(fills, boundaries),
-                        matches=hedge_matches(fills, peer_fills[:2000]), peer_truncated=len(peer_fills) > 2000)
+                        matches=hedge_matches(fills, peer_fills[:2000]),
+                        peer_fills=[trade_detail(r) for r in peer_fills[:100]],
+                        peer_analysis_fills=min(len(peer_fills), 2000), peer_truncated=len(peer_fills) > 2000)
 
     def close(self):
         with self.lock:
@@ -301,6 +303,30 @@ def observed_cycles(fills, boundaries=()):
     return sorted(complete, key=lambda r: r["ended_at"], reverse=True)[:50]
 
 
+def trade_detail(row):
+    """A confirmed public fill and its position change, without inferred fees."""
+    result = {key: row[key] for key in (
+        "venue", "account", "market", "id", "symbol", "ts", "side", "price",
+        "size", "usd", "maker", "kind", "bps", "before_position")}
+    before = row["before_position"]
+    action = "开平未知"
+    if before is not None:
+        after = before + row["side"] * row["size"]
+        tolerance = max(1e-10, row["size"] * 1e-7)
+        if abs(before) <= tolerance:
+            action = "开多" if row["side"] == 1 else "开空"
+        elif abs(after) <= tolerance:
+            action = "平多" if before > 0 else "平空"
+        elif before * after < 0:
+            action = "平空转多" if after > 0 else "平多转空"
+        elif abs(after) > abs(before):
+            action = "加多" if after > 0 else "加空"
+        else:
+            action = "减多" if before > 0 else "减空"
+    result["position_action"] = action
+    return result
+
+
 def hedge_matches(fills, peer_fills, seconds=3.0):
     """Greedy, one-to-one candidates among same-address opposite-venue fills.
 
@@ -325,7 +351,9 @@ def hedge_matches(fills, peer_fills, seconds=3.0):
                                peer_venue=peer["venue"], peer_account=peer["account"],
                                side=row["side"], size=row["size"], peer_size=peer["size"],
                                delay_ms=(peer["ts"] - row["ts"]) * 1000,
-                               quote_bps=row["bps"], fill_bps=(rh["price"] / core["price"] - 1) * 1e4))
+                               quote_bps=row["bps"], fill_bps=(rh["price"] / core["price"] - 1) * 1e4,
+                               total_volume=row["usd"] + peer["usd"],
+                               legs=[trade_detail(row), trade_detail(peer)]))
     return candidates[:50]
 
 
