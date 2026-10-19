@@ -303,7 +303,7 @@ class Engine:
             log.info('[ARCUS MAKER ONLY] 主腿开仓、平仓和余仓修正均为 Post-only；禁止 IOC 回退，退出可能等待成交')
         if self.bps_strategy:
             log.info('[BPS REPAIR POLICY] mode=auto-confirmed-residual retry_sec=%.1f dust_cap_usd=%.2f; '
-                     'verify open orders and positions before resuming',
+                     'fallback=verified-deficient-leg-top-up; verify open orders and positions before resuming',
                      RESIDUAL_RETRY_SEC, cfg.bps_max_dust_notional_usd)
             log.info('[BPS PRICE] configured_basis=%s entry_percentile=%.2f exit_percentile=%.2f; '
                      'executable compares sell bid / buy ask, both triggers >= target; existing cycles retain their saved basis',
@@ -1059,7 +1059,7 @@ class Engine:
             attempts += 1
             confirmed = await self._hedge(net)
             remaining = sum(v.position for v in self.venues.values())
-            # Only retry confirmed reductions. Unknown outcomes must
+            # Only retry confirmed repairs. Unknown outcomes must
             # never be sent twice, nor can an untradeable dust tail be enlarged.
             if not confirmed:
                 if (self.bps_strategy and not self.halted
@@ -1080,7 +1080,7 @@ class Engine:
                 strategy.finish_residual_repair()
             elif not balanced:
                 # Known zero/partial fills and temporary readiness/budget
-                # blocks are retryable. Never enlarge an unorderable tail.
+                # blocks are retryable. Never round an unorderable tail up.
                 candidates = [v for v in self.venues.values() if v.position * remaining > 0]
                 retryable = any(v.key in self._venue_down or not v.ready_to_trade()
                                 or not v.book.is_fresh(self.cfg.staleness_sec)
@@ -1088,6 +1088,12 @@ class Engine:
                                 or not self._venue_rate_ok(v)
                                 or self._reduction_order(v, remaining)[2] is None
                                 for v in candidates)
+                retryable = retryable or any(self._topup_order(v, remaining)[2] is None
+                                             for v in self.venues.values())
+                retryable = retryable or any(self._topup_direction(v, remaining)
+                                             and (self._venue_limited(v) or self._vlock(v.key).locked()
+                                                  or not self._venue_rate_ok(v))
+                                             for v in self.venues.values())
                 if retryable:
                     strategy.wait_for_residual(self.residual_block_reason(remaining))
                     return
@@ -1205,28 +1211,110 @@ class Engine:
             if reason is None:
                 return '本轮修正后仍有剩余差额'
             reasons.append(f'{venue.name}：{reason}')
+        if self.bps_strategy:
+            for venue in self.venues.values():
+                _, _, reason = self._topup_order(venue, net)
+                if reason is None:
+                    return '等待核验后补齐缺少的一腿'
+                reasons.append(f'{venue.name} 补齐：{reason}')
         return '；'.join(reasons) or '没有可用于 reduce-only 修正的同向仓位'
 
+    def _topup_direction(self, venue, net):
+        strategy = self.bps_strategy
+        if strategy is None or self.cfg.primary_maker_only and venue is self.entropy:
+            return False
+        primary_sign = 1 if strategy.long else -1
+        expected = primary_sign if venue is self.entropy else -primary_sign
+        other = self.hedge if venue is self.entropy else self.entropy
+        return (math.isfinite(net) and net * expected < 0
+                and venue.position * expected >= -1e-12
+                and other.position * -expected > 1e-12)
+
+    def _topup_order(self, venue, net):
+        """A fallback that reduces net exposure without rounding it upward.
+
+        Only add in the configured pair direction, against existing inventory
+        on the other leg. Never turn an Arcus maker-only primary into an IOC.
+        """
+        strategy, cfg = self.bps_strategy, self.cfg
+        if strategy is None:
+            return 0, None, '仅 BPS 已确认配对持仓允许补齐'
+        if self.manual_paused or self.stop is not None and self.stop.is_set():
+            return 0, None, '程序已暂停或停止'
+        if self._position_uncertain or self.active_maker is not None:
+            return 0, None, '订单或仓位尚未确认'
+        if cfg.primary_maker_only and venue is self.entropy:
+            return 0, None, 'Arcus 主腿仅挂单，不以吃单加仓补齐'
+        if any(self._reduction_order(v, net)[1] is None
+               for v in self.venues.values() if v.position * net > 0):
+            return 0, None, '优先等待多余一腿恢复减仓条件'
+        if not self._topup_direction(venue, net):
+            return 0, None, '不是策略方向内缺少的一腿'
+        # Share all connection, budget, price and limit checks with reductions.
+        _, limit, reason = self._reduction_order(venue, net)
+        if limit is None:
+            return 0, None, reason
+        ref = venue.book.best_bid() if net > 0 else venue.book.best_ask()
+        step = 10.0 ** -venue.size_decimals if hasattr(venue, 'size_decimals') else self._step
+        minimum_base = getattr(venue, 'taker_min_base', venue.min_base)
+        minimum_quote = getattr(venue, 'taker_min_quote', max(cfg.min_order_notional, venue.min_quote))
+        prices = (ref, limit, venue.book.mid())
+        if any(p is None or not math.isfinite(p) or p <= 0 for p in prices):
+            return 0, limit, '补齐报价无效'
+        cap_price = max(prices)
+        room = max(0, min(venue.cap_usd, cfg.bps_max_position_usd) / cap_price - abs(venue.position))
+        levels = venue.book.sorted_bids() if net > 0 else venue.book.sorted_asks()
+        if any(not math.isfinite(p) or not math.isfinite(q) or p <= 0 or q <= 0 for p, q in levels):
+            return 0, limit, '补齐盘口无效'
+        depth = sum(q for p, q in levels if (p >= limit if net > 0 else p <= limit))
+        qty = floor_step(min(abs(net), cfg.max_order_notional / cap_price, room, depth), step)
+        if qty <= 0 or qty < minimum_base or qty * limit < minimum_quote:
+            return 0, limit, '差额、深度或剩余仓位额度不足最小补单规模；不向上凑单'
+        if qty > abs(net) + 1e-12:
+            return 0, limit, '补齐数量超过净差额'
+        return qty, limit, None
+
     async def _hedge(self, net: float) -> bool:
-        """Reduce the venue that carries the imbalance back toward net zero
-        (reduce-only, respecting the Arcus primary maker-only policy)."""
+        """Reduce excess first; otherwise top up a verified deficient leg."""
         cfg = self.cfg
         is_sell = net > 0
         sgn = 1.0 if net > 0 else -1.0
         blockers = []
-        for v in sorted(self.venues.values(),
-                        key=lambda x: (self._venue_limited(x), -x.position * sgn)):
-            if v.position * sgn <= 0:
+        candidates = sorted(self.venues.values(),
+                            key=lambda x: (self._venue_limited(x), -x.position * sgn))
+        choices = [(v, False) for v in candidates] + [(v, True) for v in candidates]
+        for v, topup in choices:
+            if not topup and v.position * sgn <= 0:
                 continue
-            qty, limit, blocked = self._reduction_order(v, net)
+            qty, limit, blocked = (self._topup_order(v, net) if topup else self._reduction_order(v, net))
             if blocked:
-                blockers.append(f'{v.name}：{blocked}')
+                if not topup or self.bps_strategy:
+                    blockers.append(f'{v.name}{" 补齐" if topup else ""}：{blocked}')
                 continue
+            if topup:
+                if not await self._verify_residual_repair():
+                    if not self.halted and not self.bps_strategy.repair_waiting:
+                        self.bps_strategy.wait_for_residual('补齐前等待订单及实时仓位核验')
+                    return False
+                # Account reads await: size again from the current inventory/book.
+                qty, limit, blocked = self._topup_order(v, sum(x.position for x in self.venues.values()))
+                if blocked:
+                    blockers.append(f'{v.name} 补齐：{blocked}')
+                    continue
+                try:
+                    if not self.bps_strategy.pending:
+                        self.bps_strategy.wait_for_residual('核验通过，补齐缺少的一腿')
+                    self.bps_strategy.pending = True
+                    self.bps_strategy.save()  # Crash recovery must verify this order.
+                except OSError:
+                    self.halted = True
+                    raise
             lk = self._vlock(v.key)
             await lk.acquire()  # verified free, no awaits since: fast path
             try:
-                log.warning("[HEDGE] net %+.6g — %s %.6g on %s @%.6g",
-                            net, "SELL" if is_sell else "BUY", qty, v.name, limit)
+                log.warning("[HEDGE] mode=%s net %+.8g — %s %.8g on %s @%.6g reduce_only=%s",
+                            'top-up' if topup else 'reduce-excess', net,
+                            "SELL" if is_sell else "BUY", qty, v.name, limit, not topup)
                 self.hedges += 1
                 maker = cfg.primary_maker_only and v is self.entropy
                 if maker:
@@ -1243,12 +1331,17 @@ class Engine:
                 else:
                     self._record_send(v)
                     info, _ = await self._timed_send(v, is_buy=not is_sell, qty=qty,
-                                                    limit_px=limit, reduce_only=True)
+                                                    limit_px=limit, reduce_only=not topup)
                 fill = info.get('filled_base')
-                if (not isinstance(fill, (int, float)) or not math.isfinite(fill)
-                        or not 0 <= fill <= qty + self._step / 2):
+                price = info.get('avg_px')
+                if (isinstance(fill, bool) or not isinstance(fill, (int, float)) or not math.isfinite(fill)
+                        or not 0 <= fill <= qty + (1e-12 if topup else self._step / 2)):
                     info = dict(status='invalid-hedge-fill', filled_base=0, avg_px=None,
                                 err='invalid residual hedge quantity', unresolved=True)
+                elif topup and fill > 0 and (isinstance(price, bool) or not isinstance(price, (int, float))
+                                             or not math.isfinite(price) or price <= 0):
+                    info = dict(status='invalid-hedge-fill', filled_base=0, avg_px=None,
+                                err='invalid residual hedge fill price', unresolved=True)
                 hedge_ok = not info.get("err") and not info.get("unresolved")
                 if info.get("err") or info.get("unresolved"):
                     if info.get("unresolved"):
@@ -1275,7 +1368,7 @@ class Engine:
                     if self.bps_strategy:
                         self.bps_strategy.record_fill(v, not is_sell, fill, info.get("avg_px"),
                                                       (cfg.primary_fee_bps if maker else v.fee_bps) / 1e4,
-                                                      opening=False)
+                                                      opening=topup)
                     v.position += -fill if is_sell else fill
                     if fill:
                         px = info.get("avg_px") or limit
@@ -1286,13 +1379,15 @@ class Engine:
                         v.volume_usd += fill * px
                     if maker and self.bps_strategy:
                         self.bps_strategy.pending = previous_pending
+                    if (maker or topup) and self.bps_strategy:
                         try:
                             self.bps_strategy.save()
                         except OSError:
                             self.halted = self.bps_strategy.pending = True
                             raise
-                    log.info("[HEDGE SETTLED] %s %s %.6g/%.6g",
-                             v.name, info["status"], fill, qty)
+                    log.info("[HEDGE SETTLED] %s %s %.8g/%.8g mode=%s net_after=%+.8g",
+                             v.name, info["status"], fill, qty, 'top-up' if topup else 'reduce-excess',
+                             sum(x.position for x in self.venues.values()))
                 self._notify_hedge(
                     v, "SELL" if is_sell else "BUY", qty,
                     info.get("status", "unknown"), info.get("filled_base", 0.0),

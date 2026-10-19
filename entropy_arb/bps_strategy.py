@@ -524,7 +524,7 @@ class BpsStrategy:
         Read authoritative orders and then positions twice, allowing account
         REST state to catch up. Never clear uncertainty on a failed/partial
         response, or reuse costs from ambiguous/manual fills. Nonflat positions
-        defer reduce-only repair until account and market feeds are ready.
+        defer residual repair until account and market feeds are ready.
         """
         if not self.path.exists():
             return
@@ -597,7 +597,7 @@ class BpsStrategy:
             self.pending = True
             for venue, position in verified:
                 venue.position = position
-            log.warning('[BPS RECOVERY] 旧订单已核验，两次仓位稳定；等待行情后仅减少多余仓位 net=%+.8g',
+            log.warning('[BPS RECOVERY] 旧订单已核验，两次仓位稳定；等待行情后优先减仓，无法减仓时核验补齐 net=%+.8g',
                         sum(positions.values()))
             return True
         try:
@@ -695,7 +695,7 @@ class BpsStrategy:
             self.costs.inherit(positions, time.time())
         self._use_current_basis()
         # Old ambiguous fills have unknown prices. Do not manufacture P&L.
-        self.save()  # durable pending before the first reduce-only repair
+        self.save()  # durable pending before any reduction or verified top-up
         initial_net = sum(positions.values())
         deadline = time.monotonic() + max(30, 2 * self.cfg.settle_timeout_sec)
         for _ in range(3):
@@ -736,7 +736,8 @@ class BpsStrategy:
             capped_qty = qty
             if self.tolerance < abs(net) - qty < minimum:
                 qty = floor_step(abs(net) - minimum, step)
-            if qty < minimum:
+            can_topup = any(eng._topup_order(v, net)[2] is None for v in eng.venues.values())
+            if qty < minimum and not can_topup:
                 reason = (f'bps 自动修正被拦截 [{excess.name}]：净差额 {net:+.8g}，'
                           f'按单笔上限可下 {capped_qty:.8g}，避免小尾仓后拟下 {qty:.8g}；'
                           f'保护价 {limit:.8g}，减仓最小数量 {min_base:.8g}，'
@@ -744,7 +745,7 @@ class BpsStrategy:
                           '差额低于最小下单规模或单笔上限不足以拆分；保留 pending')
                 log.error('[BPS RECOVERY BLOCKED] %s', reason)
                 raise RuntimeError(reason)
-            confirmed = await eng._hedge(math.copysign(qty, net))
+            confirmed = await eng._hedge(net if qty < minimum else math.copysign(qty, net))
             self.save()
             if not confirmed or eng.halted:
                 raise RuntimeError('bps 自动修正成交未确认或失败；保留 pending，禁止重复补单')
@@ -1129,7 +1130,7 @@ class BpsStrategy:
             self.reason = '等待可交易的双腿行情'
             return None
         if not self.net_balanced():
-            self.wait_for_residual('已确认仓位存在差额，等待 reduce-only 修正')
+            self.wait_for_residual('已确认仓位存在差额，等待减仓或补齐修正')
             return None
         if any(not eng._venue_rate_ok(v) or v.book.last_update_ts <= v.last_traded_ts
                for v in eng.venues.values()):

@@ -163,6 +163,15 @@ class LighterVenue:
     def reduce_only_min_base(self):
         return 10.0 ** -self.size_decimals
 
+    # IOC orders do not rest on the book: maker minimums are not an opening
+    # minimum for a confirmed-fill hedge top-up either. Keep normal strategy
+    # opening minimums unchanged; only residual repairs use these rules.
+    taker_min_quote = 0.0
+
+    @property
+    def taker_min_base(self):
+        return 10.0 ** -self.size_decimals
+
     def __init__(self, conf: VenueConf, session: aiohttp.ClientSession,
                  settle_timeout_sec: float) -> None:
         assert conf.lighter_profile is not None
