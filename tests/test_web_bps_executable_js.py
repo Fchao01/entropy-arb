@@ -42,11 +42,17 @@ assert.match(get('config-yaml').value, /primary_order_type: maker/);
 vm.runInContext('syncFields()', context);
 assert.equal(get('bps-entry-percentile').value, 90);
 vm.runInContext(`
-element('bps-exit-mode').value = 'profit';
-refreshStrategyFields();
+element('config-yaml').value = 'strategy:\\n  mode: bps\\nbps:\\n  exit_mode: profit\\n  take_profit_bps: 0\\n  entry_percentile: 10\\n  exit_percentile: 75\\nexecution:\\n  primary_order_type: maker\\n';
+syncFields();
 `, context);
 assert.equal(get('bps-price-basis').value, 'mid');
 assert.equal(get('bps-entry-percentile').value, 10);
+assert.match(get('config-yaml').value, /exit_mode: "levels"/);
+assert.doesNotMatch(get('config-yaml').value, /take_profit_bps/);
+vm.runInContext('syncFields()', context);
+assert.equal(get('bps-price-basis').value, 'mid');
+assert.equal(get('bps-entry-percentile').value, 10);
+assert.doesNotMatch(source, /bps-exit-mode|bps-profit-settings|round_trip_reference/);
 vm.runInContext(`
 renderSignals({bps_strategy: {price_basis: 'executable', entry_bps: 5, exit_bps: -4},
   venues: [{fresh: true}], execution_signals: {mode: 'bps', rows: [

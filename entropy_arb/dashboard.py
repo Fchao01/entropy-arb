@@ -358,11 +358,6 @@ class Dashboard:
             content = Text(f"{direction}\n{quote_label}\n"
                            f"entry {entry} / exit {exit} bps · {state['entries']} filled batches · no batch limit\n"
                            f"{state['reason']}\nCSV: {state['data_path']}")
-            if state['exit_mode'] == 'profit':
-                quote = state['exit_quote']
-                content.append(f"\nNet exit quote: {quote['net_usd'] if quote else 'unknown'} USD · "
-                               f"TP {state['take_profit_bps']} / SL {state['stop_loss_bps']} bps · "
-                               f"max hold {state['max_hold_sec']}s")
             return Panel(content, title="BPS cycle · " + state['exit_mode'], box=box.ROUNDED)
         prem = eng.premium_bps()
         head = Text()

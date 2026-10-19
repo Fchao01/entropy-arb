@@ -127,7 +127,7 @@ def test_meaningful_inventory_keeps_frozen_targets(tmp_path):
     asyncio.run(run())
 
 
-def test_baba_negative_round_trip_reference_is_visible_without_new_profit_gate(tmp_path):
+def test_baba_bps_entry_has_no_round_trip_estimate_or_profit_gate(tmp_path):
     async def run():
         eng = executable_engine(tmp_path, long=False)
         eng.ensure_async_state()
@@ -137,8 +137,5 @@ def test_baba_negative_round_trip_reference_is_visible_without_new_profit_gate(t
         eng.hedge.set_book(109.41, 109.42)
         candidate = eng._scan(time.time())
         assert candidate
-        estimate = eng.bps_strategy.round_trip_reference(candidate[2])
-        assert estimate['nonpositive'] and estimate['net_bps'] < -.89
-        assert '主腿价格保持不变' in estimate['assumption']
-        assert eng.bps_strategy.snapshot()['round_trip_reference']['nonpositive']
+        assert 'round_trip_reference' not in eng.bps_strategy.snapshot()
     asyncio.run(run())

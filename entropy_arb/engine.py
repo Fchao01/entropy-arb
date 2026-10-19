@@ -38,6 +38,7 @@ from .venue_arcus import ArcusVenue
 from .telegram import TelegramNotifier, hedge_message, trade_message
 from .execution_stats import ExecutionStats
 from .reduction import reduction_rules
+from .rest_reads import RestReadCooldown
 
 log = logging.getLogger("engine")
 
@@ -112,6 +113,7 @@ class Engine:
         # trading and is probed every venue_probe_sec until it answers
         self._venue_down: Dict[str, float] = {}
         self._venue_probe_at: Dict[str, float] = {}
+        self._read_cooldowns: Dict[str, float] = {}
         self._venue_fetch_fails: Dict[str, int] = {}
         self._position_uncertain: set = set()
         self._residual_repair_lock = None
@@ -302,6 +304,8 @@ class Engine:
         if cfg.primary_maker_only:
             log.info('[ARCUS MAKER ONLY] 主腿开仓、平仓和余仓修正均为 Post-only；禁止 IOC 回退，退出可能等待成交')
         if self.bps_strategy:
+            log.info('[BPS EXIT POLICY] levels-only; 每批开平仓重新判断 BPS 点位；'
+                     '净收益/止损/最长持仓不触发交易，成交成本仅记录')
             log.info('[BPS REPAIR POLICY] mode=auto-confirmed-residual retry_sec=%.1f dust_cap_usd=%.2f; '
                      'fallback=verified-deficient-leg-top-up; verify open orders and positions before resuming',
                      RESIDUAL_RETRY_SEC, cfg.bps_max_dust_notional_usd)
@@ -1435,6 +1439,8 @@ class Engine:
         for v in self.venues.values():
             if now - v.last_traded_ts <= self.RECONCILE_GRACE_SEC:
                 continue  # just traded: chain read would be stale
+            if not strict and now < self._read_cooldowns.get(v.key, 0):
+                continue
             if v.key in self._venue_down \
                     and now < self._venue_probe_at.get(v.key, 0.0):
                 continue  # down venue: probe only every venue_probe_sec
@@ -1482,6 +1488,19 @@ class Engine:
                         r = verified
             except asyncio.CancelledError:
                 raise
+            except RestReadCooldown as e:
+                if strict:
+                    raise RuntimeError(f'[{v.name}] 启动仓位查询限流；冷却后重试，未发送订单') from e
+                self._position_uncertain.add(v.key)
+                previous = self._read_cooldowns.get(v.key, 0)
+                self._read_cooldowns[v.key] = e.until
+                if self.bps_strategy and not self.halted:
+                    self.bps_strategy.reason = '账户查询限流，等待两边实时仓位复核'
+                if e.until > previous:
+                    log.warning('[%s] REST QUERY 429 — wait %.1fs before position recheck; '
+                                'last confirmed position retained, not an order failure',
+                                v.name, max(0, e.until - time.time()))
+                return
             except Exception as e:
                 if strict:
                     raise RuntimeError(
@@ -1511,6 +1530,7 @@ class Engine:
                             'engine remains HALTED' if self.halted else 'other trading checks still apply')
                 self._update_evt.set()
             self._position_uncertain.discard(v.key)
+            self._read_cooldowns.pop(v.key, None)
             self._venue_fetch_fails[v.key] = 0
             delta = r - v.position
             if abs(delta) > 1e-12:

@@ -32,6 +32,7 @@ from .book import OrderBook
 from .config import VenueConf
 from .feeds import LighterBookFeed
 from .maker import MakerOrder
+from .rest_reads import RestReads
 
 log = logging.getLogger("lighter")
 
@@ -203,15 +204,26 @@ class LighterVenue:
         self._coi = int(time.time() * 1000)
         self.rate_limit_until = 0.0
         self._nonce_refresh_required = False
+        self._rest_reads = None
 
     # ------------------------------------------------------------------ REST
 
-    async def _get(self, path: str, params: Optional[dict] = None):
-        async with self.session.get(
-                self.profile.api_url + path, params=params,
-                timeout=aiohttp.ClientTimeout(total=REST_TIMEOUT)) as r:
-            r.raise_for_status()
-            return await r.json()
+    async def _get(self, path: str, params: Optional[dict] = None, *, cache_ttl=None, query_session=None):
+        if self._rest_reads is None:
+            self._rest_reads = RestReads(self.profile.api_url)
+        ttl = {'/api/v1/account': .2, '/api/v1/status': 10,
+               '/api/v1/orderBooks': 30, '/api/v1/orderBookDetails': 30}.get(path, 0)
+        async def fetch():
+            async with (query_session or self.session).get(
+                    self.profile.api_url + path, params=params,
+                    timeout=aiohttp.ClientTimeout(total=REST_TIMEOUT)) as r:
+                r.raise_for_status()
+                data = await r.json()
+                if isinstance(data, dict) and data.get('code') == 23000:
+                    raise aiohttp.ClientResponseError(r.request_info, r.history, status=429,
+                                                     message='REST query rate limited', headers=r.headers)
+                return data
+        return await self._rest_reads.get(path, params, fetch, ttl if cache_ttl is None else cache_ttl)
 
     # ------------------------------------------------------------- lifecycle
 
@@ -281,10 +293,11 @@ class LighterVenue:
     async def warm_http(self) -> None:
         """Keep the order-path HTTPS connections warm (a cold TLS handshake
         adds 10-15ms to the first order after an idle spell)."""
-        try:
-            await self._get("/api/v1/status")
-        except Exception as e:
-            log.debug("[%s] keepalive ping failed: %r", self.name, e)
+        if self.signer is None:
+            try:
+                await self._get("/api/v1/status")
+            except Exception as e:
+                log.debug("[%s] keepalive ping failed: %r", self.name, e)
         try:
             data = await self._get("/api/v1/orderBookDetails",
                                    params={"market_id": str(self.market_id)})
@@ -303,9 +316,10 @@ class LighterVenue:
             return
         try:
             sess = self.signer.api_client.rest_client.pool_manager
-            async with sess.get(self.profile.api_url + "/api/v1/status",
-                                timeout=aiohttp.ClientTimeout(total=5)) as r:
-                await r.read()
+            # Warm the actual signer connection, without a duplicate public
+            # session ping. Share query cooldowns, but a cached status cannot
+            # warm this process's distinct SDK connection.
+            await self._get("/api/v1/status", cache_ttl=0, query_session=sess)
         except Exception as e:
             log.debug("[%s] signer keepalive failed: %r", self.name, e)
 
@@ -575,19 +589,20 @@ class LighterVenue:
 
     # -------------------------------------------------------------- accounts
 
-    async def _account(self) -> Optional[dict]:
+    async def _account(self, *, equity_only=False) -> Optional[dict]:
         c = self.conf.lighter_creds
         if c is None or c.account_index is None:
             return None
         data = await self._get("/api/v1/account",
                                params={"by": "index",
-                                       "value": str(c.account_index)})
+                                       "value": str(c.account_index)},
+                               cache_ttl=15 if equity_only else .2)
         for acct in data.get("accounts") or []:
             return acct
         return None
 
     async def fetch_equity(self):
-        acct = await self._account()
+        acct = await self._account(equity_only=True)
         if acct is None:
             return None
         return (float(acct.get("total_asset_value") or 0.0),

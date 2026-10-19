@@ -138,7 +138,7 @@ RH / Lighter、Arcus、Entropy / trade.xyz 均支持主腿 Post-only。
 买入挂主腿买一，卖出挂主腿卖一；报价固定，撤单后下一次信号重新取盘口。
 Post-only 因盘口变化而被拒绝时不会转为吃单。对冲腿始终吃单。
 
-Arcus 作为主腿且选择 `execution.primary_order_type: maker` 时，开仓、BPS 平仓和 Arcus 余仓修正都只发送 Post-only（ALO），不允许 IOC 回退。平仓与修正的 Arcus 订单同时带 `reduceOnly: true`；平仓时另一腿只对 Arcus 已确认新增成交量发送只减仓吃单，Arcus 余仓修正不会再向另一腿发单。相应 Arcus 成交按配置的 maker 费率计算。未成交时继续等待或按保留规则撤单重评；结果未知则暂停，绝不通过吃单绕过。只挂单可能无法及时退出或消除敞口，止损、最长持仓及停止程序都不保证立即平仓。这个约束只适用于 Arcus 主腿的 maker 配置，不自动交换主腿与对冲腿，也不修改其它交易所的成交方式。
+Arcus 作为主腿且选择 `execution.primary_order_type: maker` 时，开仓、BPS 平仓和 Arcus 余仓修正都只发送 Post-only（ALO），不允许 IOC 回退。平仓与修正的 Arcus 订单同时带 `reduceOnly: true`；平仓时另一腿只对 Arcus 已确认新增成交量发送只减仓吃单，Arcus 余仓修正不会再向另一腿发单。相应 Arcus 成交按配置的 maker 费率计算。未成交时继续等待或按保留规则撤单重评；结果未知则暂停，绝不通过吃单绕过。只挂单可能无法及时退出或消除敞口，停止程序不会自动平仓。这个约束只适用于 Arcus 主腿的 maker 配置，不自动交换主腿与对冲腿，也不修改其它交易所的成交方式。
 
 ### Arcus 挂单数量随 RH 深度缩小
 

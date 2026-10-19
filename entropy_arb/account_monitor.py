@@ -17,6 +17,7 @@ import time
 from bisect import bisect_left, bisect_right
 from collections import defaultdict, deque
 from contextlib import closing
+from functools import cached_property
 from pathlib import Path
 
 import aiohttp
@@ -466,22 +467,36 @@ class AccountMonitor:
         self.running = False
         self.session = None
         self.tasks = []
-        self.guard = asyncio.Lock()
-        self.http_locks = {v: asyncio.Lock() for v in VENUES}
         self.http_next = defaultdict(float)
-        self.send_locks = {v: asyncio.Lock() for v in VENUES}
         self.send_next = defaultdict(float)
         self.markets = {}
         self.quotes = defaultdict(lambda: deque(maxlen=600))
         self.connections = {}
         self.errors = {}
-        self.queue = asyncio.Queue(maxsize=20000)
         self.dropped = 0
         self.skipped = 0
         self.inserted = 0
         self.started_at = None
         self.config = {"symbols": "BTC,ETH", "recent": False}
         self.backfill = {"done": 0, "total": 0}
+
+    # TaskManager is also constructed by synchronous tooling. Python 3.9's
+    # primitives bind on construction; create them in their running loop.
+    @cached_property
+    def guard(self):
+        return asyncio.Lock()
+
+    @cached_property
+    def http_locks(self):
+        return {v: asyncio.Lock() for v in VENUES}
+
+    @cached_property
+    def send_locks(self):
+        return {v: asyncio.Lock() for v in VENUES}
+
+    @cached_property
+    def queue(self):
+        return asyncio.Queue(maxsize=20000)
 
     async def request(self, venue, path, *, _session=None, **params):
         if path not in ("orderBooks", "account", "accountsByL1Address", "recentTrades"):
@@ -605,7 +620,8 @@ class AccountMonitor:
         return dict(running=self.running, started_at=self.started_at, config=self.config,
                     markets={v: len(m) for v, m in self.markets.items()},
                     connections=dict(self.connections), errors=dict(self.errors), dropped=self.dropped,
-                    inserted=self.inserted, queue_size=self.queue.qsize(), backfill=dict(self.backfill), skipped=self.skipped)
+                    inserted=self.inserted, queue_size=self.__dict__['queue'].qsize() if 'queue' in self.__dict__ else 0,
+                    backfill=dict(self.backfill), skipped=self.skipped)
 
     async def _record_drops(self):
         if self.dropped:

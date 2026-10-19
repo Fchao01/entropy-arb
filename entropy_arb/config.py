@@ -24,6 +24,7 @@ Threshold model (fixed numbers the user derives from recorded minute data):
 from __future__ import annotations
 
 import os
+import logging
 import math
 from dataclasses import dataclass
 from typing import Any, Dict, Mapping, Optional
@@ -184,6 +185,7 @@ class Config:
     bps_exit_percentile: float = 75.0
     bps_add_interval_sec: float = 60.0
     bps_max_position_usd: float = 1000.0
+    # Deprecated profit-mode inputs retained only for old config/tool compatibility.
     bps_cost_buffer_bps: float = 0.0
     bps_exit_mode: str = "levels"
     bps_take_profit_bps: float = 1.0
@@ -194,6 +196,7 @@ class Config:
     bps_cycle_cooldown_sec: float = 30.0
     bps_add_step_bps: float = 0.5
     bps_execution_slippage_bps: float = 1.0
+    # Active position-repair tolerance, unrelated to the removed profit mode.
     bps_max_dust_notional_usd: float = 0.10
 
     @property
@@ -562,19 +565,22 @@ def load_config(config_file: str = "config.yaml", env_file: str = ".env", *,
                         cycle_cooldown_sec=30.0, add_step_bps=0.5, execution_slippage_bps=1.0,
                         max_dust_notional_usd=0.10)
     bps = {**bps_defaults, **bps}
+    legacy_profit = bps['exit_mode'] == 'profit'
+    if bps['exit_mode'] not in ('levels', 'profit'):
+        raise ConfigError('bps.exit_mode supports levels; legacy profit is migrated to levels')
+    if legacy_profit:
+        logging.getLogger('config').warning('[BPS CONFIG] legacy exit_mode=profit migrated to levels; '
+            'only BPS entry/exit levels apply; former profit/stop/time/cost guards are ignored')
+    bps['exit_mode'] = 'levels'
     legacy_basis = 'price_basis' not in (raw.get('bps') or {})
     bps['price_basis'] = bps.get('price_basis', 'mid' if strategy_mode != 'bps' or bps['levels'] == 'manual'
-                                 or bps['exit_mode'] == 'profit' else 'executable')
+                                 or legacy_profit else 'executable')
     if bps['price_basis'] not in ('mid', 'executable'):
         raise ConfigError('bps.price_basis must be mid or executable')
-    if bps['price_basis'] == 'executable' and bps['exit_mode'] != 'levels':
-        raise ConfigError('可成交价差使用 bps.exit_mode: levels；净收益模式使用 mid 兼容口径')
     if bps["history_mode"] not in ("records", "time"):
         raise ConfigError("bps.history_mode must be records or time")
     if bps["levels"] not in ("manual", "rolling") or bps["direction"] not in ("long_primary", "short_primary"):
         raise ConfigError("bps levels must be manual/rolling; direction must be long_primary/short_primary")
-    if bps["exit_mode"] not in ("levels", "profit"):
-        raise ConfigError("bps.exit_mode must be levels or profit")
     if any(isinstance(v, (int, float)) and not math.isfinite(v) for v in bps.values()):
         raise ConfigError("bps parameters must be finite")
     if not 2 <= bps["window_minutes"] <= 10080:
@@ -583,16 +589,10 @@ def load_config(config_file: str = "config.yaml", env_file: str = ".env", *,
         raise ConfigError("bps.min_coverage_pct must be in (0, 100] / 最低数据覆盖率必须大于 0 且不超过 100%")
     if not 2 <= bps["min_valid_minutes"] <= 10080:
         raise ConfigError("bps.min_valid_minutes must be in [2, 10080] / 最少有效分钟数必须在 2–10080 之间")
-    if bps["add_interval_sec"] < 0 or bps["cost_buffer_bps"] < 0 or bps["max_position_usd"] <= 0:
-        raise ConfigError("bps interval/buffer must be >= 0; position cap must be > 0")
-    for name in ("stop_loss_bps", "max_hold_sec", "min_gap_bps", "entry_confirm_sec",
-                 "cycle_cooldown_sec", "add_step_bps", "execution_slippage_bps", "max_dust_notional_usd"):
-        if bps[name] < 0:
-            raise ConfigError(f"bps.{name} must be >= 0")
-    if bps["take_profit_bps"] < 0 or bps["execution_slippage_bps"] >= 10000:
-        raise ConfigError("bps.take_profit_bps must be >= 0; execution_slippage_bps must be < 10000")
-    if strategy_mode == "bps" and bps["exit_mode"] == "profit" and bps["take_profit_bps"] == 0:
-        raise ConfigError("bps.take_profit_bps must be > 0 in profit mode / 净收益平仓模式的止盈必须大于 0")
+    if bps["add_interval_sec"] < 0 or bps["max_position_usd"] <= 0:
+        raise ConfigError("bps interval must be >= 0; position cap must be > 0")
+    if bps["max_dust_notional_usd"] < 0:
+        raise ConfigError("bps.max_dust_notional_usd must be >= 0")
     for name in ("entry_percentile", "exit_percentile"):
         if not 0 <= bps[name] <= 100:
             raise ConfigError("bps percentiles must be in [0, 100]")

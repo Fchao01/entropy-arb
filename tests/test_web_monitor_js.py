@@ -206,8 +206,7 @@ state.detail.task.status.bps_strategy = {levels: 'rolling', entries: 2, dust_lev
   round_trip_reference: {net_bps: -0.9, nonpositive: true}}; renderMonitor();`);
 assert.match(html(), /保证金取消后暂缓新开仓/);
 assert.match(nodes.get('monitor-summary').innerHTML, /仅剩精度尾仓/);
-assert.match(nodes.get('monitor-summary').innerHTML, /目标往返参考 -0.90 bps/);
-assert.match(nodes.get('monitor-summary').innerHTML, /空间未覆盖配置成本/);
+assert.doesNotMatch(nodes.get('monitor-summary').innerHTML, /目标往返参考|空间未覆盖配置成本/);
 run(`state.detail.task.mode = 'record'; renderMonitor();`);
 assert.match(html(), /采集模式不读取账户权益/);
 assert.match(html(), /<strong>— \/ —<\/strong>/);

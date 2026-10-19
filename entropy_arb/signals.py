@@ -31,10 +31,6 @@ def execution_signals(engine):
             basis = 'executable_premium_bps' if strategy.executable else 'mid_premium_bps'
             if strategy.executable:
                 comparison = '>='
-            if action == 'close' and strategy.profit_mode and state['cost_known']:
-                trigger = state['exit_quote']['net_bps'] if state['exit_quote'] else None
-                target, comparison = strategy.cfg.bps_take_profit_bps, '>='
-                basis = 'cycle_net_return_bps'
             buy, sell = (primary, hedge) if primary_buy else (hedge, primary)
             action_maker = maker and (action == 'open' or engine.cfg.primary_maker_only)
             gap = None if trigger is None or target is None else (

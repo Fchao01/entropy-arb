@@ -1,18 +1,10 @@
-# 完整往返净收益试运行版：RH 主腿 / Lighter 对冲。参数是示例，不保证盈利。
+# BPS 点位示例：RH 主腿 / Lighter 对冲。参数是示例，不保证盈利。
+# 旧文件名为兼容保留；没有净收益止盈/止损模式。
 # CLI 使用 --primary lighter-rh --hedge lighter；费率必须核对实际账户。
 strategy:
   mode: bps
 bps:
-  exit_mode: profit
-  take_profit_bps: 1.0
-  stop_loss_bps: 10.0
-  max_hold_sec: 900
-  min_gap_bps: 2.0
-  entry_confirm_sec: 2.0
-  cycle_cooldown_sec: 30
-  add_step_bps: 0.5
-  execution_slippage_bps: 1.0
-  cost_buffer_bps: 0.5
+  price_basis: mid     # 保留原中间价点位口径；可显式改为 executable 并重设点位
   levels: rolling
   history_mode: records   # 最新有效分钟记录，可跨时段复用历史
   direction: long_primary

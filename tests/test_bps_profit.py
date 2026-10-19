@@ -1,4 +1,4 @@
-"""Full-cycle BPS accounting and exits using synthetic confirmed fills only."""
+"""Legacy profit configurations use BPS levels; accounting remains independent."""
 import asyncio
 import json
 import time
@@ -7,12 +7,12 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from entropy_arb.bps_strategy import BpsStrategy
-from entropy_arb.config import ConfigError, load_config
+from entropy_arb.config import load_config
 from entropy_arb.signals import execution_signals
 from test_bps_strategy import engine_at, execute, books
 
 
-def profit_engine(tmp_path, long=True, maker=False):
+def legacy_engine(tmp_path, long=True, maker=False):
     eng = engine_at(tmp_path, long=long, maker=maker)
     eng.cfg.bps_exit_mode = 'profit'
     eng.cfg.bps_entry_confirm_sec = eng.cfg.bps_cycle_cooldown_sec = 0
@@ -22,68 +22,24 @@ def profit_engine(tmp_path, long=True, maker=False):
 
 
 @pytest.mark.parametrize('long', [True, False])
-def test_midpoint_exit_does_not_override_net_profit_exit(tmp_path, long):
+def test_old_profit_guards_cannot_override_point_exits(tmp_path, long):
     async def run():
-        eng = profit_engine(tmp_path, long)
-        eng.ensure_async_state()
+        eng = legacy_engine(tmp_path, long)
+        eng.cfg.bps_take_profit_bps = 10000
+        eng.cfg.bps_min_gap_bps = eng.cfg.bps_entry_confirm_sec = 10000
+        eng.cfg.bps_cost_buffer_bps = eng.cfg.bps_add_step_bps = 10000
         await execute(eng, eng._scan(time.time()))
-        eng.cfg.bps_take_profit_bps = 100
+        strategy = eng.bps_strategy
+        strategy.costs.started_at = time.time() - 100000
+        books(eng, -8 if long else 8)  # Neither entry nor exit point reached.
+        assert eng._scan(time.time()) is None  # No timeout/stop-loss exit.
+        strategy.closing, strategy.close_reason = True, '净收益止损'
+        assert eng._scan(time.time()) is None  # No restored/latching bypass.
+        assert not strategy.closing
         books(eng, -5.5 if long else 5.5)
-        assert eng.bps_strategy.exit_reached(eng.premium_bps())
-        assert eng._scan(time.time()) is None  # Old point reached, profit target not reached.
-        eng.cfg.bps_take_profit_bps = 1
         candidate = eng._scan(time.time())
         assert candidate[2].action == 'bps_close'
-        assert eng.bps_strategy.close_reason == '净收益止盈'
-        await execute(eng, candidate)
-        for _ in range(3):
-            if eng.bps_strategy.flat():
-                break
-            books(eng, -5.5 if long else 5.5)
-            await execute(eng, eng._scan(time.time()))
-        assert eng.bps_strategy.flat()
-        assert eng.bps_strategy.last_cycle_net_usd > 0
-        assert eng.bps_strategy.last_cycle_net_usd == pytest.approx(eng.total_fill_edge)
-        assert eng.execution_stats.snapshot(eng)['net_realized_usd'] == pytest.approx(eng.total_fill_edge)
-    asyncio.run(run())
-
-
-def test_losing_round_is_not_closed_as_a_profit_at_midpoint_target(tmp_path):
-    eng = profit_engine(tmp_path)
-    eng.cfg.bps_stop_loss_bps = 30
-    strategy = eng.bps_strategy
-    qty = 1
-    primary_price = 100.27
-    strategy.record_fill(eng.entropy, True, qty, primary_price, 0, opening=True)
-    eng.entropy.position = qty
-    strategy.record_fill(eng.hedge, False, qty, 100, 0, opening=True)
-    eng.hedge.position = -qty
-    strategy.entries, strategy.locked_entry, strategy.locked_exit = 1, 15, 20
-    eng.entropy.set_book(100.11, 100.75)
-    eng.hedge.set_book(99.99, 100)
-    assert strategy.exit_reached(eng.premium_bps())
-    assert strategy.costs.cash == pytest.approx(-.27)
-    quote = strategy.exit_quote()
-    assert quote['net_usd'] == pytest.approx(-.16)
-    assert strategy.exit_decision(time.time(), quote) is None
-    eng.entropy.set_book(100.30, 100.32)
-    assert strategy.exit_decision(time.time()) == '净收益止盈'
-
-
-@pytest.mark.parametrize('cause', ['stop_loss', 'timeout'])
-def test_stop_loss_and_timeout_can_exit_before_midpoint_target(tmp_path, cause):
-    async def run():
-        eng = profit_engine(tmp_path)
-        eng.ensure_async_state()
-        await execute(eng, eng._scan(time.time()))
-        eng.cfg.bps_take_profit_bps = 100
-        books(eng, -30)
-        if cause == 'timeout':
-            eng.cfg.bps_stop_loss_bps = 0
-            eng.bps_strategy.costs.started_at = time.time() - 901
-        candidate = eng._scan(time.time())
-        assert candidate and candidate[2].action == 'bps_close'
-        assert eng.bps_strategy.close_reason == ('净收益止损' if cause == 'stop_loss' else '最长持仓到期')
+        assert strategy.close_reason == 'bps 平仓点位'
         await execute(eng, candidate)
         assert eng.hedge.send_taker.call_args.kwargs['reduce_only']
     asyncio.run(run())
@@ -91,7 +47,7 @@ def test_stop_loss_and_timeout_can_exit_before_midpoint_target(tmp_path, cause):
 
 def test_costs_fees_and_partial_close_survive_restart(tmp_path):
     async def run():
-        eng = profit_engine(tmp_path)
+        eng = legacy_engine(tmp_path)
         eng.ensure_async_state()
         eng.cfg.primary.fee_bps = eng.entropy.fee_bps = .2
         eng.cfg.hedge.fee_bps = eng.hedge.fee_bps = .2
@@ -105,9 +61,9 @@ def test_costs_fees_and_partial_close_survive_restart(tmp_path):
             venue.send_taker = AsyncMock(side_effect=partial)
         await execute(eng, eng._scan(time.time()))
         strategy = eng.bps_strategy
-        quote_before = strategy.exit_quote()
+        costs_before = strategy.costs.dump()
         assert strategy.closing and not strategy.flat()
-        fresh = profit_engine(tmp_path)
+        fresh = legacy_engine(tmp_path)
         fresh.cfg.primary.fee_bps = fresh.entropy.fee_bps = .2
         fresh.cfg.hedge.fee_bps = fresh.hedge.fee_bps = .2
         for key in fresh.venues:
@@ -115,8 +71,8 @@ def test_costs_fees_and_partial_close_survive_restart(tmp_path):
         books(fresh, -3)
         fresh.bps_strategy.restore()
         assert fresh.bps_strategy.costs.started_at == original_start
-        assert fresh.bps_strategy.closing and fresh.bps_strategy.close_reason == '净收益止盈'
-        assert fresh.bps_strategy.exit_quote()['net_usd'] == pytest.approx(quote_before['net_usd'])
+        assert fresh.bps_strategy.closing and fresh.bps_strategy.close_reason == 'bps 平仓点位'
+        assert fresh.bps_strategy.costs.dump() == costs_before
         assert fresh.execution_stats.lots  # Known inventory cost restored, turnover still zero.
         assert fresh.execution_stats.volumes == {}
         data = json.loads(strategy.path.read_text())
@@ -125,9 +81,9 @@ def test_costs_fees_and_partial_close_survive_restart(tmp_path):
     asyncio.run(run())
 
 
-def test_multiple_entries_do_not_reset_holding_clock_and_cooldown_is_enforced(tmp_path):
+def test_multiple_entries_preserve_costs_and_no_removed_cycle_cooldown(tmp_path):
     async def run():
-        eng = profit_engine(tmp_path)
+        eng = legacy_engine(tmp_path)
         eng.ensure_async_state()
         eng.cfg.max_order_notional = 100
         await execute(eng, eng._scan(time.time()))
@@ -143,75 +99,59 @@ def test_multiple_entries_do_not_reset_holding_clock_and_cooldown_is_enforced(tm
             books(eng, -3)
         eng.cfg.bps_cycle_cooldown_sec = 30
         books(eng, -10)
-        assert eng._scan(time.time()) is None
-        assert eng.bps_strategy.reason == '平仓后冷却中'
+        assert eng._scan(time.time())[2].action == 'bps_open'
     asyncio.run(run())
 
 
-def test_unknown_legacy_cost_is_not_zero_cost_profit_and_cannot_be_added(tmp_path):
+def test_unknown_legacy_cost_does_not_block_bps_adds_or_invent_profit(tmp_path):
     async def run():
-        eng = profit_engine(tmp_path)
-        eng.ensure_async_state()
+        eng = legacy_engine(tmp_path)
         eng.entropy.position, eng.hedge.position = 1, -1
         eng.bps_strategy.restore()
-        assert eng.bps_strategy.exit_quote() is None
-        assert eng._scan(time.time()) is None
-        assert '旧仓成本未知' in eng.bps_strategy.reason
+        assert not eng.bps_strategy.costs.known
+        assert eng._scan(time.time())[2].action == 'bps_open'
         books(eng, -5)
-        candidate = eng._scan(time.time())
-        assert candidate[2].action == 'bps_close'
-        await execute(eng, candidate)
+        await execute(eng, eng._scan(time.time()))
+        assert eng.bps_strategy.flat()
         assert eng.bps_strategy.last_cycle_net_usd is None
     asyncio.run(run())
 
 
-def test_entry_guard_rejects_too_narrow_or_unexecutable_signal(tmp_path):
+def test_bps_signal_has_only_price_target_and_snapshot_has_no_profit_controls(tmp_path):
     async def run():
-        eng = profit_engine(tmp_path)
-        eng.ensure_async_state()
-        eng.cfg.bps_min_gap_bps = 4
-        assert eng._scan(time.time()) is None
-        assert '开仓空间不足' in eng.bps_strategy.reason
-        eng.cfg.bps_min_gap_bps = 0
-        # Mid -9.5 qualifies, but buying this wide spread does not.
-        eng.entropy.set_book(99.86, 99.95)
-        assert eng._scan(time.time()) is None
-        assert '可成交开仓报价未达点位' in eng.bps_strategy.reason
-        eng.entropy.send_taker.assert_not_awaited()
-    asyncio.run(run())
-
-
-def test_profit_signal_reports_net_return_basis(tmp_path):
-    async def run():
-        eng = profit_engine(tmp_path)
-        eng.ensure_async_state()
+        eng = legacy_engine(tmp_path)
         await execute(eng, eng._scan(time.time()))
         eng.markets_ready = True
         books(eng, -3)
-        result = execution_signals(eng)
-        closing = result['rows'][1]
-        assert closing['trigger_basis'] == 'cycle_net_return_bps'
-        assert closing['hurdle_bps'] == eng.cfg.bps_take_profit_bps
-        assert closing['trigger_premium_bps'] == eng.bps_strategy.exit_quote()['net_bps']
+        closing = execution_signals(eng)['rows'][1]
+        assert closing['trigger_basis'] != 'cycle_net_return_bps'
+        assert closing['hurdle_bps'] == eng.bps_strategy.locked_exit
+        assert closing['trigger_premium_bps'] == pytest.approx(eng.premium_bps())
+        snapshot = eng.bps_strategy.snapshot()
+        assert snapshot['exit_mode'] == 'levels'
+        assert not {'exit_quote', 'round_trip_reference', 'take_profit_bps', 'stop_loss_bps', 'max_hold_sec'} & snapshot.keys()
     asyncio.run(run())
 
 
-@pytest.mark.parametrize('field,value', [('exit_mode', 'invalid'), ('take_profit_bps', 0),
-                                       ('stop_loss_bps', -1), ('max_hold_sec', -1),
-                                       ('entry_confirm_sec', -1), ('execution_slippage_bps', 10000),
-                                       ('min_gap_bps', float('nan'))])
-def test_profit_config_validation(tmp_path, field, value):
+@pytest.mark.parametrize('basis', [None, 'mid', 'executable'])
+def test_profit_config_is_migrated_without_changing_explicit_basis(tmp_path, basis):
     import yaml
+    bps = {'exit_mode': 'profit', 'take_profit_bps': 0, 'entry_bps': -9, 'exit_bps': -6,
+           'entry_percentile': 10, 'exit_percentile': 75, 'stop_loss_bps': 0, 'max_hold_sec': 0}
+    if basis:
+        bps['price_basis'] = basis
     path = tmp_path / 'config.yaml'
-    path.write_text(yaml.safe_dump({'strategy': {'mode': 'bps'}, 'bps': {'exit_mode': 'profit', field: value}}))
-    with pytest.raises(ConfigError):
-        load_config(str(path), symbol='ETH', hedge_venue='lighter', credential_env={})
+    path.write_text(yaml.safe_dump({'strategy': {'mode': 'bps'}, 'bps': bps}))
+    cfg = load_config(str(path), symbol='ETH', hedge_venue='lighter', credential_env={})
+    assert cfg.bps_exit_mode == 'levels'
+    assert cfg.bps_price_basis == (basis or 'mid')
+    assert (cfg.bps_entry, cfg.bps_exit) == (-9, -6)
+    assert (cfg.bps_entry_percentile, cfg.bps_exit_percentile) == (10, 75)
 
 
-
-def test_flat_restart_keeps_cooldown_and_halt_reason_survives_refresh(tmp_path):
+def test_flat_restart_keeps_accounting_and_halt_reason_survives_refresh(tmp_path):
     async def run():
-        eng = profit_engine(tmp_path)
+        eng = legacy_engine(tmp_path)
         eng.ensure_async_state()
         await execute(eng, eng._scan(time.time()))
         books(eng, -3)
@@ -235,29 +175,10 @@ def test_flat_restart_keeps_cooldown_and_halt_reason_survives_refresh(tmp_path):
     asyncio.run(run())
 
 
-def test_full_exit_quote_requires_depth_and_deducts_slippage_reserve(tmp_path):
-    async def run():
-        eng = profit_engine(tmp_path)
-        eng.ensure_async_state()
-        await execute(eng, eng._scan(time.time()))
-        books(eng, -3)
-        direct = eng.bps_strategy.exit_quote()['net_usd']
-        eng.cfg.leg_slippage_bps = eng.cfg.bps_execution_slippage_bps = 1
-        reserved = eng.bps_strategy.exit_quote()['net_usd']
-        assert reserved < direct
-        # Full-cycle TP cannot be asserted when only part of the inventory has depth.
-        eng.hedge.set_book(99.9995, 100.0005, sz=.01)
-        assert eng.bps_strategy.exit_quote() is None
-        eng.bps_strategy.costs.started_at = time.time() - 901
-        assert eng._scan(time.time()) is None  # Min order depth unavailable, but remains closing.
-        assert eng.bps_strategy.closing and not eng.halted
-    asyncio.run(run())
-
-
-def test_maker_partial_fill_cost_is_hedged_then_exit_uses_taker_fees(tmp_path):
+def test_maker_partial_fill_cost_and_bps_exit_survive_legacy_guards(tmp_path):
     from entropy_arb.maker import MakerOrder
     async def run():
-        eng = profit_engine(tmp_path, maker=True)
+        eng = legacy_engine(tmp_path, maker=True)
         eng.ensure_async_state()
         eng.cfg.primary.maker_fee_bps = .1
         eng.cfg.primary.fee_bps = eng.entropy.fee_bps = 5
@@ -266,7 +187,7 @@ def test_maker_partial_fill_cost_is_hedged_then_exit_uses_taker_fees(tmp_path):
         eng.entropy.cancel_maker = AsyncMock()
         eng.entropy.maker_state = AsyncMock(return_value=dict(
             filled_base=.5, avg_px=99.9045, terminal=True, status='filled', err=None))
-        eng.cfg.bps_exit = -3  # Enough entry space for taker exit fees.
+        eng.cfg.bps_exit = -3
         eng.bps_strategy.exit = -3
         candidate = eng._scan(time.time())
         assert candidate
@@ -275,9 +196,7 @@ def test_maker_partial_fill_cost_is_hedged_then_exit_uses_taker_fees(tmp_path):
         assert eng.entropy.position == .5 and eng.hedge.position == -.5
         eng.entropy.send_taker.assert_not_awaited()
         books(eng, -3)
-        quoted = eng.bps_strategy.exit_quote()['net_usd']
-        eng.entropy.fee_bps = 0
-        assert eng.bps_strategy.exit_quote()['net_usd'] > quoted
+        assert eng._scan(time.time())[2].action == 'bps_close'
     asyncio.run(run())
 
 
@@ -285,7 +204,7 @@ def test_profit_preset_is_loadable_and_legacy_configs_keep_level_exits():
     from entropy_arb.web import ROOT
     cfg = load_config(str(ROOT / 'configs/bps-profit-rh-lighter.yaml'), symbol='GOOGL',
                       primary_venue='lighter-rh', hedge_venue='lighter', credential_env={})
-    assert cfg.bps_exit_mode == 'profit' and cfg.bps_take_profit_bps == 1
+    assert cfg.bps_exit_mode == 'levels'
     assert cfg.bps_max_hold_sec == 900
     old = load_config(str(ROOT / 'configs/bps-rh-arcus.yaml'), symbol='GOOGL',
                       primary_venue='lighter-rh', hedge_venue='arcus', credential_env={})

@@ -1,5 +1,4 @@
 """Validate an existing order's remaining exposure without sizing a new order."""
-from dataclasses import replace
 import math
 import time
 
@@ -45,7 +44,7 @@ def check_quote(engine, buy, sell, plan, price):
                 strategy.window_end is None or time.time() - strategy.window_end > 120):
             return fail('bps:history-stale')
         if closing:
-            valid = strategy.profit_mode or strategy.exit_reached(signal)
+            valid = strategy.exit_reached(signal)
         else:
             valid = signal is not None and (signal >= target if strategy.executable or not strategy.long
                                            else signal <= target)
@@ -69,8 +68,7 @@ def check_quote(engine, buy, sell, plan, price):
         return fail('hedge:empty-book')
     if any(not math.isfinite(px) or px <= 0 or not math.isfinite(qty) or qty <= 0 for px, qty in levels):
         return fail('hedge:invalid-book')
-    slip = (min(cfg.hedge_slippage_bps, strategy.execution_slippage)
-            if strategy and strategy.profit_mode else cfg.hedge_slippage_bps) / 1e4
+    slip = cfg.hedge_slippage_bps / 1e4
     bound = levels[0][0] * (1 - slip if primary_buy else 1 + slip)
     levels = [(px, qty) for px, qty in levels
               if px >= bound - 1e-12] if primary_buy else [
@@ -89,14 +87,7 @@ def check_quote(engine, buy, sell, plan, price):
         return detail
     marginal, notional = walk_depth(levels, required)
     bp, sp = (price, marginal) if primary_buy else (marginal, price)
-    if strategy:
-        if not closing:
-            current = replace(plan, qty=required, buy_limit=bp, sell_limit=sp,
-                              buy_notional=price * required if primary_buy else notional,
-                              sell_notional=notional if primary_buy else price * required)
-            if not strategy.entry_check(current, buy, sell, strategy.locked_entry, strategy.locked_exit):
-                return fail('bps:entry-cost-check')
-    else:
+    if not strategy:
         edge = (sp * (1 - plan.sell_fee) / (bp * (1 + plan.buy_fee)) - 1) * 1e4
         if edge < engine._eff_threshold(buy, sell):
             return fail('threshold:quote-below-target')

@@ -296,17 +296,14 @@ function renderMonitor() {
   const bps = metrics?.bps_strategy;
   const historyRange = bps?.coverage?.history_start_ts != null ? ` · 最新参考历史 ${windowTime(bps.coverage.history_start_ts)} → ${windowTime(bps.coverage.history_end_ts)} · 最后记录距今 ${number(bps.coverage.latest_data_age_sec / 60, 1)} 分钟` : "";
   const coverageLabel = bps?.coverage ? ` · 有效数据 ${bps.coverage.valid_minutes}/${bps.window_minutes}（${number(bps.coverage.coverage_pct, 1)}%）` : "";
-  const pnlLabel = bps?.exit_mode === "profit" ? ` · 净收益止盈 ${number(bps.take_profit_bps, 2)} / 止损 ${number(bps.stop_loss_bps, 2)} bps · 保守退出净收益 ${money(bps.exit_quote?.net_usd, 4)}（${signed(bps.exit_quote?.net_bps)} bps） · ${bps.cost_known ? "已知成交成本" : "成本尚未建立或旧仓成本未知"}` : "";
   const dustLabel = bps?.position_residual?.accepted_dust ? ` · 已确认精度尾差 ${signed(bps.position_residual.net_base, 8)}（名义敞口 ${money(bps.position_residual.notional_usd, 6)}），继续监控` : "";
-  const reference = bps?.round_trip_reference;
-  const roundTripLabel = reference ? ` · 目标往返参考 ${signed(reference.net_bps, 2)} bps${reference.nonpositive ? "（空间未覆盖配置成本）" : ""} · 主腿价格不变估算，未含资金费和未来滑点` : "";
   const tailLabel = bps?.dust_levels_current ? " · 仅剩精度尾仓，交易点位跟随当前历史；真实仓位和成本继续保留" : "";
-  const strategyLabel = bps ? ` · bps ${bps.levels === "rolling" ? "滚动" : "固定"}：开仓 ${signed(bps.entry_bps)} / 平仓 ${signed(bps.exit_bps)} · 本轮已成交 ${bps.entries} 批 · 不限批次 · ${bps.reason}${dustLabel}${tailLabel}${roundTripLabel}${coverageLabel}${historyRange}` : "";
+  const strategyLabel = bps ? ` · bps ${bps.levels === "rolling" ? "滚动" : "固定"}：开仓 ${signed(bps.entry_bps)} / 平仓 ${signed(bps.exit_bps)} · 本轮已成交 ${bps.entries} 批 · 不限批次 · ${bps.reason}${dustLabel}${tailLabel}${coverageLabel}${historyRange}` : "";
   const telegram = metrics?.telegram;
   const telegramState = !metrics ? "" : !metrics.telegram_enabled ? "未配置" : telegram?.status === "failed" ? "发送失败" : `已启用 · 已发 ${telegram?.sent ?? 0}`;
   const telegramProfile = telegram?.profile ? ` · ${escapeHtml(telegram.profile)}` : "";
   const telegramLabel = task.mode === "live" && metrics ? ` · Telegram${telegramProfile} ${telegramState}` : "";
-  element("monitor-summary").innerHTML = `<div><strong>${escapeHtml(task.symbol)}</strong><span>${escapeHtml(venues[task.primary])} ⇄ ${escapeHtml(venues[task.hedge])}</span><span class="badge ${task.mode}">${task.mode === "live" ? "LIVE · 实盘" : "DATA · 采集"}</span>${badge(task)}</div><small>${fresh ? "实时快照" : "最后快照"} ${timeLabel(metrics?.updated_at)} · ${escapeHtml(orderMode)}${escapeHtml(makerLabel)}${escapeHtml(strategyLabel)}${escapeHtml(pnlLabel)}${telegramLabel} ${(task.startup_warnings || []).map((warning) => `<span class="threshold-status pending">${escapeHtml(warning)}</span>`).join("")} ${task.exit_code == null ? "" : ` · 退出码 ${task.exit_code}`}</small>`;
+  element("monitor-summary").innerHTML = `<div><strong>${escapeHtml(task.symbol)}</strong><span>${escapeHtml(venues[task.primary])} ⇄ ${escapeHtml(venues[task.hedge])}</span><span class="badge ${task.mode}">${task.mode === "live" ? "LIVE · 实盘" : "DATA · 采集"}</span>${badge(task)}</div><small>${fresh ? "实时快照" : "最后快照"} ${timeLabel(metrics?.updated_at)} · ${escapeHtml(orderMode)}${escapeHtml(makerLabel)}${escapeHtml(strategyLabel)}${telegramLabel} ${(task.startup_warnings || []).map((warning) => `<span class="threshold-status pending">${escapeHtml(warning)}</span>`).join("")} ${task.exit_code == null ? "" : ` · 退出码 ${task.exit_code}`}</small>`;
   element("monitor-stats").innerHTML = stat("双腿中间价溢价", signed(metrics?.premium_bps), metricNote, "⇄", "bps") + stat("净敞口", metrics?.net_delta == null ? "—" : signed(metrics.net_delta, 6), "双腿基础币数量合计", "⊞") + stat("会话盈亏 · MTM", metrics?.session_pnl == null ? "—" : `$${signed(metrics.session_pnl)}`, "按盘口标记的会话估值变化，非已实现收益", "↗") + stat("套利执行 / 对冲", `${metrics?.trades ?? 0} / ${metrics?.hedges ?? 0}`, `当前会话记录 ${metrics?.minute_rows ?? 0} 条分钟数据`, "▥") + stat("总成交额 · 双腿合计", money(metrics?.session_volume_usd), "实际成交名义金额，不是账户权益", "⇄") + stat("净损益 · 已实现", money(metrics?.execution_stats?.net_realized_usd, 4), "已平仓价差减全部成交手续费，浮盈见交易统计", "↗") + stat("总手续费", money(metrics?.session_fees_usd, 4), "两条腿及后续对冲手续费", "▥");
   element("venue-cards").innerHTML = metrics?.venues?.length ? metrics.venues.map((venue) => {
     const balance = venue.balance_status;
@@ -343,7 +340,7 @@ function renderSignals(metrics, fresh) {
   const openingMode = signal.rows.some((row) => row.action === "close" && row.order_type === "maker")
     ? "开仓、平仓主腿均挂单 / 对冲腿吃单；Arcus 纠偏也只挂单"
     : signal.rows.some((row) => row.action === "open" && row.order_type === "maker") ? "开仓主腿挂单 / 对冲吃单；平仓双腿吃单" : "双腿吃单";
-  const summary = executableBps ? `可成交价差 bps · 开仓 ≥ ${signed(levels.entry_bps)} / 平仓 ≥ ${signed(levels.exit_bps)} · ${openingMode}${levels.entries ? " · 本轮点位已锁定" : ""}` : spread ? `实际可成交价差 > ${number(metrics.spread_bps, 3)} bps · 双向、不限批次 · 不依赖历史数据` : bps ? `溢价 bps 策略 · 中间价溢价 ${signed(metrics.premium_bps)} bps · 开仓 ${signed(levels?.entry_bps)} / 参考回归 ${signed(levels?.exit_bps)} bps${levels?.exit_mode === "profit" ? ` · 净收益止盈 ${number(levels.take_profit_bps, 2)} bps · 保守退出 ${money(levels.exit_quote?.net_usd, 4)}` : ""}${levels?.entries ? " · 本轮点位已锁定" : ""}` : `套利阈值策略 · 中间价溢价 ${signed(metrics.premium_bps)} bps · 中线 ${signed(thresholds?.midline_bps)} · 区间 [${signed(thresholds ? thresholds.midline_bps - thresholds.lower_bps : null)} … ${signed(thresholds ? thresholds.midline_bps + thresholds.upper_bps : null)}]`;
+  const summary = executableBps ? `可成交价差 bps · 开仓 ≥ ${signed(levels.entry_bps)} / 平仓 ≥ ${signed(levels.exit_bps)} · ${openingMode}${levels.entries ? " · 本轮点位已锁定" : ""}` : spread ? `实际可成交价差 > ${number(metrics.spread_bps, 3)} bps · 双向、不限批次 · 不依赖历史数据` : bps ? `溢价 bps 策略 · 中间价溢价 ${signed(metrics.premium_bps)} bps · 开仓 ${signed(levels?.entry_bps)} / 平仓 ${signed(levels?.exit_bps)} bps${levels?.entries ? " · 本轮点位已锁定" : ""}` : `套利阈值策略 · 中间价溢价 ${signed(metrics.premium_bps)} bps · 中线 ${signed(thresholds?.midline_bps)} · 区间 [${signed(thresholds ? thresholds.midline_bps - thresholds.lower_bps : null)} … ${signed(thresholds ? thresholds.midline_bps + thresholds.upper_bps : null)}]`;
   element("signal-summary").textContent = `${fresh ? "当前快照" : "最后快照 · 非实时"} · ${summary}`;
   element("signal-rows").innerHTML = signal.rows.map((row) => {
     const prefix = row.action === "open" ? "开仓 · " : row.action === "close" ? "平仓 · " : "";
@@ -357,14 +354,13 @@ function renderSignals(metrics, fresh) {
   element("signal-note").textContent = bps ? "触发指标与门槛均为主腿相对对冲腿的中间价溢价；≤ 条件的 gap = 门槛 − 指标，≥ 条件的 gap = 指标 − 门槛。可成交溢价另按卖腿价格 / 买腿价格计算，不参与上述差值。" : "触发指标为可成交溢价；门槛包含当前方向阈值、配置手续费和仓位附加值。gap = 可成交溢价 − 门槛。";
   if (executableBps) {
     element("signal-note").textContent = "开仓和平仓触发指标分别按对应方向的（卖方买一 / 买方卖一 − 1）× 10,000 计算，两个方向均为 ≥ 门槛。历史分位数使用各自方向的分钟收盘买卖报价重算。开仓按配置选择主腿挂单或吃单：挂单时可成交溢价列使用主腿挂单价，另核验其与对冲盘口的价差及深度，确认新增成交后才对冲；信号失效立即请求撤单。平仓与余仓修正使用吃单。gap ≥ 0 不保证成交或盈利，手续费另计。";
-    if (metrics.primary_maker_only) element("signal-note").textContent = "触发指标仍按对应方向的卖方买一 / 买方卖一计算，开平仓门槛不变。Arcus 主腿开仓和平仓均使用 Post-only，另一腿只对已确认新增成交量吃单对冲；平仓两腿均只减仓。Arcus 余仓修正也只挂单，不自动转为 IOC。价差失效、离开最优价、暂停或停止会按规则撤单并核对最终成交。挂单可能不成交，止损、超时退出和纠偏不能保证立即完成。";
+    if (metrics.primary_maker_only) element("signal-note").textContent = "触发指标仍按对应方向的卖方买一 / 买方卖一计算，开平仓门槛不变。Arcus 主腿开仓和平仓均使用 Post-only，另一腿只对已确认新增成交量吃单对冲；平仓两腿均只减仓。Arcus 余仓修正也只挂单，不自动转为 IOC。价差失效、离开最优价、暂停或停止会按规则撤单并核对最终成交。挂单可能不成交，平仓和纠偏不能保证立即完成。";
     return;
   }
   if (spread) {
     element("signal-note").textContent = "触发条件：买入方卖盘与卖出方买盘的可成交价差严格大于门槛，gap 必须大于 0；逐档深度和仓位上限限制数量。手续费另计，触发不保证盈利。中位数、分钟历史、开仓批次和整轮止盈目标不参与判断。";
     return;
   }
-  if (levels?.exit_mode === "profit") element("signal-note").textContent = "开仓行比较中间价点位，另需通过深度报价、往返盘口成本和开仓保护；已知成本的平仓行比较本轮保守退出净收益 bps 与止盈目标，基准为主腿累计开仓成交额。止损和最长持仓也能触发减仓；旧仓成本未知时使用原 bps 点位。";
   element("signal-note").textContent += " gap ≥ 0 仅表示达到点位，不代表已下单或净利润；下单仍受盘口深度、信号持续时间、仓位上限及暂停状态等条件限制。可成交溢价按最优报价计算，不代表整笔实际成交价。";
 }
 
@@ -470,7 +466,7 @@ async function refreshDetail() {
   }
 }
 
-const fieldMap = {"bps-price-basis": ["bps", "price_basis", "executable"], "spread-bps": ["strategy", "spread_bps", 1], "strategy-mode": ["strategy", "mode", "threshold"], "bps-levels": ["bps", "levels", "rolling"], "bps-history-mode": ["bps", "history_mode", "records"], "bps-direction": ["bps", "direction", "long_primary"], "bps-window": ["bps", "window_minutes", 120], "bps-min-valid": ["bps", "min_valid_minutes", 30], "bps-entry-percentile": ["bps", "entry_percentile", 10], "bps-exit-percentile": ["bps", "exit_percentile", 75], "bps-entry": ["bps", "entry_bps", -9], "bps-exit": ["bps", "exit_bps", -6], "bps-exit-mode": ["bps", "exit_mode", "levels"], "bps-take-profit": ["bps", "take_profit_bps", 1], "bps-stop-loss": ["bps", "stop_loss_bps", 10], "bps-max-hold": ["bps", "max_hold_sec", 900], "bps-min-gap": ["bps", "min_gap_bps", 2], "bps-entry-confirm": ["bps", "entry_confirm_sec", 2], "bps-cycle-cooldown": ["bps", "cycle_cooldown_sec", 30], "bps-add-step": ["bps", "add_step_bps", .5], "bps-execution-slip": ["bps", "execution_slippage_bps", 1], "bps-cost-buffer": ["bps", "cost_buffer_bps", 0], "bps-add-interval": ["bps", "add_interval_sec", 60], "bps-position-cap": ["bps", "max_position_usd", 1000], "primary-order-type": ["execution", "primary_order_type", "taker"], "maker-cancel-policy": ["execution", "maker_cancel_policy", "best_price"], "maker-reprice-delay": ["execution", "maker_reprice_delay_sec", 0.3], "maker-requote-delay": ["execution", "maker_requote_delay_sec", 0.5], "maker-timeout": ["execution", "maker_timeout_sec", 5], "primary-maker-fee": ["primary", "maker_fee_bps", 0], "midline": ["thresholds", "midline_bps", 0], "upper": ["thresholds", "upper_bps", 4], "lower": ["thresholds", "lower_bps", 4], "order-cap": ["sizing", "max_order_notional_usd", 500], "primary-cap": ["primary", "max_position_usd", 1000], "hedge-cap": ["hedge", "max_position_usd", 1000], "primary-fee": ["primary", "taker_fee_bps", 0], "hedge-fee": ["hedge", "taker_fee_bps", 2.25], "primary-symbol": ["primary", "symbol", ""], "hedge-symbol": ["hedge", "symbol", ""]};
+const fieldMap = {"bps-price-basis": ["bps", "price_basis", "executable"], "spread-bps": ["strategy", "spread_bps", 1], "strategy-mode": ["strategy", "mode", "threshold"], "bps-levels": ["bps", "levels", "rolling"], "bps-history-mode": ["bps", "history_mode", "records"], "bps-direction": ["bps", "direction", "long_primary"], "bps-window": ["bps", "window_minutes", 120], "bps-min-valid": ["bps", "min_valid_minutes", 30], "bps-entry-percentile": ["bps", "entry_percentile", 10], "bps-exit-percentile": ["bps", "exit_percentile", 75], "bps-entry": ["bps", "entry_bps", -9], "bps-exit": ["bps", "exit_bps", -6], "bps-add-interval": ["bps", "add_interval_sec", 60], "bps-position-cap": ["bps", "max_position_usd", 1000], "primary-order-type": ["execution", "primary_order_type", "taker"], "maker-cancel-policy": ["execution", "maker_cancel_policy", "best_price"], "maker-reprice-delay": ["execution", "maker_reprice_delay_sec", 0.3], "maker-requote-delay": ["execution", "maker_requote_delay_sec", 0.5], "maker-timeout": ["execution", "maker_timeout_sec", 5], "primary-maker-fee": ["primary", "maker_fee_bps", 0], "midline": ["thresholds", "midline_bps", 0], "upper": ["thresholds", "upper_bps", 4], "lower": ["thresholds", "lower_bps", 4], "order-cap": ["sizing", "max_order_notional_usd", 500], "primary-cap": ["primary", "max_position_usd", 1000], "hedge-cap": ["hedge", "max_position_usd", 1000], "primary-fee": ["primary", "taker_fee_bps", 0], "hedge-fee": ["hedge", "taker_fee_bps", 2.25], "primary-symbol": ["primary", "symbol", ""], "hedge-symbol": ["hedge", "symbol", ""]};
 
 function sectionLines(text, section) {
   const lines = text.split("\n");
@@ -532,18 +528,14 @@ function refreshStrategyFields() {
   const mode = element("strategy-mode").value;
   const bps = mode === "bps", spread = mode === "spread";
   const rolling = element("bps-levels").value === "rolling";
-  const profit = bps && element("bps-exit-mode").value === "profit";
-  if (profit && element("bps-price-basis").value === "executable") setBpsBasis("mid");
   const records = element("bps-history-mode").value === "records";
   element("bps-window-label").textContent = records ? "参考记录数" : "滚动窗口";
   element("bps-window-unit").textContent = records ? "条有效分钟记录" : "分钟";
   element("bps-settings").hidden = !bps;
   element("spread-settings").hidden = !spread;
   element("spread-bps").disabled = !spread;
-  element("bps-profit-settings").hidden = !profit;
   for (const control of element("bps-settings").querySelectorAll("input, select")) control.disabled = !bps;
-  element("bps-price-basis").disabled = !bps || profit;
-  for (const control of element("bps-profit-settings").querySelectorAll("input, select")) control.disabled = !profit;
+  element("bps-price-basis").disabled = !bps;
   for (const id of ["midline", "upper", "lower"]) {
     element(id).closest("label").hidden = bps || spread;
     element(id).disabled = bps || spread;
@@ -570,7 +562,7 @@ function refreshStrategyFields() {
   }
   element("execution-note").textContent = maker
     ? element("task-primary").value === "arcus"
-      ? "Arcus 主腿开仓、平仓、余仓修正均只使用 Post-only 挂单，绝不自动转吃单。另一腿仅按确认新增成交量吃单对冲，平仓两腿只减仓。挂单费用使用主腿 maker 费率；可能长时间不成交，止损或到期也不保证立即退出。暂停或停止会撤单并核对最终成交，不自动平仓。"
+      ? "Arcus 主腿开仓、平仓、余仓修正均只使用 Post-only 挂单，绝不自动转吃单。另一腿仅按确认新增成交量吃单对冲，平仓两腿只减仓。挂单费用使用主腿 maker 费率；可能长时间不成交，不保证立即退出。暂停或停止会撤单并核对最终成交，不自动平仓。"
       : "主腿按配置 Post-only 挂单；BPS / 阈值条件失效立即请求撤单，条件有效且在买一/卖一时按保留规则排队。仅对确认新增成交量吃单对冲。BPS 平仓与余仓修正仍为吃单，手续费分别按配置计。"
     : (spread || executableBps)
     ? "1 bps = 0.01%。手续费按实际账户配置并另计，不参与价格差门槛判断；单笔下单量、每腿持仓上限与滑点保护继续生效。"
@@ -588,6 +580,9 @@ function syncFields() {
       setYaml("bps", key, 100 - Number(yamlValue(text, "bps", key, long ? 10 : 75)));
     }
   }
+  // Preserve an old profit task's implicit mid basis above before discarding its guards.
+  setYaml("bps", "exit_mode", "levels");
+  for (const key of ["take_profit_bps", "stop_loss_bps", "max_hold_sec", "min_gap_bps", "entry_confirm_sec", "cycle_cooldown_sec", "add_step_bps", "execution_slippage_bps", "cost_buffer_bps"]) setYaml("bps", key, null, true);
   for (const [id, [section, key, fallback]] of Object.entries(fieldMap)) {
     const defaultValue = id === "primary-maker-fee" ? yamlValue(element("config-yaml").value, "primary", "taker_fee_bps", 0) : fallback;
     element(id).value = yamlValue(element("config-yaml").value, section, key, defaultValue);
@@ -661,7 +656,7 @@ for (const [id, [section, key]] of Object.entries(fieldMap)) {
     const value = element(id).value;
     if (id === "bps-price-basis") setBpsBasis(value);
     if (id === "strategy-mode" && value === "bps") setBpsBasis("executable");
-    if (["primary-order-type", "maker-cancel-policy", "strategy-mode", "bps-price-basis", "bps-levels", "bps-history-mode", "bps-direction", "bps-exit-mode"].includes(id)) {
+    if (["primary-order-type", "maker-cancel-policy", "strategy-mode", "bps-price-basis", "bps-levels", "bps-history-mode", "bps-direction"].includes(id)) {
       setYaml(section, key, value);
       if (id === "bps-direction" && element("bps-price-basis").value === "mid") {
         for (const [entryId, exitId] of [["bps-entry", "bps-exit"], ["bps-entry-percentile", "bps-exit-percentile"]]) {

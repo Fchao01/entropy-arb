@@ -235,7 +235,7 @@ def test_dust_configuration_defaults_and_disable(tmp_path):
     assert load_config(str(path), symbol='SPY', hedge_venue='lighter', credential_env={}).bps_max_dust_notional_usd == 0
 
 
-def test_profit_mode_dust_does_not_override_a_latched_exit(tmp_path):
+def test_legacy_profit_dust_does_not_latch_an_exit(tmp_path):
     async def run():
         eng = spy_engine(tmp_path)
         eng.ensure_async_state()
@@ -246,8 +246,8 @@ def test_profit_mode_dust_does_not_override_a_latched_exit(tmp_path):
         strategy.locked_entry, strategy.locked_exit = -8, 9
         strategy.closing, strategy.close_reason = True, '净收益止损'
         strategy.costs.inherit({v.key: v.position for v in eng.venues.values()}, time.time())
-        assert eng._scan(time.time()) is None  # Entry quote qualifies, but exit remains latched.
-        assert strategy.closing and strategy.close_reason == '净收益止损'
+        assert eng._scan(time.time())[2].action == 'bps_open'
+        assert not strategy.closing and strategy.close_reason is None
         assert not eng.halted
     asyncio.run(run())
 
