@@ -27,7 +27,7 @@ from typing import Dict, List, Optional
 import aiohttp
 
 from .book import ArbPlan, OrderBook, floor_step, plan_arb
-from .bps_strategy import BpsStrategy, recorder_source
+from .bps_strategy import BpsStrategy, RESIDUAL_RETRY_SEC, recorder_source
 from .maker import execute_primary_maker, rh_hedge_depth
 from .maker_quote import check_quote
 from .config import Config
@@ -302,6 +302,9 @@ class Engine:
         if cfg.primary_maker_only:
             log.info('[ARCUS MAKER ONLY] 主腿开仓、平仓和余仓修正均为 Post-only；禁止 IOC 回退，退出可能等待成交')
         if self.bps_strategy:
+            log.info('[BPS REPAIR POLICY] mode=auto-confirmed-residual retry_sec=%.1f dust_cap_usd=%.2f; '
+                     'verify open orders and positions before resuming',
+                     RESIDUAL_RETRY_SEC, cfg.bps_max_dust_notional_usd)
             log.info('[BPS PRICE] configured_basis=%s entry_percentile=%.2f exit_percentile=%.2f; '
                      'executable compares sell bid / buy ask, both triggers >= target; existing cycles retain their saved basis',
                      cfg.bps_price_basis, cfg.bps_entry_percentile, cfg.bps_exit_percentile)
@@ -544,6 +547,9 @@ class Engine:
     async def _evaluate(self) -> None:
         cfg = self.cfg
         if self.halted or self.manual_paused:
+            return
+        if self.bps_strategy and self.bps_strategy.repair_waiting:
+            await self._maybe_hedge()
             return
         now = time.time()
         exiting = self.bps_strategy and self.bps_strategy.entries and (
@@ -1017,12 +1023,27 @@ class Engine:
             return
         if self.active_maker is not None:
             return  # unknown live order/hedge: position reads alone cannot resolve it
+        strategy = self.bps_strategy
+        if strategy and strategy.repair_waiting:
+            delay = strategy._repair_retry_at - time.monotonic()
+            if delay > 0:
+                self._schedule_poke(delay)
+                return
+            if self.halted or not await self._verify_residual_repair():
+                return
         net = sum(v.position for v in self.venues.values())
         tolerance = self.bps_strategy.tolerance if self.bps_strategy else self.cfg.net_tolerance_base
         attempts = 0
         while attempts < (3 if self.bps_strategy else 1):
             if (self.bps_strategy.net_balanced() if self.bps_strategy else abs(net) <= tolerance):
                 break
+            if strategy and not self.halted:
+                unavailable = [v.name for v in self.venues.values()
+                               if v.key in self._venue_down or not v.ready_to_trade()
+                               or not v.book.is_fresh(self.cfg.staleness_sec)]
+                if unavailable:
+                    strategy.wait_for_residual(f'{" / ".join(unavailable)} 行情或连接不可用')
+                    return
             candidates = [v for v in self.venues.values() if v.position * net > 0]
             if self.bps_strategy and candidates and all(self._venue_limited(v) for v in candidates):
                 until = min(max(self._venue_limited_until.get(v.key, 0), getattr(v, 'rate_limit_until', 0))
@@ -1054,13 +1075,90 @@ class Engine:
             net = remaining
         remaining = sum(v.position for v in self.venues.values())
         balanced = self.bps_strategy.net_balanced() if self.bps_strategy else abs(remaining) <= tolerance
-        if self.cfg.primary_order_type == "maker" and not balanced and not self.halted:
+        if strategy and not self.halted:
+            if balanced and strategy.repair_waiting:
+                strategy.finish_residual_repair()
+            elif not balanced:
+                # Known zero/partial fills and temporary readiness/budget
+                # blocks are retryable. Never enlarge an unorderable tail.
+                candidates = [v for v in self.venues.values() if v.position * remaining > 0]
+                retryable = any(v.key in self._venue_down or not v.ready_to_trade()
+                                or not v.book.is_fresh(self.cfg.staleness_sec)
+                                or self._venue_limited(v) or self._vlock(v.key).locked()
+                                or not self._venue_rate_ok(v)
+                                or self._reduction_order(v, remaining)[2] is None
+                                for v in candidates)
+                if retryable:
+                    strategy.wait_for_residual(self.residual_block_reason(remaining))
+                    return
+        if (not balanced and not self.halted
+                and (self.cfg.primary_order_type == "maker" or strategy and strategy.repair_waiting)):
             self.halted = True
             if self.bps_strategy:
                 self.bps_strategy.pending = True
                 self.bps_strategy.reason = self.bps_strategy.confirmed_residual_reason()
                 self.bps_strategy.save()
             log.critical("[MAKER] residual base %.8g exceeds tolerance; stopped new quotes", remaining)
+
+    async def _verify_residual_repair(self):
+        """Recheck a confirmed batch after an outage, before any retry/resume.
+
+        The fill ledger remains authoritative: failed reads defer, and an
+        external order or position change never silently clears a hard pause.
+        Both venue locks exclude concurrent executions/reconciliations.
+        """
+        strategy = self.bps_strategy
+        if self.stop.is_set() or self.manual_paused:
+            return False
+        unavailable = [v.name for v in self.venues.values()
+                       if v.key in self._venue_down or not v.ready_to_trade()
+                       or not v.book.is_fresh(self.cfg.staleness_sec)]
+        if unavailable:
+            strategy.wait_for_residual(f'{" / ".join(unavailable)} 行情或连接不可用')
+            return False
+        grace = max(v.last_traded_ts for v in self.venues.values()) + self.RECONCILE_GRACE_SEC - time.time()
+        if grace > 0:
+            self._schedule_poke(grace)
+            return False  # Let public account state catch up with confirmed fills.
+        locks = [self._vlock(v.key) for v in self.venues.values()]
+        if any(lock.locked() for lock in locks):
+            self._schedule_poke(1)
+            return False
+        for lock in locks:
+            await lock.acquire()
+        try:
+            timeout = max(10, self.cfg.settle_timeout_sec)
+            async def check(v):
+                orders = await asyncio.wait_for(v.has_open_orders(), timeout)
+                position = await asyncio.wait_for(v.fetch_position(), timeout)
+                return v, orders, position
+            results = await asyncio.gather(*(check(v) for v in self.venues.values()),
+                                           return_exceptions=True)
+            if self.halted or self.stop.is_set() or self.manual_paused or self._position_uncertain:
+                return False
+            for result in results:
+                if isinstance(result, BaseException):
+                    strategy.wait_for_residual('订单/仓位查询尚未成功')
+                    return False
+                venue, orders, position = result
+                if orders is not False:
+                    strategy.wait_for_residual(f'{venue.name} 尚有未成交订单或订单状态未确认')
+                    return False
+                if (isinstance(position, bool) or not isinstance(position, (int, float))
+                        or not math.isfinite(position)):
+                    strategy.wait_for_residual(f'{venue.name} 实时持仓数据无效')
+                    return False
+                if abs(position - venue.position) > strategy.tolerance:
+                    self.halted = strategy.pending = True
+                    self._position_uncertain.add(venue.key)
+                    strategy.reason = '自动修正核验发现实际仓位与已确认成交不一致，暂停新订单'
+                    strategy.save()
+                    log.critical('[BPS REPAIR BLOCKED] %s: %s', venue.name, strategy.reason)
+                    return False
+            return True
+        finally:
+            for lock in reversed(locks):
+                lock.release()
 
     def _reduction_order(self, venue, net):
         """One shared sizing check for actual repairs and their diagnostics."""
@@ -1069,10 +1167,14 @@ class Engine:
             return 0, None, 'Arcus 仅挂单修正已暂停或停止；未发送新订单'
         if venue.key in self._venue_down or not venue.book.is_fresh(self.cfg.staleness_sec):
             return 0, None, '行情或连接不可用'
+        if not venue.ready_to_trade():
+            return 0, None, '账户交易连接尚未就绪'
         if self._venue_limited(venue):
             return 0, None, '交易所限流冷却中'
         if self._vlock(venue.key).locked():
             return 0, None, '等待该腿订单或持仓查询完成'
+        if not self._venue_rate_ok(venue):
+            return 0, None, '等待该腿下单频率额度恢复'
         ref = ((venue.book.best_ask() if net > 0 else venue.book.best_bid()) if maker
                else (venue.book.best_bid() if net > 0 else venue.book.best_ask()))
         if ref is None or not math.isfinite(ref) or ref <= 0:

@@ -19,6 +19,7 @@ from .maker import rh_hedge_depth
 
 log = logging.getLogger('bps')
 PENDING_RECOVERY_RECHECK_SEC = 5.0
+RESIDUAL_RETRY_SEC = 5.0
 
 
 def recorder_source(cfg):
@@ -149,6 +150,11 @@ class BpsStrategy:
         self.locked_price_basis = None
         self.closing = False
         self.pending = False
+        # Only confirmed fills may enter this retryable state. Unknown orders
+        # keep the existing hard pause; a reconnect must never clear it.
+        self.repair_waiting = False
+        self._repair_completion = None
+        self._repair_retry_at = 0.0
         self.startup_recovery = None
         self.adopted_position = False
         self.awaiting_levels = False
@@ -273,6 +279,45 @@ class BpsStrategy:
                         'below order minimum, continue monitoring without rounding positions to zero',
                         net, self.residual_status()['notional_usd'], self.cfg.bps_max_dust_notional_usd)
             self._dust_log = (net, now)
+
+    def wait_for_residual(self, reason):
+        self.engine.ensure_async_state()
+        first = not self.repair_waiting
+        self.repair_waiting = self.pending = True
+        self._repair_retry_at = time.monotonic() + RESIDUAL_RETRY_SEC
+        self.reason = f'自动修正等待：{reason}；暂停新机会，恢复后核验并重试'
+        try:
+            self.save()  # A restart must verify orders and positions, too.
+        except OSError:
+            self.engine.halted = True
+            self.reason = '自动修正等待状态无法保存，暂停新订单'
+            raise
+        if first:
+            for key in self.engine._armed:
+                self.engine._armed[key] = None
+            log.warning('[BPS REPAIR WAIT] %s', self.reason)
+            self.engine._reconcile_evt.set()
+        self.engine._schedule_poke(RESIDUAL_RETRY_SEC)
+
+    def finish_residual_repair(self):
+        eng = self.engine
+        if (not self.repair_waiting or eng.halted or eng.active_maker is not None
+                or eng._position_uncertain or not self.net_balanced()):
+            return
+        completion = self._repair_completion
+        self.repair_waiting = False
+        self._repair_completion = None
+        try:
+            # Complete the interrupted batch's bookkeeping exactly once. A
+            # periodic repair without a batch may also finish the whole cycle.
+            self.after_execution(*(completion or (None, 0)), unresolved=False)
+        except Exception:
+            eng.halted = self.pending = True
+            self.reason = '自动修正后状态保存失败，暂停新订单'
+            raise
+        log.warning('[BPS REPAIR RESUMED] 已确认订单与仓位，net=%+.8g precision_dust=%s；恢复策略评估',
+                    sum(v.position for v in eng.venues.values()), self.precision_dust())
+        eng._update_evt.set()
 
     def exit_reached(self, premium):
         return (premium is not None and self.locked_exit is not None
@@ -1084,10 +1129,7 @@ class BpsStrategy:
             self.reason = '等待可交易的双腿行情'
             return None
         if not self.net_balanced():
-            eng.halted = self.pending = True
-            self.reason = self.confirmed_residual_reason()
-            self.save()
-            log.critical('[BPS PAUSED] %s', self.reason)
+            self.wait_for_residual('已确认仓位存在差额，等待 reduce-only 修正')
             return None
         if any(not eng._venue_rate_ok(v) or v.book.last_update_ts <= v.last_traded_ts
                for v in eng.venues.values()):
@@ -1208,6 +1250,11 @@ class BpsStrategy:
 
     def after_execution(self, plan, before_qty, unresolved):
         eng = self.engine
+        if (self.repair_waiting and not unresolved and not eng.halted
+                and eng.active_maker is None and not eng._position_uncertain):
+            self._repair_completion = (plan, before_qty)
+            self.save()
+            return
         already_halted = eng.halted
         if (unresolved or eng.halted or eng.active_maker is not None
                 or eng._position_uncertain or not self.net_balanced()):
@@ -1237,7 +1284,7 @@ class BpsStrategy:
             self.closing = False
             for key in eng._armed:
                 eng._armed[key] = None
-        elif plan.action == 'bps_open' and abs(eng.entropy.position) > before_qty + eng._step / 2:
+        elif plan is not None and plan.action == 'bps_open' and abs(eng.entropy.position) > before_qty + eng._step / 2:
             self.close_reason = None
             self.entries += 1
             self.last_entry_at = time.time()
