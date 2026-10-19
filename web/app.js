@@ -697,9 +697,11 @@ element("task-form").addEventListener("submit", async (event) => {
   try {
     const strategyFile = element("task-strategy").value || null;
     const payload = {name: element("task-name").value, symbol: element("task-symbol").value, primary: element("task-primary").value, hedge: element("task-hedge").value, profile: element("task-profile").value, mode: element("task-form").querySelector('input[name="mode"]:checked').value, config: element("config-yaml").value, strategy_file: strategyFile, save_strategy: Boolean(strategyFile)};
-    await api(state.editing ? `/api/tasks/${state.editing}` : "/api/tasks", state.editing ? "PUT" : "POST", payload);
+    const saved = await api(state.editing ? `/api/tasks/${state.editing}` : "/api/tasks", state.editing ? "PUT" : "POST", payload);
     element("task-dialog").close();
-    toast("配置已保存，任务尚未启动");
+    toast(saved.route_changed
+      ? `交易路径已保存，旧记录已归档，任务尚未启动${saved.strategy_detached ? "；已使用独立配置，共用 YAML 保留" : ""}。原交易所仓位未平仓。`
+      : "配置已保存，任务尚未启动");
     await refresh();
   } catch (error) {element("task-error").textContent = error.message;} finally {element("save-task").disabled = false;}
 });

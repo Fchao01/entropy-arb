@@ -220,6 +220,11 @@ class TaskManager:
                 if task["state"] in ACTIVE:
                     task.update(state="interrupted", pid=None, ended_at=time.time())
                 self.tasks[task["id"]] = task
+                snapshot = self.directory(task['id']) / 'config.yaml'
+                run_snapshot = self.directory(task['id']) / 'run-config.yaml'
+                if (task.get('started_at') and snapshot.is_file() and not snapshot.is_symlink()
+                        and not run_snapshot.exists()):
+                    self.write_config(run_snapshot, snapshot.read_text(encoding='utf-8'))
         self.save()
 
     async def monitor_instance(self, profile="default"):
@@ -610,6 +615,9 @@ class TaskManager:
         return path
 
     def task_snapshot_config(self, task):
+        run_path = self.directory(task['id']) / 'run-config.yaml'
+        if task.get('started_at') and run_path.is_file() and not run_path.is_symlink():
+            return run_path
         path = self.directory(task["id"]) / "config.yaml"
         if path.is_file() and not path.is_symlink():
             return path
@@ -906,10 +914,9 @@ class TaskManager:
             strategy_text = payload.get("config") if save_strategy else None
             public, rendered, cfg, values = self.validate(payload, task_id,
                                                           strategy_text=strategy_text)
-            if save_strategy:
-                self.ensure_unused("strategy_file", strategy_file)
-                self.write_config(self.strategy_path(strategy_file), public["config"])
-            if old.get("started_at"):
+            route_archive = None
+            detached = False
+            if old.get("started_at") or old.get('route_history'):
                 old_cfg = load_config(str(self.task_snapshot_config(old)),
                                       symbol=old["symbol"], primary_venue=old["primary"],
                                       hedge_venue=old["hedge"], credential_env={})
@@ -918,15 +925,100 @@ class TaskManager:
                 next_pair = (public["symbol"], public["primary"], public["hedge"],
                              market_resource(cfg.primary), market_resource(cfg.hedge))
                 if prior_pair != next_pair:
-                    raise ConsoleError("任务已有运行记录；更换币种或交易路径请新建任务，避免混合历史数据")
+                    public, rendered, cfg = self.isolate_route(old, old_cfg, public, rendered, cfg)
+                    # A shared YAML must not change other tasks' markets or
+                    # redirect them into this task's new output namespace.
+                    shared = any(t['id'] != task_id and t.get('strategy_file') == strategy_file
+                                 for t in self.tasks.values()) if strategy_file else False
+                    if strategy_file and (shared or not save_strategy):
+                        public['strategy_file'] = None
+                        save_strategy = False
+                        detached = True
+                    route_archive = self.archive_route(old, old_cfg)
+                    public['route_history'] = [*old.get('route_history', []), route_archive]
+                    old = {**old, 'state': 'stopped', 'pid': None, 'started_at': None,
+                           'ended_at': None, 'exit_code': None, 'manual_paused': False,
+                           'startup_warnings': []}
+            if save_strategy:
+                self.ensure_unused("strategy_file", strategy_file)
+                source = self.strategy_path(strategy_file)
+                previous_source = source.read_text(encoding='utf-8') if source.exists() else None
+                self.write_config(source, public["config"])
             directory = self.directory(task_id)
             directory.mkdir(mode=0o700, exist_ok=True)
-            (directory / "config.yaml").write_text(rendered, encoding="utf-8")
+            try:
+                self.write_config(directory / "config.yaml", rendered)
+            except Exception:
+                if save_strategy:
+                    if previous_source is None:
+                        source.unlink(missing_ok=True)
+                    else:
+                        self.write_config(source, previous_source)
+                raise
             (directory / "status.json").unlink(missing_ok=True)
             (directory / "control.json").unlink(missing_ok=True)
+            if route_archive:
+                self._auto_status_path(task_id).unlink(missing_ok=True)
+                (directory / 'events.log').unlink(missing_ok=True)
+                (directory / 'run-config.yaml').unlink(missing_ok=True)
             self.tasks[task_id] = {**old, **public, "updated_at": time.time()}
+            if route_archive:
+                self.audit(task_id, f"ROUTE CHANGED {route_archive['primary']} -> {route_archive['hedge']} "
+                           f"to {public['primary']} -> {public['hedge']}; "
+                           f"previous records: {route_archive['archive']}; positions were not closed")
             self.save()
-            return self.view(self.tasks[task_id])
+            result = self.view(self.tasks[task_id])
+            result.update(route_changed=route_archive is not None, strategy_detached=detached)
+            return result
+
+    def route_outputs(self, cfg):
+        log_path = self.configured_path(cfg.log_file)
+        return dict(minutes_csv=str(self.configured_path(cfg.recorder_csv)),
+                    trades_csv=str(self.configured_path(cfg.trades_csv)), log=str(log_path),
+                    bps_state=str(log_path.with_suffix('.bps-state.json')))
+
+    def isolate_route(self, old, old_cfg, public, rendered, cfg):
+        """Preserve YAML paths where possible; namespace reused outputs only."""
+        previous = set(self.route_outputs(old_cfg).values())
+        for history in old.get('route_history', []):
+            previous.update(history.get('outputs', {}).values())
+        raw = yaml.safe_load(rendered)
+        namespace = f"route-{uuid.uuid4().hex}"
+        for section, field, value in [('recorder', 'csv', cfg.recorder_csv),
+                                      ('logging', 'trades_csv', cfg.trades_csv),
+                                      ('logging', 'file', cfg.log_file)]:
+            path = self.configured_path(value)
+            if str(path) in previous:
+                # Keep the user's chosen parent directory and filename. The
+                # saved YAML is the authority for both analysis and execution.
+                raw.setdefault(section, {})[field] = str(Path(value).parent / namespace / Path(value).name)
+        text = yaml.safe_dump(raw, allow_unicode=True, sort_keys=False)
+        # Validate the exact independent document before touching any source.
+        candidate = {**public, 'config': text, 'strategy_file': None}
+        validated, rendered, cfg, _ = self.validate(candidate, old['id'])
+        validated['strategy_file'] = public.get('strategy_file')
+        return validated, rendered, cfg
+
+    def archive_route(self, task, cfg):
+        """Archive metadata; original CSVs, logs and trading state stay intact."""
+        directory = self.directory(task['id'])
+        archive = directory / 'history' / uuid.uuid4().hex
+        archive.mkdir(mode=0o700, parents=True)
+        for name in ('config.yaml', 'run-config.yaml', 'status.json', 'control.json', 'auto_threshold.json',
+                     'events.log', 'events.log.1', 'events.log.2', 'events.log.3'):
+            source = directory / name
+            if source.is_symlink():
+                raise ConsoleError('旧任务记录包含符号链接，未更改交易路径')
+            if source.is_file():
+                target = archive / ('saved-config.yaml' if name == 'config.yaml' else name)
+                target.write_bytes(source.read_bytes())
+                target.chmod(0o600)
+        outputs = self.route_outputs(cfg)
+        self.write_config(archive / 'config.yaml', self.task_snapshot_config(task).read_text(encoding='utf-8'))
+        self.write_config(archive / 'task.json', json.dumps(task, ensure_ascii=False))
+        self.write_config(archive / 'outputs.json', json.dumps(outputs, ensure_ascii=False))
+        return dict(archive=str(archive), changed_at=time.time(), symbol=task['symbol'],
+                    primary=task['primary'], hedge=task['hedge'], outputs=outputs)
 
     def view(self, task, include_config=True):
         result = dict(task)
@@ -964,7 +1056,7 @@ class TaskManager:
                                        hedge_venue=task["hedge"], credential_env={})
                 if (market_resource(previous.primary), market_resource(previous.hedge)) != (
                         market_resource(cfg.primary), market_resource(cfg.hedge)):
-                    raise ConsoleError("策略文件改变了市场路径，请新建任务，避免混合历史数据")
+                    raise ConsoleError("策略文件改变了市场路径，请先在任务配置中保存新路径，归档旧记录后再启动")
             markets = {market_resource(cfg.entropy), market_resource(cfg.hedge)}
             signers = signer_resources(cfg.entropy) | signer_resources(cfg.hedge) if task["mode"] == "live" else set()
             startup_warnings = []
@@ -992,7 +1084,8 @@ class TaskManager:
                     if signers & runtime["signers"]:
                         startup_warnings.append(f"与「{other['name']}」共用签名密钥，已允许启动；多进程可能发生 nonce 冲突或交易所限流")
             directory = self.directory(task_id)
-            (directory / "config.yaml").write_text(rendered, encoding="utf-8")
+            self.write_config(directory / "config.yaml", rendered)
+            self.write_config(directory / 'run-config.yaml', rendered)
             (directory / "status.json").unlink(missing_ok=True)
             (directory / "control.json").unlink(missing_ok=True)
             env = {key: value for key, value in os.environ.items()

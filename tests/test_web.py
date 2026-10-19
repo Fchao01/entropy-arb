@@ -101,8 +101,9 @@ def test_process_lifecycle_and_isolated_paths(tmp_path):
             await asyncio.wait_for(watcher, 3)
             assert manager.tasks[task_id]["state"] == "stopped"
             assert manager.tasks[task_id]["pid"] is None
-            with pytest.raises(ConsoleError, match="新建任务"):
-                await manager.put(payload("BTC"), task_id)
+            changed = await manager.put(payload("BTC"), task_id)
+            assert changed['symbol'] == 'BTC' and changed['route_changed']
+            assert changed['started_at'] is None
             await manager.put(payload(), task_id)
             await manager.delete(task_id)
             assert (manager.directory(task_id) / "engine.log").exists()
@@ -678,7 +679,7 @@ def test_linked_yaml_uses_latest_server_file_and_blocks_running_edits(tmp_path):
             await asyncio.wait_for(watcher, 3)
             changed_market = latest.replace("venue: lighter-rh", "venue: lighter-rh\n  symbol: BTC")
             await manager.save_strategy("eth.yaml", {"config": changed_market, "overwrite": True})
-            with pytest.raises(ConsoleError, match="新建任务"):
+            with pytest.raises(ConsoleError, match="保存新路径"):
                 await manager.start(task["id"])
         finally:
             await manager.close()
