@@ -900,9 +900,11 @@ element("detail-monitor").addEventListener("click", () => {selectMonitorTask(sta
 let libraryRequest = 0;
 function renderCredentials(fields) {
   const groups = [
-    ["Lighter / RH 与 Arcus", fields.filter((field) => /^(LIGHTER|ARCUS)_/.test(field.name))],
+    ["RH 专用凭据（不随主腿 / 对冲腿切换）", fields.filter((field) => /^RH_LIGHTER_/.test(field.name))],
+    ["Lighter 主网", fields.filter((field) => /^LIGHTER_/.test(field.name))],
+    ["Arcus", fields.filter((field) => /^ARCUS_/.test(field.name))],
     ["Entropy / Trade.xyz", fields.filter((field) => /^HL_/.test(field.name))],
-    ["主腿独立凭据（Lighter ↔ RH 时必填）", fields.filter((field) => /^PRIMARY_/.test(field.name))],
+    ["旧版 PRIMARY 凭据（已有两组时请在 YAML 绑定交易所）", fields.filter((field) => /^PRIMARY_/.test(field.name))],
     ["Telegram 通知", fields.filter((field) => /^TELEGRAM_/.test(field.name))],
   ];
   element("credential-fields").innerHTML = groups.map(([title, entries], index) => `<details class="credential-group" ${index === 0 ? "open" : ""}><summary>${title}</summary><div class="form-grid">${entries.map((field) => `<div class="credential-item"><label for="credential-${field.name}">${field.name}</label><input id="credential-${field.name}" type="password" data-credential="${field.name}" autocomplete="off" maxlength="2048" placeholder="${field.configured ? "已配置 · 留空保留" : "未配置 · 可留空"}"><small>${field.inherited ? "由服务环境变量覆盖，文件修改不会覆盖它" : field.configured ? "服务器已保存，不回传原值" : "未配置，按所用交易所填写"}</small><label class="clear-secret"><input type="checkbox" data-clear="${field.name}" ${field.inherited ? "disabled" : ""}> 清除此字段</label></div>`).join("")}</div></details>`).join("");

@@ -47,10 +47,11 @@ CREDENTIAL_BASES = (
 )
 CREDENTIAL_NAMES = set(CREDENTIAL_BASES) | {
     "PRIMARY_" + name for name in CREDENTIAL_BASES if not name.startswith("TELEGRAM_")
-}
+} | {"RH_LIGHTER_ACCOUNT_INDEX", "RH_LIGHTER_API_KEY_INDEX", "RH_LIGHTER_API_PRIVATE_KEY"}
 EDITABLE_CREDENTIALS = tuple(CREDENTIAL_BASES) + tuple(
     "PRIMARY_" + name for name in CREDENTIAL_BASES
-    if not name.endswith("_XYZ") and not name.startswith("TELEGRAM_"))
+    if not name.endswith("_XYZ") and not name.startswith("TELEGRAM_")) + (
+        "RH_LIGHTER_ACCOUNT_INDEX", "RH_LIGHTER_API_KEY_INDEX", "RH_LIGHTER_API_PRIVATE_KEY")
 ACTIVE = {"running", "stopping"}
 SYMBOL_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,39}\Z")
 PROFILE_RE = re.compile(r"[A-Za-z0-9_-]{1,40}\Z")
@@ -851,7 +852,7 @@ class TaskManager:
             config_file = Path(temporary) / "config.yaml"
             config_file.write_text(rendered, encoding="utf-8")
             cfg = load_config(str(config_file), symbol=symbol, primary_venue=primary,
-                              hedge_venue=hedge, credential_env=values)
+                              hedge_venue=hedge, credential_env=values if mode == 'live' else {})
         if self.configured_path(cfg.log_file) == self.configured_path(cfg.recorder_csv):
             # Older task YAMLs used the recorder CSV as the log destination.
             # Repair that unsafe value while saving so unrelated configuration
@@ -863,7 +864,7 @@ class TaskManager:
                 config_file = Path(temporary) / "config.yaml"
                 config_file.write_text(rendered, encoding="utf-8")
                 cfg = load_config(str(config_file), symbol=symbol, primary_venue=primary,
-                                  hedge_venue=hedge, credential_env=values)
+                                  hedge_venue=hedge, credential_env=values if mode == 'live' else {})
         positive = (cfg.entropy.cap_usd, cfg.hedge.cap_usd, cfg.max_order_notional,
                     cfg.min_order_notional, cfg.settle_timeout_sec, cfg.staleness_sec,
                     cfg.reconcile_sec, cfg.status_interval_sec, cfg.venue_probe_sec)

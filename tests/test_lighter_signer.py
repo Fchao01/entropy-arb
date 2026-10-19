@@ -19,6 +19,8 @@ def test_swapped_rh_signer_receives_the_same_credentials(tmp_path, monkeypatch,
   midline_bps: 0
   upper_bps: 4
   lower_bps: 4
+credentials:
+  lighter-rh: PRIMARY_LIGHTER
 primary:
   taker_fee_bps: 2.25
 hedge:

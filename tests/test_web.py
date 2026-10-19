@@ -316,8 +316,8 @@ def test_invalid_config_and_environment_isolation(tmp_path, monkeypatch):
             credentials(manager, "one", lighter_key=1)
             credentials(manager, "two", lighter_key=2)
             monkeypatch.setenv("LIGHTER_API_KEY_INDEX", "99")
-            first = manager.validate({**payload(), "profile": "one"}, "a" * 32)[2]
-            second = manager.validate({**payload(), "profile": "two"}, "b" * 32)[2]
+            first = manager.validate({**payload(), "mode": "live", "profile": "one"}, "a" * 32)[2]
+            second = manager.validate({**payload(), "mode": "live", "profile": "two"}, "b" * 32)[2]
             assert first.primary.lighter_creds.api_key_index == 1
             assert second.primary.lighter_creds.api_key_index == 2
             assert os.environ["LIGHTER_API_KEY_INDEX"] == "99"

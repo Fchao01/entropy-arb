@@ -173,11 +173,12 @@ def test_two_lighter_deployments_use_separate_credentials(monkeypatch):
                        "LIGHTER_ACCOUNT_INDEX": "22", "LIGHTER_API_KEY_INDEX": "2",
                        "LIGHTER_API_PRIVATE_KEY": "hedge-fixture"}.items():
         monkeypatch.setenv(key, value)
-    cfg = load(MINIMAL + '\nprimary:\n  venue: lighter\n', hedge="lighter-rh")
+    mapping = '\ncredentials:\n  lighter: PRIMARY_LIGHTER\n  lighter-rh: LIGHTER\n'
+    cfg = load(MINIMAL + mapping + '\nprimary:\n  venue: lighter\n', hedge="lighter-rh")
     assert cfg.primary.lighter_creds.account_index == 11
     assert cfg.hedge.lighter_creds.account_index == 22
     monkeypatch.delenv("PRIMARY_LIGHTER_API_PRIVATE_KEY")
-    cfg = load(MINIMAL + '\nprimary:\n  venue: lighter\n', hedge="lighter-rh")
+    cfg = load(MINIMAL + mapping + '\nprimary:\n  venue: lighter\n', hedge="lighter-rh")
     assert not cfg.primary.lighter_creds.complete
 
 
@@ -192,7 +193,8 @@ def test_rh_arcus_credentials_stay_with_venue_when_roles_swap():
         "PRIMARY_ARCUS_ACCOUNT_ADDRESS": "another-arcus-account",
         "PRIMARY_ARCUS_ACCOUNT_INDEX": "3", "PRIMARY_ARCUS_API_SIGNING_KEY": "another-key",
     }
-    path = write_tmp(MINIMAL + '\nprimary:\n  taker_fee_bps: 2.25\nhedge:\n  taker_fee_bps: 2.25\n')
+    path = write_tmp(MINIMAL + '\ncredentials:\n  lighter-rh: PRIMARY_LIGHTER\n'
+                     '\nprimary:\n  taker_fee_bps: 2.25\nhedge:\n  taker_fee_bps: 2.25\n')
     forward = load_config(path, symbol="QQQ", primary_venue="lighter-rh",
                           hedge_venue="arcus", credential_env=values)
     reverse = load_config(path, symbol="QQQ", primary_venue="arcus",
@@ -205,7 +207,8 @@ def test_rh_arcus_credentials_stay_with_venue_when_roles_swap():
 
 
 def test_partial_primary_lighter_credentials_are_not_mixed_with_base():
-    path = write_tmp(MINIMAL + '\nprimary:\n  venue: arcus\n  taker_fee_bps: 2.25\n')
+    path = write_tmp(MINIMAL + '\ncredentials:\n  lighter-rh: PRIMARY_LIGHTER\n'
+                     '\nprimary:\n  venue: arcus\n  taker_fee_bps: 2.25\n')
     cfg = load_config(path, symbol="QQQ", hedge_venue="lighter-rh", credential_env={
         "PRIMARY_LIGHTER_API_PRIVATE_KEY": "working-rh-key",
         "LIGHTER_ACCOUNT_INDEX": "22", "LIGHTER_API_KEY_INDEX": "4",

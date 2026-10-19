@@ -49,11 +49,15 @@ Arcus 适配器会尝试将裸名 ETH 解析为 ETH-USD。
 它只覆盖交易所选择，不会替你修改同一 YAML 中的费率、市场名或风险参数。
 建议每个交易所组合各用一份配置。
 
-对于需要独立主腿凭据的组合，可用以下环境变量覆盖默认凭据：
+Lighter 主网和 RH 的凭据按交易所绑定，交换主腿/对冲腿时账户不变。推荐在网页所选凭据文件
+（`.env` 或 `credentials/<名称>.env`）分别填写现有两套 API：
 
-- HL：`PRIMARY_HL_PRIVATE_KEY`、`PRIMARY_HL_ACCOUNT_ADDRESS`。
-- Lighter：`PRIMARY_LIGHTER_ACCOUNT_INDEX`、`PRIMARY_LIGHTER_API_KEY_INDEX`、
-  `PRIMARY_LIGHTER_API_PRIVATE_KEY`。
+- 主网：`LIGHTER_ACCOUNT_INDEX`、`LIGHTER_API_KEY_INDEX`、`LIGHTER_API_PRIVATE_KEY`。
+- RH：`RH_LIGHTER_ACCOUNT_INDEX`、`RH_LIGHTER_API_KEY_INDEX`、`RH_LIGHTER_API_PRIVATE_KEY`。
+
+这只是两套 API 的变量名称，不需要第三套 API，也不再要求填写 `PRIMARY_LIGHTER_*`。
+配置了任意 RH 专用字段时，就为两个网络使用上述固定分组；缺字段会提示补齐，不从旧组拼接。
+HL 的独立主腿覆盖仍使用 `PRIMARY_HL_PRIVATE_KEY`、`PRIMARY_HL_ACCOUNT_ADDRESS`。
 
 Arcus 在主腿和对冲腿都优先使用同一整组 `ARCUS_*`。只有这组完全未设置时，
 才使用兼容的 `PRIMARY_ARCUS_ACCOUNT_ADDRESS`、`PRIMARY_ARCUS_ACCOUNT_INDEX`、
@@ -62,14 +66,22 @@ Arcus 在主腿和对冲腿都优先使用同一整组 `ARCUS_*`。只有这组�
 `GET /v1/apiKeys` 检查密钥、钱包地址、子账户及有效期，日志记录凭据组、
 子账户和账户/公钥指纹，不记录私钥或完整钱包地址。
 
-只有一条 Lighter/RH 腿时，无论它是主腿还是对冲腿，都使用同一套凭据：
-配置了任意 `PRIMARY_LIGHTER_*` 字段时选用这一整组，否则使用 `LIGHTER_*`。
-选中的账户编号、API Key 编号和私钥必须全部填写；不会混用两组字段。
-因此 RH + Arcus 交换两条腿后，RH 的账户及 API Key 不会随角色改变。
-启动日志和校验失败信息会显示实际读取的变量组及账户、API Key 编号。
-两条腿分别为 Lighter 主网和 RH 时，
-主腿必须使用 `PRIMARY_LIGHTER_*`，对冲腿使用 `LIGHTER_*`，不能复用错误网络
-的密钥。trade.xyz 默认沿用 `HL_*_XYZ`（未设置时沿用 `HL_*`），同账户的两条
+已有文件如果用旧 `LIGHTER_*` 和 `PRIMARY_LIGHTER_*` 分别存了两套 API，可以完全保留这些字段，
+在 YAML 添加网络到凭据组的引用。例如**仅当旧 LIGHTER 组属于 RH、旧 PRIMARY 组属于主网**时：
+
+```yaml
+credentials:
+  lighter-rh: LIGHTER
+  lighter: PRIMARY_LIGHTER
+```
+
+实际归属相反时交换上面两个值；不要根据主腿角色猜测。YAML 这里只写组名，不写任何私钥。
+允许引用 `LIGHTER`、`RH_LIGHTER`、`PRIMARY_LIGHTER`，显式绑定优先于自动选择，
+绑定组为空或缺字段时不会改用别组。没有 RH 专用字段且存在两套旧组时拒绝猜测并提示绑定；
+单网络且只有一套旧组的文件继续兼容。双网络旧 PRIMARY 配置须明确绑定一次，随后交换腿仍保持网络账户。
+只采集行情不读取交易凭据，不受旧组歧义影响。网页配置库也按 RH、主网、Arcus 分组显示。
+启动日志和校验失败信息显示实际变量组、账户与 API Key 编号，不输出私钥。
+trade.xyz 默认沿用 `HL_*_XYZ`（未设置时沿用 `HL_*`），同账户的两条
 HL 腿共用 nonce 分配器和去重后的账户权益统计。
 
 ## 阈值与日志

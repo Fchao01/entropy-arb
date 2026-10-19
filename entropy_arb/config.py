@@ -232,6 +232,8 @@ class Config:
 
 # Schema: nested dict of key -> type (or nested dict). Unknown keys are errors.
 _SCHEMA: Dict[str, Any] = {
+    # References to ENV groups only; private keys must not enter public YAML.
+    "credentials": {"lighter": str, "lighter-rh": str},
     "strategy": {"mode": str, "spread_bps": float},
     "bps": {
         "levels": str, "direction": str, "history_mode": str, "price_basis": str,
@@ -347,6 +349,9 @@ def _validate(node: Any, schema: Dict[str, Any], path: str = "") -> None:
         elif want is str:
             if not isinstance(val, str):
                 raise ConfigError(f"'{here}' must be a string, got {val!r}")
+            if path == 'credentials' and val not in LIGHTER_CREDENTIAL_GROUPS:
+                raise ConfigError(f"'{here}' must reference an ENV group name only: "
+                                  f'{", ".join(LIGHTER_CREDENTIAL_GROUPS)}')
 
 
 def _get(d: dict, section: str, key: str, default):
@@ -371,6 +376,40 @@ def _env_s(name: str) -> Optional[str]:
     return v.strip() if v not in (None, "") else None
 
 
+LIGHTER_CREDENTIAL_FIELDS = ("ACCOUNT_INDEX", "API_KEY_INDEX", "API_PRIVATE_KEY")
+LIGHTER_CREDENTIAL_GROUPS = ("LIGHTER", "RH_LIGHTER", "PRIMARY_LIGHTER")
+
+
+def _lighter_credential_prefix(raw, venue, get_env, separate):
+    """Bind credentials to the deployment, never infer a network from role."""
+    selected = (raw.get("credentials") or {}).get(venue)
+    if selected is not None:
+        if selected not in LIGHTER_CREDENTIAL_GROUPS:
+            raise ConfigError(f'credentials.{venue} must be one of '
+                              f'{", ".join(LIGHTER_CREDENTIAL_GROUPS)} (ENV group name only)')
+        return selected[:-len("LIGHTER")]
+
+    def present(group):
+        return any(get_env(f'{group}_{field}') for field in LIGHTER_CREDENTIAL_FIELDS)
+
+    # Dedicated RH fields make both networks unambiguous, even when a stale
+    # legacy PRIMARY_* group is still in the same profile. Partial groups
+    # remain partial; never take missing account/index/key fields elsewhere.
+    if present("RH_LIGHTER"):
+        return "RH_" if venue == "lighter-rh" else ""
+    if present("PRIMARY_LIGHTER") and (present("LIGHTER") or separate):
+        raise ConfigError(
+            f'{venue} 凭据归属不明确：LIGHTER_* / PRIMARY_LIGHTER_* 是旧命名，'
+            '不能按主腿/对冲腿猜测 RH 或主网账户。请在 YAML 的 credentials 中按交易所绑定，'
+            '例如 lighter-rh: LIGHTER、lighter: PRIMARY_LIGHTER '
+            '（按实际凭据归属填写，不能照抄猜测）；或使用 RH_LIGHTER_* / LIGHTER_*。'
+            '无需新增 API，也不要将私钥写入 YAML')
+    if separate:
+        return "RH_" if venue == "lighter-rh" else ""
+    # Legacy single-deployment/single-group profiles retain their account.
+    return "PRIMARY_" if present("PRIMARY_LIGHTER") else ""
+
+
 def _build_venue(raw: dict, section: str, venue: str, key: str, symbol: str,
                  separate_lighter_keys: bool = False,
                  credential_env: Optional[Mapping[str, str]] = None) -> VenueConf:
@@ -392,16 +431,7 @@ def _build_venue(raw: dict, section: str, venue: str, key: str, symbol: str,
         arcus_prefix = "" if any(get_env(name) for name in names) else (
             "PRIMARY_" if any(get_env("PRIMARY_" + name) for name in names) else "")
     if venue in LIGHTER_PROFILES:
-        if separate_lighter_keys:
-            lighter_prefix = "PRIMARY_" if is_primary else ""
-        else:
-            # A single Lighter/RH venue keeps its account when the trading
-            # legs are reversed. Select the entire group, never combine a
-            # primary private key with a base account or API key index.
-            lighter_names = ("LIGHTER_ACCOUNT_INDEX", "LIGHTER_API_KEY_INDEX",
-                             "LIGHTER_API_PRIVATE_KEY")
-            lighter_prefix = "PRIMARY_" if any(
-                get_env("PRIMARY_" + name) for name in lighter_names) else ""
+        lighter_prefix = _lighter_credential_prefix(raw, venue, get_env, separate_lighter_keys)
 
     def env_s(name, fallback=None):
         if arcus_prefix is not None:

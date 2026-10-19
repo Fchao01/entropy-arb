@@ -151,7 +151,8 @@ def main() -> None:
     try:
         cfg = load_config(args.config, args.env_file,
                           symbol=args.symbol, hedge_venue=args.hedge,
-                          primary_venue=args.primary)
+                          primary_venue=args.primary,
+                          credential_env={} if args.record_only else None)
     except ConfigError as e:
         print(f"config error: {e}", file=sys.stderr)
         sys.exit(2)
