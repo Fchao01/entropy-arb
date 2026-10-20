@@ -62,7 +62,7 @@ def test_failed_started_task_can_change_exchange_without_losing_old_files(tmp_pa
             assert updated['route_changed'] and updated['state'] == 'stopped'
             assert updated['started_at'] is None and updated['ended_at'] is None
             assert updated['exit_code'] is None and updated['status'] is None
-            assert updated['auto_threshold']['status'] == 'pending'
+            assert updated['auto_threshold']['status'] == 'manual_only'
             assert not manager.running  # Saving never places orders or launches a worker.
             for path, value in contents.items():
                 assert path.read_bytes() == value

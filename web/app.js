@@ -103,7 +103,7 @@ function thresholdStatus(task, compact = false) {
     return `<small class="threshold-status ok" title="${escapeHtml(reason)}">bps 开平仓 · ${escapeHtml(summary)}</small>`;
   }
   const status = task.auto_threshold || {};
-  const labels = {applied: "今日阈值已更新", unchanged: "今日已检查，阈值未变", failed: "今日阈值更新失败", pending: "今日阈值待更新", skipped: "今日阈值已跳过"};
+  const labels = {applied: "手动阈值已更新", unchanged: "手动检查，阈值未变", failed: "阈值更新失败", pending: "待手动更新", manual_only: "每日自动更新已关闭", skipped: "阈值已跳过"};
   const label = labels[status.status] || labels.pending;
   const extra = status.status === "failed" ? compact ? "" : `：${status.reason || "请查看事件日志"}` : (status.window ? ` · ${status.window}` : "");
   const cls = status.status === "failed" ? "failed" : status.status === "applied" || status.status === "unchanged" ? "ok" : "pending";

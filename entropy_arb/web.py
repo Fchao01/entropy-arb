@@ -351,10 +351,8 @@ class TaskManager:
         write_json(self.data / "tasks.json", list(self.tasks.values()))
 
     def start_auto_threshold_scheduler(self):
-        """Start the daily 08:00 Shanghai threshold job once the app loop runs."""
-        if self.auto_threshold_task is None:
-            self.auto_threshold_task = asyncio.create_task(
-                self._auto_threshold_loop(), name="daily-thresholds")
+        """Compatibility hook; daily threshold updates are disabled."""
+        return None
 
     def _auto_status_path(self, task_id):
         return self.directory(task_id) / "auto_threshold.json"
@@ -362,12 +360,12 @@ class TaskManager:
     def _read_auto_status(self, task_id):
         path = self._auto_status_path(task_id)
         if not path.exists():
-            return {"status": "pending"}
+            return {"status": "manual_only", "reason": "每日自动阈值更新已关闭，请手动更新"}
         try:
             value = json.loads(path.read_text(encoding="utf-8"))
-            return value if isinstance(value, dict) else {"status": "pending"}
+            return value if isinstance(value, dict) else {"status": "manual_only", "reason": "每日自动阈值更新已关闭，请手动更新"}
         except (OSError, ValueError, TypeError):
-            return {"status": "failed", "reason": "自动阈值状态文件损坏"}
+            return {"status": "failed", "reason": "阈值状态文件损坏"}
 
     def _write_auto_status(self, task_id, value):
         write_json(self._auto_status_path(task_id), value)
@@ -1723,7 +1721,6 @@ def create_app(manager: TaskManager, password: str, secure_cookie=False):
         await manager.close()
 
     async def startup(app):
-        manager.start_auto_threshold_scheduler()
         manager.liquidation_task = asyncio.create_task(manager.liquidation_supervisor())
         await manager.account_monitor.resume()
 
