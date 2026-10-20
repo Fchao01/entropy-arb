@@ -51,7 +51,8 @@ CSV_HEADER = ["ts", "direction", "buy_venue", "sell_venue", "qty",
               "book_age_ms", "book_skew_ms", "send_total_ms",
               "buy_send_ms", "sell_send_ms", "buy_avg_px", "sell_avg_px",
               "realized_edge_bps", "edge_shortfall_bps"]
-BALANCE_POLL_SEC = 30.0
+# Display/margin-recovery polling only; liquidation has its own fresh risk loop.
+BALANCE_POLL_SEC = 60.0
 
 
 class Engine:

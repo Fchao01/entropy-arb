@@ -463,6 +463,13 @@ def hedge_matches(fills, peer_fills, seconds=3.0, limit=50):
 
 
 class AccountMonitor:
+    # Public discovery/enrichment shares budget with live strategies. Keep this
+    # delay outside RestReads.get(): never hold a shared account-cache lock
+    # while waiting for the monitor's next polling slot.
+    HTTP_INTERVAL_SEC = 10.0
+    CACHE_TTL = {"account": 15, "orderBooks": 300,
+                 "accountsByL1Address": 300, "recentTrades": 30}
+
     def __init__(self, path: Path):
         self.store = AccountStore(path)
         self.running = False
@@ -508,7 +515,7 @@ class AccountMonitor:
             raise ValueError("不是允许的公开查询接口")
         async with self.http_locks[venue]:
             await asyncio.sleep(max(0, self.http_next[venue] - time.monotonic()))
-            self.http_next[venue] = time.monotonic() + 4
+            self.http_next[venue] = time.monotonic() + self.HTTP_INTERVAL_SEC
             url = LIGHTER_PROFILES[venue].api_url + "/api/v1/" + path
             async def fetch():
                 async with (_session or self.session).get(url, params=params, timeout=aiohttp.ClientTimeout(total=12)) as response:
@@ -528,7 +535,7 @@ class AccountMonitor:
                             raise RestReadCooldown(await self.requests[venue].cooldown(response.headers))
                         raise ValueError(f"公开接口返回 {data.get('code')}")
                     return data
-            ttl = {'account': 15, 'orderBooks': 30, 'accountsByL1Address': 15}.get(path, 0)
+            ttl = self.CACHE_TTL[path]
             return await self.requests[venue].get('/api/v1/' + path, params, fetch, ttl, priority=BACKGROUND)
 
     async def start(self, config):
@@ -841,4 +848,4 @@ class AccountMonitor:
                 except Exception as error:
                     await asyncio.to_thread(self.store.save_account, venue, aid, None, str(error))
                     self.errors["account/" + venue] = str(error)[:300]
-            await asyncio.sleep(4)
+            await asyncio.sleep(self.HTTP_INTERVAL_SEC)

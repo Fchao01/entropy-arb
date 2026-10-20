@@ -476,3 +476,72 @@ def test_equity_budget_wait_is_waiting_state_not_failed_http_429(tmp_path, caplo
         assert 'equity poll failed' not in caplog.text and 'HTTP 429' not in caplog.text
         assert 'query not sent' in caplog.text
     asyncio.run(run())
+
+
+def test_slow_public_monitor_does_not_hold_up_own_order_path(tmp_path, monkeypatch):
+    async def run():
+        venue = account_venue(monkeypatch)
+        venue.session = Session()
+        monitor = AccountMonitor(tmp_path / 'accounts.sqlite3')
+        monitor.session = Session()
+        monitor.requests['lighter-rh'] = venue._requests()
+        monitor.http_next['lighter-rh'] = time.monotonic() + 10
+        waiting, release = asyncio.Event(), asyncio.Event()
+        original_sleep = asyncio.sleep
+        async def slow_monitor(delay):
+            if delay > 1:
+                waiting.set()
+                await release.wait()
+            else:
+                await original_sleep(delay)
+        monkeypatch.setattr('entropy_arb.account_monitor.asyncio.sleep', slow_monitor)
+        query = asyncio.create_task(monitor.request('lighter-rh', 'account', by='index', value=20))
+        try:
+            await asyncio.wait_for(waiting.wait(), 1)
+            # The public monitor is still waiting, but verification and live
+            # submissions use their own path and do not inherit its ten-second delay.
+            assert await asyncio.wait_for(venue.fetch_position(), 1) == -2
+            async def accepted(**kwargs):
+                venue.orders_feed._handle_orders({'orders': {'0': [dict(
+                    client_order_index=kwargs['client_order_index'], status='filled',
+                    filled_base_amount='.1', filled_quote_amount='10')]}})
+                return None, SimpleNamespace(code=200), None
+            venue.signer.create_order.side_effect = accepted
+            opened = await asyncio.wait_for(venue.send_taker(is_buy=True, qty=.1, limit_px=100), 1)
+            repaired = await asyncio.wait_for(venue.send_taker(is_buy=False, qty=.1, limit_px=100, risk=True), 1)
+            assert opened['filled_base'] == repaired['filled_base'] == .1
+            assert not opened['unresolved'] and not repaired['unresolved']
+            venue.signer.cancel_order = AsyncMock(return_value=(None, SimpleNamespace(code=200), None))
+            await asyncio.wait_for(venue.cancel_maker(SimpleNamespace(order_id=123)), 1)
+            venue.signer.cancel_order.assert_awaited_once()
+            assert not query.done() and not monitor.session.calls
+        finally:
+            query.cancel()
+            await asyncio.gather(query, return_exceptions=True)
+            await asyncio.to_thread(monitor.store.close)
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize('path,params', [
+    ('orderBooks', {}),
+    ('accountsByL1Address', {'l1_address': '0x' + '1' * 40}),
+])
+def test_public_directory_and_markets_reuse_snapshot_for_five_minutes(tmp_path, monkeypatch, path, params):
+    async def run():
+        clock = [time.time()]
+        monkeypatch.setattr('entropy_arb.rest_reads.time.time', lambda: clock[0])
+        monitor = AccountMonitor(tmp_path / 'accounts.sqlite3')
+        monitor.session = Session(data={'code':200, 'order_books':[], 'sub_accounts':[]})
+        try:
+            await monitor.request('lighter-rh', path, **params)
+            clock[0] += 120
+            monitor.http_next['lighter-rh'] = 0
+            await monitor.request('lighter-rh', path, **params)
+            assert len(monitor.session.calls) == 1
+            clock[0] += 181
+            monitor.http_next['lighter-rh'] = 0
+            await monitor.request('lighter-rh', path, **params)
+            assert len(monitor.session.calls) == 2
+        finally:
+            await asyncio.to_thread(monitor.store.close)
+    asyncio.run(run())

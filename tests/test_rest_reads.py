@@ -145,6 +145,38 @@ def test_adapter_shares_equity_but_never_uses_it_as_a_stale_position(tmp_path, m
     asyncio.run(run())
 
 
+def test_display_equity_cache_does_not_stale_position_or_risk_checks(tmp_path, monkeypatch):
+    async def run():
+        clock = [time.time()]
+        monkeypatch.setattr('entropy_arb.rest_reads.time.time', lambda: clock[0])
+        venue = venue_fixture(monkeypatch)
+        venue.conf.lighter_creds.account_index = 20
+        venue._rest_reads = RestReads('https://rh.example', tmp_path)
+        account = {'accounts': [{'account_index':20, 'total_asset_value':'100', 'available_balance':'80',
+            'cross_asset_value':'100', 'cross_maintenance_margin_requirement':'2',
+            'positions':[{'market_id':0, 'position':'2', 'sign':-1, 'margin_mode':0}]}]}
+        venue.session = FakeSession(account)
+        assert await venue.fetch_equity() == (100, 80)
+        clock[0] += 45
+        assert await venue.fetch_equity() == (100, 80)
+        assert len(venue.session.calls) == 1
+        # Ordinary positions still require the fifteen-second snapshot, risk
+        # five seconds, and a critical verification only 200 milliseconds.
+        assert await venue.fetch_position_background() == -2
+        assert len(venue.session.calls) == 2
+        clock[0] += 6
+        await venue.fetch_liquidation_risk()
+        assert len(venue.session.calls) == 3
+        clock[0] += .5
+        await venue.fetch_position()
+        assert len(venue.session.calls) == 4
+        clock[0] += 1
+        await venue._rest_reads.invalidate('/api/v1/account', venue._account_params())
+        await venue.fetch_equity()
+        assert len(venue.session.calls) == 5
+    asyncio.run(run())
+
+
 class FakeSession:
     def __init__(self, data):
         self.data = data

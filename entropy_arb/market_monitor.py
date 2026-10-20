@@ -62,7 +62,8 @@ async def _json(session: aiohttp.ClientSession, method: str, url: str,
                 raise RestReadCooldown(await RestReads(RH_API).cooldown(response.headers))
             return data
     if method == 'GET' and url.startswith(RH_API + '/api/v1/'):
-        return await RestReads(RH_API).get(url[len(RH_API):], kwargs.get('params'), fetch, 30,
+        ttl = 300 if url.endswith('/orderBooks') else 30
+        return await RestReads(RH_API).get(url[len(RH_API):], kwargs.get('params'), fetch, ttl,
                                          priority=BACKGROUND)
     return await fetch()
 
