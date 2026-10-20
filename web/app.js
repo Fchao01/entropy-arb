@@ -80,6 +80,9 @@ function badge(task) {
   let className = task.state === "interrupted" ? "failed" : task.state;
   if (task.state === "running") {
     if (task.status_stale) {label = task.status ? "状态过期" : "启动中"; className = "stale";}
+    else if (task.status?.liquidation?.latched) {label = "紧急平仓"; className = "halted";}
+    else if (task.risk_watch_only) {label = "仅风险监控"; className = "running";}
+    else if (task.status?.liquidation?.blocked) {label = "账户风险暂停"; className = "halted";}
     else if (task.status.paused) {label = "已暂停"; className = "halted";}
     else if (task.status.halted) {label = "风险暂停"; className = "halted";}
     else if (!task.status.ready) {label = "加载市场"; className = "starting";}
@@ -90,6 +93,8 @@ function badge(task) {
 
 function thresholdStatus(task, compact = false) {
   if (task.mode !== "live") return "";
+  if (task.status?.liquidation?.latched) return '<small class="threshold-status failed">紧急减仓 · 不等待策略点位</small>';
+  if (task.risk_watch_only) return '<small class="threshold-status ok">只监控账户风险，不运行开仓策略</small>';
   if ((task.strategy_mode || task.status?.strategy_mode) === "spread") return `<small class="threshold-status ok">实际可成交价差 · 不限批次 · 按持仓上限控制</small>`;
   if ((task.strategy_mode || task.status?.strategy_mode) === "bps") {
     const reason = task.status?.bps_strategy?.reason || "独立点位";
@@ -155,6 +160,7 @@ async function refresh() {
     const result = await api("/api/tasks");
     serverConnected = true;
     state.tasks = result.tasks;
+    if (result.liquidation) renderLiquidation(result.liquidation);
     element("connection-label").textContent = "服务器已连接";
     element("connection-label").title = "";
     element("connection-dot").parentElement.classList.remove("bad-connection");
@@ -303,7 +309,7 @@ function renderMonitor() {
     const readable = task.mode === "live" && (!balance || balance.updated_at != null);
     const account = venue.account;
     const accountLabel = account ? `Arcus ${account.network === "mainnet" ? "主网" : account.network === "testnet" ? "测试网" : account.network} · 子账户 #${account.account_index ?? "—"}` : "";
-    let balanceNote = task.mode !== "live" ? "采集模式不读取账户权益" : !balance ? "旧版快照未提供权益读取状态" : balance.state === "error" ? `权益读取失败（${balance.error || "未知错误"}）${readable ? " · 金额为上次成功值，非实时" : " · 尚无有效余额"}` : balance.state === "waiting" ? "等待首次权益读取" : balance.state === "stale" ? "权益数据过期 · 金额为上次成功值" : "交易所账户接口已读取";
+    let balanceNote = task.mode !== "live" ? "采集模式不读取账户权益" : !balance ? "旧版快照未提供权益读取状态" : balance.state === "error" ? `权益读取失败（${balance.error || "未知错误"}）${readable ? " · 金额为上次成功值，非实时" : " · 尚无有效余额"}` : balance.state === "waiting" ? (balance.waiting_reason === "shared_budget" ? "等待本地共享请求预算（查询未发送）" : balance.waiting_reason === "exchange_cooldown" ? "等待交易所限流冷却" : "等待首次权益读取") + (readable ? " · 金额为上次成功值，非实时" : "") : balance.state === "stale" ? "权益数据过期 · 金额为上次成功值" : "交易所账户接口已读取";
     if (balance?.updated_at != null) balanceNote += ` · 更新于 ${timeLabel(balance.updated_at)}`;
     if (venue.margin_block) balanceNote += " · 保证金取消后暂缓新开仓，等待可用保证金改善；正常减仓保留";
     if (!fresh && readable) balanceNote += " · 任务快照非实时";
@@ -1020,3 +1026,56 @@ element("library-form").addEventListener("submit", async (event) => {
 setInterval(() => {element("clock").textContent = new Date().toLocaleString("zh-CN", {hour12: false});}, 1000);
 setInterval(refresh, 3000);
 api("/api/session").then((session) => session.authenticated ? enter() : showLogin()).catch((error) => {showLogin(); element("login-error").textContent = error.message;});
+
+let liquidationInitialized = false;
+const liquidationFields = {warn_pct: 'warn', block_pct: 'block', close_pct: 'close', poll_sec: 'poll', stale_sec: 'stale', slippage_bps: 'slip'};
+function renderLiquidation(value, fill = false) {
+  if (!value) return;
+  state.liquidation = value;
+  if (!liquidationInitialized || fill) {
+    element('liquidation-enabled').checked = value.settings.enabled;
+    for (const [key, id] of Object.entries(liquidationFields)) element(`liquidation-${id}`).value = value.settings[key];
+    liquidationInitialized = true;
+  }
+  const rows = Object.entries(value.tasks);
+  const warning = rows.some(([, row]) => row.warning);
+  element('liquidation-label').textContent = value.latched ? '紧急平仓已锁定' : !value.settings.enabled ? '未开启' : value.blocked ? '禁止新增仓位' : warning ? '风险预警' : '保护中';
+  element('liquidation-label').classList.toggle('liquidation-danger', Boolean(value.latched || value.settings.enabled && value.blocked));
+  element('liquidation-summary').textContent = value.latched ? `${value.latched.reason} · ${timeLabel(value.latched.at)}；退出后保持锁定，不自动恢复交易。` : `覆盖 ${rows.length} 个已运行过的实盘任务；${value.settings.enabled ? '数据异常时禁止新增仓位，停止任务后继续仅风险监控。' : '开启前请确认各任务市场独占；当前未执行自动爆仓保护。'}`;
+  element('liquidation-reset').disabled = !value.latched;
+  element('liquidation-verify').disabled = !value.latched;
+  element('liquidation-accounts').innerHTML = rows.map(([id, row]) => {
+    const task = state.tasks.find((t) => t.id === id);
+    const metrics = (row.metrics || []).map((m) => `${escapeHtml(m.venue)}：${number(m.risk_pct)}% · 权益 ${money(m.equity)} / 维持保证金 ${money(m.maintenance)} <small>${escapeHtml(m.source)}</small>`).join('');
+    return `<div class="liquidation-account"><b>${escapeHtml(task?.name || id)}</b>${task?.risk_watch_only ? ' · 仅风险监控' : ''}<div>${metrics || '等待账户风险数据'}</div><small>更新 ${timeLabel(row.updated_at)}${row.stale ? ' · 数据已过期' : ''}${row.error ? ` · ${escapeHtml(row.error)}` : ''}</small>${row.message ? `<div class="${row.flat ? '' : 'liquidation-danger'}">${escapeHtml(row.message)}</div>` : ''}</div>`;
+  }).join('') || '<p class="field-note">尚无已运行过的实盘任务。</p>';
+}
+element('liquidation-form').addEventListener('submit', async (event) => {
+  event.preventDefault();
+  element('liquidation-error').textContent = '';
+  const settings = {enabled: element('liquidation-enabled').checked};
+  for (const [key, id] of Object.entries(liquidationFields)) settings[key] = Number(element(`liquidation-${id}`).value);
+  try {
+    renderLiquidation(await api('/api/liquidation', 'PUT', settings), true);
+    toast(settings.enabled ? '风控已开启，等待各账户风险数据确认' : '风控已关闭');
+  } catch (error) {element('liquidation-error').textContent = error.message;}
+});
+element('liquidation-reset').addEventListener('click', async () => {
+  try {
+    renderLiquidation(await api('/api/liquidation/reset', 'POST', {}), true);
+    toast('锁定已解除，保护已关闭；请检查设置后重新开启，交易任务需手动重新启动。');
+  } catch (error) {element('liquidation-error').textContent = error.message;}
+});
+
+element('liquidation-verify').addEventListener('click', async () => {
+  if (!element('liquidation-orders-checked').checked) {
+    element('liquidation-error').textContent = '请先在交易所核对未知订单均已终结，再勾选确认。';
+    return;
+  }
+  try {
+    renderLiquidation(await api('/api/liquidation/verify', 'POST', {confirmed_terminal_orders: true}));
+    element('liquidation-orders-checked').checked = false;
+    element('liquidation-error').textContent = '';
+    toast('已请求重新核验；风控锁定保留，仅继续减仓。');
+  } catch (error) {element('liquidation-error').textContent = error.message;}
+});

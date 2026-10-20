@@ -219,3 +219,34 @@ def test_two_repair_callers_cannot_use_the_same_net_after_cooldown(tmp_path):
         assert eng.hedge.position == -.015
         assert not eng.halted
     asyncio.run(run())
+
+
+@pytest.mark.parametrize('message', [
+    '{"ratelimit": "didn\'t use volume quota"}',
+    '{"ratelimit": "used volume quota"}',
+    'Rate limit remaining: 59',
+])
+def test_accepted_quota_metadata_never_starts_shared_cooldown(monkeypatch, message, caplog):
+    async def run():
+        from entropy_arb.rest_reads import NORMAL
+        from entropy_arb.venue_lighter import LighterVenue
+        v = venue_fixture(monkeypatch)
+        response = SimpleNamespace(code=200, message=message)
+        assert not LighterVenue._is_rate_limit_rejection(response, None)
+        assert not LighterVenue._is_rate_limit_rejection({'code':200, 'message':message}, None)
+        async def accepted(**kwargs):
+            v.orders_feed._handle_orders({'orders': {'0': [dict(
+                client_order_index=kwargs['client_order_index'], status='filled',
+                filled_base_amount='.0058', filled_quote_amount='14.182276')]}})
+            return None, response, None
+        v.signer.create_order.side_effect = accepted
+        for _ in range(2):
+            result = await v.send_taker(is_buy=True, qty=.0058, limit_px=2445.23)
+            assert result['status'] == 'filled' and result['filled_base'] == .0058
+        assert v.signer.create_order.await_count == 2
+        assert v._requests().stats['server_limits'] == 0
+        assert v._requests().available(NORMAL)
+        assert not v._requests().snapshot()['cooldown_until']
+        assert '[REQUEST COOLDOWN]' not in caplog.text
+        assert not v._nonce_refresh_required
+    asyncio.run(run())

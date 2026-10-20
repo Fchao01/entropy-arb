@@ -36,11 +36,11 @@ def response_headers(error):
 
 
 class RestReadCooldown(RuntimeError):
-    status = 429
-
     def __init__(self, until, source='server'):
         self.until = until
         self.source = source
+        # Local admission rejection is not an HTTP response from the exchange.
+        self.status = 429 if source == 'server' else None
         self.headers = {'Retry-After': str(max(0, until - time.time()))}
         label = '共享请求预算等待' if source == 'budget' else '交易所限流冷却'
         super().__init__(f'{label}至 {until:.3f}；订单状态不作推断')
@@ -87,6 +87,8 @@ class RestReads:
         now = time.time()
         return dict(self.stats, shared_used=sum(now - 60 < t <= now for t in self._read(
             self.host + '-budget-rest').get('events', [])), shared_limit=self.limit,
+                    background_limit=max(1, self.limit - 2 * self.reserve),
+                    normal_limit=max(1, self.limit - self.reserve),
                     cooldown_until=self._read(self.host).get('until', 0))
 
     async def acquire(self, priority=NORMAL, *, cost=1, bucket='rest'):

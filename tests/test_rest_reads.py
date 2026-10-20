@@ -170,7 +170,7 @@ class FakeSession:
         return Response()
 
 
-def test_keepalive_warms_actual_signer_without_duplicate_ping_and_obeys_query_cooldown(tmp_path, monkeypatch):
+def test_keepalive_coalesces_signer_ping_and_obeys_query_cooldown(tmp_path, monkeypatch):
     async def run():
         venue = venue_fixture(monkeypatch)
         venue._rest_reads = RestReads('https://rh.example', tmp_path)
@@ -182,11 +182,11 @@ def test_keepalive_warms_actual_signer_without_duplicate_ping_and_obeys_query_co
         assert venue.mark_price == 100
         assert len(venue.session.calls) == 1  # Cached market metadata; no extra public status.
         assert all(url.endswith('/orderBookDetails') for url in venue.session.calls)
-        assert len(signer_session.calls) == 2  # Distinct connection really stays warm.
+        assert len(signer_session.calls) == 1  # Optional warming must not bypass the shared cache.
         with pytest.raises(RestReadCooldown):
             await venue._rest_reads.get('/blocked', {}, AsyncMock(side_effect=Http429()), 0)
         await venue.warm_http()
-        assert len(venue.session.calls) == 1 and len(signer_session.calls) == 2
+        assert len(venue.session.calls) == 1 and len(signer_session.calls) == 1
     asyncio.run(run())
 
 

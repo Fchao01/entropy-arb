@@ -124,6 +124,21 @@ class Engine:
         self._telegram_tasks: set = set()
         self._telegram_disabled_logged = False
         self.bps_strategy = BpsStrategy(self) if cfg.strategy_mode == "bps" else None
+        self.liquidation = None
+        self._risk_expected_positions = {}
+        if not record_only and os.environ.get('ENTROPY_LIQUIDATION_FILE'):
+            from .liquidation import LiquidationProtection
+            self.liquidation = LiquidationProtection(self, os.environ['ENTROPY_LIQUIDATION_FILE'],
+                os.environ['ENTROPY_WEB_TASK_ID'], os.environ.get('ENTROPY_RISK_WATCH_ONLY') == '1')
+            self.liquidation.refresh()
+            if self.liquidation.watch_only:
+                self.bps_strategy = None
+                self._risk_expected_positions = json.loads(os.environ.get('ENTROPY_RISK_POSITIONS', '{}'))
+                if set(self._risk_expected_positions) != {'entropy', 'hedge'}:
+                    raise ValueError('缺少本任务保存的仓位记录，不能启动自动保护')
+            log.info('[LIQUIDATION POLICY] web-managed enabled=%s watch_only=%s; emergency uses reduce-only IOC',
+                     bool(self.liquidation.state and self.liquidation.state['settings']['enabled']),
+                     self.liquidation.watch_only)
         log.info("[TELEGRAM] profile=%s; trade notifications %s",
                  self.telegram_profile,
                  "enabled" if self.telegram.enabled else
@@ -328,13 +343,27 @@ class Engine:
             log.warning("LIVE — real orders will be sent (use --record-only "
                         "for credential-less data collection)")
             await self._reconcile_startup()
+            if self.liquidation and not self.liquidation.watch_only:
+                while not self.stop.is_set():
+                    await self.liquidation.poll()
+                    if self.liquidation.emergency or not self.liquidation.blocked:
+                        break
+                    try:
+                        await asyncio.wait_for(self.stop.wait(), timeout=1.)
+                    except asyncio.TimeoutError:
+                        pass
+                if self.stop.is_set():
+                    return
             log.info("starting positions: %s (net %+.6g)",
                      " ".join(f"{v.name}={v.position:+.6g}"
                               for v in self.venues.values()),
                      sum(v.position for v in self.venues.values()))
-            if self.bps_strategy:
+            protecting = self.liquidation and (self.liquidation.watch_only or self.liquidation.emergency)
+            if protecting:
+                self.bps_strategy = None
+            if self.bps_strategy and not protecting:
                 recovering_positions = await self.bps_strategy.recover_pending()
-            if not recovering_positions:
+            if not recovering_positions and not protecting:
                 self._check_starting_positions()
             if self.bps_strategy and not recovering_positions:
                 await self.bps_strategy.verify_existing_pair()
@@ -369,6 +398,8 @@ class Engine:
         if live:
             tasks.append(asyncio.create_task(self._reconcile_loop(),
                                              name="reconcile"))
+            if self.liquidation:
+                tasks.append(asyncio.create_task(self.liquidation.run(), name='liquidation-protection'))
 
         await self.stop.wait()
 
@@ -554,6 +585,10 @@ class Engine:
 
     async def _evaluate(self) -> None:
         cfg = self.cfg
+        if self.liquidation:
+            self.liquidation.refresh()
+            if self.liquidation.blocked:
+                return
         if self.halted or self.manual_paused:
             return
         if self.bps_strategy and self.bps_strategy.repair_waiting:
@@ -710,14 +745,24 @@ class Engine:
     # ------------------------------------------------------------- execution
 
     async def _timed_send(self, venue, *, is_buy: bool, qty: float,
-                          limit_px: float, reduce_only: bool = False, risk: bool = False) -> tuple:
+                          limit_px: float, reduce_only: bool = False, risk: bool = False,
+                          emergency: bool = False) -> tuple:
         """Send one leg and return (result, elapsed_ms).
 
         The elapsed value is local event-loop time, so it is suitable for
         latency distributions even when wall-clock time is adjusted.
         """
         started = time.perf_counter()
-        if self.cfg.primary_maker_only and venue is self.entropy:
+        if self.liquidation:
+            self.liquidation.refresh()
+            if emergency and (not self.liquidation.emergency or not reduce_only):
+                return ({'status': 'emergency-policy-blocked', 'filled_base': 0., 'avg_px': None,
+                         'unresolved': False}, 0.)
+            if not reduce_only and self.liquidation.blocked:
+                return ({'status': 'liquidation-risk-blocked', 'filled_base': 0., 'avg_px': None,
+                         'unresolved': False}, 0.)
+        if self.cfg.primary_maker_only and venue is self.entropy and not (
+                emergency and reduce_only and self.liquidation and self.liquidation.emergency):
             log.error('[ARCUS MAKER ONLY] blocked IOC submission; no order sent')
             return ({"status": "maker-only-blocked", "filled_base": 0.0, "avg_px": None,
                      "err": "Arcus maker-only policy prohibits IOC orders", "unresolved": False}, 0.0)
@@ -735,7 +780,7 @@ class Engine:
         """Send both legs and settle the fills. Both venue locks are held by
         the caller. Returns True when an outcome is unresolved and the caller
         must escalate to reconcile."""
-        if self.halted:
+        if self.halted or self.liquidation and self.liquidation.blocked:
             return False
         cfg = self.cfg
         if cfg.strategy_mode == "spread":
@@ -1017,6 +1062,8 @@ class Engine:
                 "启动时已有仓位不平衡，已拒绝启动，不会自动平仓；请核对两边账户和旧仓位")
 
     async def _maybe_hedge(self, *, allow_halted=False) -> None:
+        if self.liquidation and (self.liquidation.watch_only or self.liquidation.emergency):
+            return
         self.ensure_async_state()
         # A cooldown can span several periodic reconciliations. Exactly one
         # owner may finish the repair; another caller must not use a stale net.
@@ -1474,6 +1521,8 @@ class Engine:
 
     async def _reconcile_positions(self, hedge: bool,
                                    strict: bool = False) -> None:
+        if not strict and self.liquidation and (self.liquidation.emergency or self.liquidation.watch_only):
+            return
         now = time.time()
         vs = []
         for v in self.venues.values():
@@ -1539,9 +1588,11 @@ class Engine:
                 if self.bps_strategy and not self.halted:
                     self.bps_strategy.reason = '账户查询限流，等待两边实时仓位复核'
                 if e.until > previous:
-                    log.warning('[%s] REST QUERY 429 — wait %.1fs before position recheck; '
-                                'last confirmed position retained, not an order failure',
-                                v.name, max(0, e.until - time.time()))
+                    writer = log.info if e.source == 'budget' else log.warning
+                    writer('[%s] %s — wait %.1fs before position recheck; '
+                           'last confirmed position retained; new orders blocked until verified',
+                           v.name, 'LOCAL REQUEST BUDGET WAIT (query not sent)' if e.source == 'budget'
+                           else 'EXCHANGE QUERY COOLDOWN', max(0, e.until - time.time()))
                 return
             except Exception as e:
                 if strict:
@@ -1633,6 +1684,17 @@ class Engine:
                         log.info("[%s] equity poll recovered", v.name)
                 except asyncio.CancelledError:
                     raise
+                except RestReadCooldown as error:
+                    local = error.source == 'budget'
+                    reason = 'shared_budget' if local else 'exchange_cooldown'
+                    self.balance_status[v.key] = dict(state='waiting', waiting_reason=reason,
+                        retry_at=error.until, updated_at=previous.get('updated_at'),
+                        checked_at=time.time(), error=None)
+                    if previous.get('waiting_reason') != reason:
+                        writer = log.info if local else log.warning
+                        writer('[%s] equity poll deferred (%s); wait %.1fs; last-known balance only',
+                               v.name, 'local request budget, query not sent' if local else 'exchange cooldown',
+                               max(0, error.until - time.time()))
                 except Exception as e:
                     status = getattr(e, "status", None)
                     detail = f"HTTP {status}" if isinstance(status, int) else type(e).__name__

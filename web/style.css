@@ -41,3 +41,13 @@ body{font-size:15px}
 .account-detail{scroll-margin-top:20px}.account-detail .account-table{font-size:11px}.account-event{display:flex;gap:14px;padding:8px 0;border-bottom:1px solid var(--line)}
 .account-event time{flex-shrink:0;font-variant-numeric:tabular-nums}.account-event b{flex-shrink:0;font-weight:500}.account-events .account-note{max-height:270px;overflow:auto}
 @media(max-width:700px){.account-toolbar{padding:16px;gap:10px}.account-toolbar label{flex:1;min-width:130px}.account-toolbar input,.account-toolbar select{width:100%}.account-note{padding:0 16px}.account-event{display:block}.account-event b{margin:0 8px}.account-detail .panel-heading{align-items:flex-start;flex-wrap:wrap}.account-detail .heading-actions{flex-wrap:wrap}}
+
+.liquidation-panel { margin-bottom: 22px; }
+.liquidation-panel details { padding: 0 24px 22px; }
+.liquidation-panel summary { cursor: pointer; color: var(--muted, #65817e); font-size: 12px; padding-bottom: 16px; }
+.liquidation-toggle { display: flex; align-items: center; gap: 8px; margin-bottom: 18px; }
+.liquidation-toggle input { width: auto; }
+.liquidation-actions { display: flex; flex-wrap: wrap; gap: 12px; margin: 16px 0; }
+.liquidation-account { padding: 12px 0; border-top: 1px solid #e4ecea; overflow-wrap: anywhere; font-size: 12px; line-height: 1.8; }
+.liquidation-account small { display: block; color: #65817e; }
+.liquidation-danger { color: #b74238; }

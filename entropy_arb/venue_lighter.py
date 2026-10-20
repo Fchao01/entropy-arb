@@ -273,6 +273,8 @@ class LighterVenue:
                 r.raise_for_status()
                 data = await r.json()
                 if isinstance(data, dict) and data.get('code') == 23000:
+                    log.warning('[REQUEST 429] host=%s path=%s authenticated=%s code=23000 scope_hint=unknown response=API',
+                                reads.label, path, bool(headers))
                     raise aiohttp.ClientResponseError(r.request_info, r.history, status=429,
                                                      message='REST query rate limited', headers=r.headers)
                 return data
@@ -299,12 +301,17 @@ class LighterVenue:
                 raise
             except Exception as error:
                 if http_status(error) in (429, 405):
+                    log.warning('[REQUEST 429] host=%s path=%s response=SDK-HTTP status=%s',
+                                reads.label, path, http_status(error))
                     raise RestReadCooldown(await reads.cooldown(response_headers(error))) from None
                 # Transport/SDK exceptions can embed authenticated request data.
                 raise RuntimeError(f'SDK {path} {type(error).__name__}; request credentials redacted') from None
             response = result[1] if isinstance(result, tuple) and len(result) == 3 else result
             error = result[2] if isinstance(result, tuple) and len(result) == 3 else None
             if self._is_rate_limit_rejection(response, error):
+                code = response.get('code') if isinstance(response, dict) else getattr(response, 'code', None)
+                log.warning('[REQUEST 429] host=%s path=%s response=SDK-API code=%s',
+                            reads.label, path, code if isinstance(code, (int, float)) else None)
                 await reads.cooldown()
             return result
         if not submission:
@@ -322,7 +329,8 @@ class LighterVenue:
         await self._requests().acquire(CRITICAL, cost=2)
         self.init_signer()
         log.info('[REQUEST POLICY] host=%s shared_total=60/min reserve=12/24; '
-                 'authenticated queries; account background cache=15s; fresh verification=0.2s',
+                 'authenticated queries; account background cache=15s; fresh verification=0.2s; '
+                 'bulk market metadata + shared keepalive cache=30s',
                  self._requests().label)
 
     # ------------------------------------------------------------- lifecycle
@@ -403,16 +411,21 @@ class LighterVenue:
         return self.orders_feed is not None and self.orders_feed.ready.is_set()
 
     async def warm_http(self) -> None:
-        """Keep the order-path HTTPS connections warm (a cold TLS handshake
-        adds 10-15ms to the first order after an idle spell)."""
+        """Best-effort warming within one shared host snapshot per 30 seconds.
+
+        Every worker used to ping its distinct signer socket every ten seconds:
+        twelve workers would consume 72 requests/min on pings alone. Cached
+        workers may have a cold SDK socket; account verification/orders take priority.
+        """
         if self.signer is None:
             try:
-                await self._get("/api/v1/status")
+                await self._get("/api/v1/status", cache_ttl=30)
             except Exception as e:
                 log.debug("[%s] keepalive ping failed: %r", self.name, e)
         try:
-            data = await self._get("/api/v1/orderBookDetails",
-                                   params={"market_id": str(self.market_id)})
+            # market_id is optional in the official API: one shared response
+            # contains all perp markets. Select this worker's market locally.
+            data = await self._get("/api/v1/orderBookDetails", cache_ttl=30)
             for detail in data.get("order_book_details") or []:
                 if int(detail.get("market_id", -1)) != self.market_id:
                     continue
@@ -428,10 +441,9 @@ class LighterVenue:
             return
         try:
             sess = self.signer.api_client.rest_client.pool_manager
-            # Warm the actual signer connection, without a duplicate public
-            # session ping. Share query cooldowns, but a cached status cannot
-            # warm this process's distinct SDK connection.
-            await self._get("/api/v1/status", cache_ttl=0, query_session=sess)
+            # A cache hit does not warm this process's socket. Do not bypass
+            # the global cache merely to keep every optional connection hot.
+            await self._get("/api/v1/status", cache_ttl=30, query_session=sess)
         except Exception as e:
             log.debug("[%s] signer keepalive failed: %r", self.name, e)
 
@@ -648,8 +660,15 @@ class LighterVenue:
 
     @staticmethod
     def _is_rate_limit_rejection(response, error):
-        message = str(error if error is not None else getattr(response, 'message', '')).lower()
-        return (getattr(response, 'code', None) in (429, 23000)
+        code = response.get('code') if isinstance(response, dict) else getattr(response, 'code', None)
+        # Accepted transactions can include JSON quota metadata such as
+        # {"ratelimit": "didn't use volume quota"} in message. That is not a
+        # rejection and must not freeze every worker for 60 seconds.
+        if error is None and code == 200:
+            return False
+        detail = response.get('message', '') if isinstance(response, dict) else getattr(response, 'message', '')
+        message = str(error if error is not None else detail).lower()
+        return (code in (429, 23000)
                 or any(text in message for text in ('too many requests', 'ratelimit', 'rate limit')))
 
     def _rate_limit_result(self):
@@ -719,14 +738,14 @@ class LighterVenue:
     def _account_params(self):
         return {'by': 'index', 'value': str(self.conf.lighter_creds.account_index)}
 
-    async def _account(self, *, equity_only=False, background=False) -> Optional[dict]:
+    async def _account(self, *, equity_only=False, background=False, priority=None) -> Optional[dict]:
         c = self.conf.lighter_creds
         if c is None or c.account_index is None:
             return None
         data = await self._get("/api/v1/account",
                                params=self._account_params(),
                                cache_ttl=15 if equity_only or background else .2,
-                               priority=BACKGROUND if equity_only or background else CRITICAL,
+                               priority=priority if priority is not None else (BACKGROUND if equity_only or background else CRITICAL),
                                not_before=self.last_traded_ts if not equity_only else 0)
         for acct in data.get("accounts") or []:
             return acct
@@ -739,7 +758,32 @@ class LighterVenue:
         return (float(acct.get("total_asset_value") or 0.0),
                 float(acct.get("available_balance") or 0.0))
 
-    async def has_open_orders(self) -> bool:
+    async def fetch_liquidation_risk(self):
+        from .liquidation import margin_snapshot, number
+        from .rest_reads import NORMAL
+        data = await self._get('/api/v1/account', params=self._account_params(),
+                               cache_ttl=5, priority=NORMAL)
+        rows = data.get('accounts')
+        if not isinstance(rows, list) or len(rows) != 1:
+            raise ValueError('risk account unavailable')
+        account = rows[0]
+        if int(account['account_index']) != self.conf.lighter_creds.account_index:
+            raise ValueError('risk account identity mismatch')
+        positions = account['positions']
+        if not isinstance(positions, list):
+            raise ValueError('risk positions unavailable')
+        sizes = [number(p['position']) for p in positions]
+        if any(size < 0 for size in sizes):
+            raise ValueError('negative Lighter risk position magnitude')
+        # Do not mix isolated collateral into the cross-margin denominator.
+        # The endpoint's isolated allocation is not a complete isolated equity/MMR snapshot.
+        if any(number(p['position']) > 0 and int(p['margin_mode']) != 0 for p in positions):
+            raise ValueError('isolated margin risk not supported; no safe cross fallback')
+        return margin_snapshot(account['cross_asset_value'], account['cross_maintenance_margin_requirement'],
+                               exposed=any(size > 0 for size in sizes),
+                               source='Lighter cross account')
+
+    async def has_open_orders(self, *, priority=CRITICAL) -> bool:
         from lighter import OrderApi
         auth, err = self.signer.create_auth_token_with_expiry()
         if err or not auth:
@@ -752,6 +796,7 @@ class LighterVenue:
             "authorization" if "authorization" in params else "auth": auth,
         }
         response = await self._sdk_request('/api/v1/accountActiveOrders', lambda: method(**kwargs),
+                                          priority=priority,
                                           params={'account': self.conf.lighter_creds.account_index,
                                                   'market': self.market_id})
         data = response.to_dict() if hasattr(response, "to_dict") else response
@@ -760,8 +805,8 @@ class LighterVenue:
             raise RuntimeError(f"[{self.name}] invalid open orders response")
         return bool(data["orders"])
 
-    async def fetch_position(self, *, background=False) -> float:
-        acct = await self._account(background=background)
+    async def fetch_position(self, *, background=False, priority=None) -> float:
+        acct = await self._account(background=background, priority=priority)
         if acct is None:
             raise RuntimeError(f"[{self.name}] account not found")
         if not isinstance(acct.get("positions"), list):

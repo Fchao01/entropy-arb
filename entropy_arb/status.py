@@ -75,6 +75,7 @@ def snapshot(engine) -> dict:
         "bps_strategy": engine.bps_strategy.snapshot() if engine.bps_strategy else None,
         "execution_signals": execution_signals(engine),
         "active_maker": getattr(engine, "active_maker", None),
+        "liquidation": engine.liquidation.snapshot() if getattr(engine, 'liquidation', None) else None,
         "ready": ready, "halted": engine.halted, "paused": engine.manual_paused,
         "mode": "record" if engine.record_only else "live",
         "telegram_enabled": engine.telegram.enabled,

@@ -6,7 +6,7 @@
   <meta name="theme-color" content="#101b20">
   <title>DEX 套利 · Entropy Console</title>
   <link rel="stylesheet" href="/assets/style.css">
-  <script src="/assets/app.js?v=20261020-remove-trade-statistics" defer></script>
+  <script src="/assets/app.js?v=20261020-liquidation-protection" defer></script>
   <script src="/assets/accounts.js?v=20261017-wallet-analysis" defer></script>
 </head>
 <body>
@@ -29,6 +29,27 @@
           <div class="page-heading"><div><div class="eyebrow">STRATEGY WORKSPACE</div><h1>DEX 套利<span class="heading-dot">.</span></h1><p>配置策略，启动任务，在一个工作台管理每个币种。</p></div><div class="heading-actions"><button id="open-telegram" class="button secondary">Telegram 通知</button><button id="open-library" class="button secondary">配置库</button><button id="new-task" class="button primary"><span>＋</span> 新建套利任务</button></div></div>
           <div id="dex-stats" class="stats-grid"></div>
           <div class="risk-strip"><span class="risk-symbol">!</span><span><b>多任务实盘需使用独立 API 密钥或子账户。</b> 仓位与下单频率仍需按账户整体控制；停止程序不会自动平仓。</span><span class="risk-tag">运行须知</span></div>
+          <section class="panel liquidation-panel" aria-label="全局爆仓保护">
+            <div class="panel-heading"><div><h2>全局爆仓保护 <span id="liquidation-label" class="count-pill">未开启</span></h2><p id="liquidation-summary">仅覆盖本网页管理的实盘任务；紧急时允许吃单减仓。</p></div></div>
+            <details id="liquidation-details"><summary>设置与账户风险详情</summary>
+              <form id="liquidation-form"><label class="liquidation-toggle"><input id="liquidation-enabled" type="checkbox"> 开启账户爆仓保护</label>
+                <div class="form-grid">
+                  <label>预警风险率 <small>%</small><input id="liquidation-warn" type="number" step="any" min="0.01" max="99.9" required></label>
+                  <label>禁止新增仓位风险率 <small>%</small><input id="liquidation-block" type="number" step="any" min="0.01" max="99.9" required></label>
+                  <label>全部任务紧急平仓风险率 <small>%</small><input id="liquidation-close" type="number" step="any" min="0.01" max="99.9" required></label>
+                  <label>账户查询间隔 <small>秒，至少 5</small><input id="liquidation-poll" type="number" step="any" min="5" max="60" required></label>
+                  <label>数据过期时间 <small>秒，至少两倍查询间隔</small><input id="liquidation-stale" type="number" step="any" min="10" max="180" required></label>
+                  <label>紧急减仓最大滑点 <small>bps，每次按最新盘口计算</small><input id="liquidation-slip" type="number" step="any" min="0.01" max="500" required></label>
+                </div>
+                <p class="field-note">风险率 = 维持保证金要求 ÷ 对应保证金账户权益。任一账户达到平仓线，所有受保护任务停止开仓、撤销当前挂单并只减仓退出双腿，不再等待策略点位。60 / 70 / 80% 仅为初始参考值。单批金额沿用任务单笔上限；剩余仓位持续重试，订单结果未知则先锁定告警。数据过期或不支持的保证金模式会禁止新增交易，不能视为安全。只支持可核实的全仓风险数据，逐仓暂不支持。</p>
+                <p class="field-note">开启后，已停止且有运行记录的实盘任务会启动“仅风险监控”进程，不执行原策略。任务使用的市场应由此程序独占；同市场的手动仓位无法从交易所合并仓位中可靠拆分。保护依赖服务器、接口及流动性，不能保证避免强平。</p>
+                <div class="liquidation-actions"><button type="submit" class="button primary">保存风控设置</button><button id="liquidation-verify" type="button" class="button secondary" disabled>核对未知订单后重新核验</button><button id="liquidation-reset" type="button" class="button secondary" disabled>确认全部平仓后解除锁定</button></div>
+                <label class="liquidation-toggle"><input id="liquidation-orders-checked" type="checkbox"> 我已在交易所确认所有未知订单均已终结、无待生效订单；允许重新核验剩余仓位并继续减仓</label>
+                <p id="liquidation-error" class="form-error" role="alert"></p>
+              </form>
+              <div id="liquidation-accounts" aria-live="polite"></div>
+            </details>
+          </section>
           <section class="panel task-panel"><div class="panel-heading"><div><h2>策略任务 <span id="task-total" class="count-pill">0</span></h2><p>一个币种，一个独立运行实例</p></div><div class="table-tools"><label class="search"><span>⌕</span><input id="search" placeholder="搜索币种或任务" aria-label="搜索任务"></label><select id="state-filter" aria-label="按状态筛选"><option value="all">全部状态</option><option value="active">运行中</option><option value="stopped">已停止</option><option value="failed">异常 / 中断</option></select></div></div><div class="table-scroll"><table class="task-table"><thead><tr><th>任务 / 币种</th><th>交易路径</th><th>运行模式</th><th>状态</th><th>溢价 <small>bps</small></th><th>运行时长</th><th>会话统计</th><th>操作</th></tr></thead><tbody id="task-rows"></tbody></table></div><div id="task-empty" class="empty-state"><div class="empty-icon">⇄</div><h3>从第一个币种开始</h3><p>创建任务并配置交易路径。建议先采集行情，再用实际数据设定实盘阈值。</p><button id="empty-new" class="button secondary">＋ 创建你的第一个任务</button></div><footer class="panel-footer"><span><span class="mini-dot"></span> 每 3 秒同步运行状态</span><span>成交额为双腿合计 · 会话数据每次启动重新统计</span></footer></section>
           <div class="workflow"><span class="eyebrow">YOUR NEXT MOVE</span><div><span>01</span><b>配置交易路径</b><small>选择主腿、对冲腿和币种</small></div><div><span>02</span><b>采集真实行情</b><small>先观察溢价，再设定阈值</small></div><div><span>03</span><b>确认后启动实盘</b><small>小仓位开始，持续监控</small></div></div>
         </section>

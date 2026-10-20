@@ -157,3 +157,22 @@ HTTP 429、405 或明确的查询/SDK code 23000 后，相同部署共享至少 
 日志标识包括 `[REQUEST POLICY]`、`[REQUEST BUDGET]`、`[REQUEST COOLDOWN]`、`[REQUEST 429]` 和 `[STARTUP QUERY WAIT]`。429 记录接口、是否认证、数值错误码及依据服务端消息得出的 scope_hint，不输出令牌、完整请求头或错误回显。scope_hint=unknown 时不凭 CloudFront 响应头猜测规则。`status.json` 各交易所的 `request_budget` 提供本进程协调调用/缓存命中次数、共享已占用名额及冷却时间，不是交易所精确计费账单。
 
 `max_orders_per_min` 仍是每个策略每条腿的附加下单预算，不能代替共享请求控制。需要停止并重启全部旧策略和网页监控进程后，新预算才能覆盖它们；只 git pull 不会更新已有进程。重启程序不自动平仓，保留现有仓位与状态文件，按原规则核验接管。
+
+2026-10-20 多任务保活修复：`warm_http()` 的 `/status` 改为同部署共享 30 秒缓存，
+不再为每个策略进程绕过缓存每 10 秒发送一次保活。`/orderBookDetails` 不传可选的
+`market_id`，共享一次全市场元数据响应，再在各进程中选择自己的市场；不同币种不再各占一份
+同类后台请求。可成交行情仍来自原有实时盘口，关键仓位核验的刷新要求不变。
+这会牺牲部分闲置进程 HTTP 连接的持续预热，低频首单可能需要重新建立连接；不修改下单滑点或放宽
+账户核验条件。官方 SDK 将 `market_id` 定义为可选参数：
+[OrderApi](https://github.com/elliottech/lighter-python/blob/main/lighter/api/order_api.py)。
+
+`LOCAL REQUEST BUDGET WAIT (query not sent)` 表示本机名额不足，本次账户查询没有发到交易所，
+不能解释为 HTTP 429。账户核验未完成时仍暂停新增策略订单；余额展示使用「等待本地共享请求预算」
+并标注旧值。只有真实 HTTP 429/405 或 API 23000 才进入交易所共享冷却，并记录 `[REQUEST 429]` /
+`[REQUEST COOLDOWN]`。本地 36/48/60 是程序的后台/普通/关键请求分配，不是交易所宣称的三档配额；
+不通过单纯提高限额来掩盖重复请求。
+
+SDK 成功回执也可能在 `message` 中携带 `ratelimit` 配额说明。`code=200` 且没有 SDK 错误表示
+已接受交易，不能仅凭这个词触发全部署 60 秒冷却；成交仍由订单流/同 ID 查询确认，不凭提交回执
+伪造成交。明确 HTTP 429/405、API 23000 或失败回执中的限流错误仍保留共享冷却。
+成功回执与错误回执的回归测试均使用合成数据；多任务后台合并测试覆盖 12 和 14 个工作进程。

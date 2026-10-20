@@ -34,6 +34,7 @@ from .account_monitor import AccountMonitor, VENUES as ACCOUNT_VENUES, account_i
 from .privacy import PrivateLogCapture
 from .run_logs import reset_run_log
 from .rest_reads import RestReadCooldown
+from .liquidation import LiquidationGuard
 from .thresholds import (ThresholdDataError, ThresholdSuggestion, daily_window,
                          analysis_report, load_window_rows, prune_csv, suggest)
 from .telegram import TelegramNotifier, test_message
@@ -190,6 +191,21 @@ def missing_credentials(config) -> list[str]:
     return list(dict.fromkeys(missing))
 
 
+def risk_identity(cfg):
+    result = []
+    for v in (cfg.primary, cfg.hedge):
+        if v.kind == 'lighter':
+            result.append((v.kind, v.lighter_profile.api_url, v.lighter_creds.account_index))
+        elif v.kind == 'arcus':
+            result.append((v.kind, v.arcus_network, (v.arcus_creds.account_address or '').lower(),
+                           v.arcus_creds.account_index))
+        else:
+            c = v.hl_creds
+            identity = (c.account_address or hashlib.sha256((c.private_key or '').encode()).hexdigest()).lower()
+            result.append((v.kind, v.hl_dex, identity))
+    return hashlib.sha256(json.dumps(result, sort_keys=True).encode()).hexdigest()
+
+
 class TaskManager:
     def __init__(self, root: Path, data: Path, max_running=0):
         if isinstance(max_running, bool) or not isinstance(max_running, int) or max_running < 0:
@@ -212,6 +228,9 @@ class TaskManager:
         self.market_monitor = None
         self.account_monitor = AccountMonitor(self.data / "accounts.sqlite3")
         self.auto_threshold_task = None
+        self.liquidation_task = None
+        self.liquidation = LiquidationGuard(self.data / 'liquidation.json')
+        self.liquidation.initialize()
         manifest = self.data / "tasks.json"
         if manifest.exists():
             records = json.loads(manifest.read_text(encoding="utf-8"))
@@ -227,6 +246,46 @@ class TaskManager:
                         and not run_snapshot.exists()):
                     self.write_config(run_snapshot, snapshot.read_text(encoding='utf-8'))
         self.save()
+
+    def risk_targets(self):
+        return [t['id'] for t in self.tasks.values() if t['mode'] == 'live' and t.get('started_at')]
+
+    async def liquidation_supervisor(self):
+        while not self.closing:
+            try:
+                targets = self.risk_targets()
+                self.liquidation.enroll(targets)
+                state = self.liquidation.view()
+                if state['latched']:
+                    if self.account_monitor.running:
+                        await self.account_monitor.stop()
+                    if self.market_monitor is not None and self.market_monitor.running:
+                        await self.market_monitor.stop()
+                if state['settings']['enabled'] or state['latched']:
+                    for task_id in targets:
+                        if task_id not in self.running and not self.instance_locked(task_id):
+                            try:
+                                await self.start(task_id, confirmed=True, risk_watch=True)
+                            except (ConsoleError, OSError, ConfigError) as error:
+                                self.liquidation.progress(task_id, flat=False,
+                                    message='保护进程启动失败：' + str(error))
+                else:
+                    for task_id, runtime in list(self.running.items()):
+                        if runtime.get('risk_watch') and self.tasks[task_id]['state'] == 'running':
+                            await self.stop(task_id)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.exception('liquidation supervisor failed')
+            await asyncio.sleep(5)
+
+    async def configure_liquidation(self, payload):
+        async with self.mutex():
+            try:
+                self.liquidation.enroll(self.risk_targets())
+                return self.liquidation.configure(payload)
+            except (ValueError, TypeError) as error:
+                raise ConsoleError(str(error)) from error
 
     async def monitor_instance(self, profile="default"):
         if self.market_monitor is None:
@@ -443,6 +502,8 @@ class TaskManager:
     async def auto_update_task(self, task_id, window, suggestion=None):
         """Update one live task and restart it only after a valid calculation."""
         task = self.get(task_id)
+        if self.liquidation.view()['latched']:
+            raise ConsoleError('紧急风控锁定中，暂停阈值更新及自动重启')
         directory = self.directory(task_id)
         config_path = self.ensure_task_config(task)
         cfg = load_config(str(config_path), symbol=task["symbol"],
@@ -899,6 +960,9 @@ class TaskManager:
 
     async def put(self, payload, task_id=None):
         async with self.mutex():
+            risk = self.liquidation.view()
+            if task_id in self.risk_targets() and (risk['settings']['enabled'] or risk['latched']):
+                raise ConsoleError('账户风控开启期间不能修改已有实盘任务；请先处理仓位并解除保护')
             if task_id:
                 old = self.get(task_id)
                 if task_id in self.running or self.instance_locked(task_id):
@@ -1037,19 +1101,53 @@ class TaskManager:
         result["auto_threshold"] = self._read_auto_status(task["id"])
         return result
 
-    async def start(self, task_id, confirmed=False):
+    async def start(self, task_id, confirmed=False, risk_watch=False):
         async with self.mutex():
             if self.closing:
                 raise ConsoleError("控制台正在关闭")
             task = self.get(task_id)
+            risk_state = self.liquidation.view()
+            if task['mode'] == 'live' and risk_state['latched'] and not risk_watch:
+                raise ConsoleError('紧急风控已锁定；确认全部平仓并解除后才能重新启动交易')
             if task_id in self.running:
                 raise ConsoleError("任务已启动，请勿重复启动")
-            if self.max_running > 0 and len(self.running) >= self.max_running:
+            if not risk_watch and self.max_running > 0 and len(self.running) >= self.max_running:
                 raise ConsoleError(f"最多同时运行 {self.max_running} 个任务")
             for previous_id in self.tasks:
                 if previous_id not in self.running and self.instance_locked(previous_id):
                     raise ConsoleError("上一进程仍在退出，请等待并核对服务器进程与持仓")
-            public, rendered, cfg, credentials = self.validate(task, task_id)
+            candidate = task
+            if risk_watch:
+                if task['mode'] != 'live' or not task.get('started_at'):
+                    raise ConsoleError('仅保护已运行过的实盘任务')
+                candidate = {**task, 'strategy_file': None,
+                             'config': self.task_snapshot_config(task).read_text(encoding='utf-8')}
+            public, rendered, cfg, credentials = self.validate(candidate, task_id)
+            identity = risk_identity(cfg) if task['mode'] == 'live' else None
+            if risk_watch and task.get('risk_account_identity') and task['risk_account_identity'] != identity:
+                raise ConsoleError('账户身份与上次实盘不一致，不能自动平仓新账户')
+            risk_positions = None
+            if risk_watch:
+                status = self.view(task).get('status') or {}
+                if status.get('active_maker') is not None:
+                    raise ConsoleError('上次挂单未确认结束，请先核对及撤销旧订单')
+                previous_risk = risk_state['tasks'].get(task_id, {})
+                risk_positions = previous_risk.get('owned_positions') or {
+                    v['key']: v.get('position') for v in status.get('venues', [])}
+                if set(risk_positions) != {'entropy', 'hedge'} or any(
+                        isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v)
+                        for v in risk_positions.values()):
+                    raise ConsoleError('缺少可信任务仓位快照，不能自动接管账户仓位')
+                if any(v for k,v in previous_risk.items() if k.startswith('pending')):
+                    raise ConsoleError('紧急平仓订单未确认，禁止重新启动并重复下单')
+                bps_path = self.configured_path(cfg.log_file).with_suffix('.bps-state.json')
+                if bps_path.exists():
+                    try:
+                        saved = json.loads(bps_path.read_text())
+                        if saved.get('pending') or saved.get('active_maker'):
+                            raise ConsoleError('旧策略存在未确认订单，核对完成前不能自动保护接管')
+                    except (OSError, ValueError) as error:
+                        raise ConsoleError('旧策略订单状态不可读，请先核对订单') from error
             log_path = self.configured_path(cfg.log_file)
             if task.get("started_at"):
                 previous = load_config(str(self.task_snapshot_config(task)),
@@ -1095,6 +1193,16 @@ class TaskManager:
                 env.update(credentials)
                 env["TELEGRAM_PROFILE"] = task["profile"]
             env["PYTHONUNBUFFERED"] = "1"
+            env['ENTROPY_LIQUIDATION_FILE'] = str(self.liquidation.path)
+            env['ENTROPY_WEB_TASK_ID'] = task_id
+            env['ENTROPY_RISK_WATCH_ONLY'] = '1' if risk_watch else '0'
+            if risk_positions is not None:
+                env['ENTROPY_RISK_POSITIONS'] = json.dumps(risk_positions)
+            else:
+                env.pop('ENTROPY_RISK_POSITIONS', None)
+            if task['mode'] == 'live':
+                self.liquidation.enroll(list(set(self.risk_targets()) | {task_id}))
+                self.liquidation.progress(task_id, owned_positions=risk_positions)
             command = [sys.executable, "-u", str(self.root / "main.py"),
                        "--symbol", task["symbol"], "--primary", task["primary"],
                        "--hedge", task["hedge"], "--config", str(directory / "config.yaml"),
@@ -1112,13 +1220,18 @@ class TaskManager:
             process = await asyncio.create_subprocess_exec(
                 *command, cwd=self.root, env=env, stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT, start_new_session=True)
-            task.update(public)
+            if not risk_watch:
+                task.update(public)
             task.update(state="running", pid=process.pid, started_at=time.time(), ended_at=None,
-                        exit_code=None, manual_paused=False, startup_warnings=startup_warnings)
+                        exit_code=None, manual_paused=False, startup_warnings=startup_warnings,
+                        risk_watch_only=risk_watch)
+            if identity:
+                task['risk_account_identity'] = identity
             runtime = dict(process=process, markets=markets, signers=signers,
                            recorder_path=self.configured_path(cfg.recorder_csv),
                            log_path=log_path,
                            grace=cfg.shutdown_grace_sec + 20,
+                           risk_watch=risk_watch,
                            log_capture=PrivateLogCapture(credentials))
             self.running[task_id] = runtime
             runtime["watcher"] = asyncio.create_task(self.watch(task_id, runtime))
@@ -1210,6 +1323,9 @@ class TaskManager:
     async def delete(self, task_id):
         async with self.mutex():
             self.get(task_id)
+            if task_id in self.risk_targets() and (self.liquidation.view()['settings']['enabled']
+                                                   or self.liquidation.view()['latched']):
+                raise ConsoleError('风控保护中的任务不能删除，请先完成平仓并解除保护')
             if task_id in self.running:
                 raise ConsoleError("运行中的任务不能删除")
             if self.instance_locked(task_id):
@@ -1220,6 +1336,9 @@ class TaskManager:
     async def close(self):
         self.closing = True
         try:
+            if self.liquidation_task is not None:
+                self.liquidation_task.cancel()
+                await asyncio.gather(self.liquidation_task, return_exceptions=True)
             if self.auto_threshold_task is not None:
                 self.auto_threshold_task.cancel()
                 await asyncio.gather(self.auto_threshold_task, return_exceptions=True)
@@ -1359,7 +1478,28 @@ def create_app(manager: TaskManager, password: str, secure_cookie=False):
 
     async def tasks(request):
         return web.json_response({"tasks": [manager.view(task, include_config=False) for task in manager.tasks.values()],
-                                  "server_time": time.time(), "max_running": manager.max_running})
+                                  "server_time": time.time(), "max_running": manager.max_running,
+                                  "liquidation": manager.liquidation.view()})
+
+    async def liquidation_settings(request):
+        if request.method == 'PUT':
+            return web.json_response(await manager.configure_liquidation(await body(request)))
+        return web.json_response(manager.liquidation.view())
+
+    async def liquidation_reset(request):
+        async with manager.mutex():
+            try:
+                return web.json_response(manager.liquidation.reset())
+            except ValueError as error:
+                raise ConsoleError(str(error)) from error
+
+    async def liquidation_verify(request):
+        payload = await body(request)
+        async with manager.mutex():
+            try:
+                return web.json_response(manager.liquidation.acknowledge_orders(payload.get('confirmed_terminal_orders')))
+            except ValueError as error:
+                raise ConsoleError(str(error)) from error
 
     async def put(request):
         result = await manager.put(await body(request), request.match_info.get("id"))
@@ -1435,6 +1575,8 @@ def create_app(manager: TaskManager, password: str, secure_cookie=False):
         return web.json_response(monitor.snapshot())
 
     async def market_monitor_start(request):
+        if manager.liquidation.view()['latched']:
+            raise ConsoleError('紧急风控锁定期间暂停公共行情监控，为减仓保留请求预算')
         payload = await body(request)
         symbol = str(payload.get("symbol", "")).strip().upper()
         # A strategy YAML is optional here. Compatibility is determined by
@@ -1513,6 +1655,8 @@ def create_app(manager: TaskManager, password: str, secure_cookie=False):
         return web.json_response(result)
 
     async def account_start(request):
+        if manager.liquidation.view()['latched']:
+            raise ConsoleError('紧急风控锁定期间暂停公共账户采集，为减仓保留请求预算')
         try:
             return web.json_response(await manager.account_monitor.start(await body(request)))
         except ValueError as error:
@@ -1580,6 +1724,7 @@ def create_app(manager: TaskManager, password: str, secure_cookie=False):
 
     async def startup(app):
         manager.start_auto_threshold_scheduler()
+        manager.liquidation_task = asyncio.create_task(manager.liquidation_supervisor())
         await manager.account_monitor.resume()
 
     app.router.add_get("/", index)
@@ -1594,6 +1739,10 @@ def create_app(manager: TaskManager, password: str, secure_cookie=False):
     app.router.add_get("/api/configs/{kind}/{name}", configuration)
     app.router.add_put("/api/configs/{kind}/{name}", configuration)
     app.router.add_get("/api/tasks", tasks)
+    app.router.add_get('/api/liquidation', liquidation_settings)
+    app.router.add_put('/api/liquidation', liquidation_settings)
+    app.router.add_post('/api/liquidation/reset', liquidation_reset)
+    app.router.add_post('/api/liquidation/verify', liquidation_verify)
     app.router.add_post("/api/tasks", put)
     app.router.add_put("/api/tasks/{id}", put)
     app.router.add_delete("/api/tasks/{id}", delete)

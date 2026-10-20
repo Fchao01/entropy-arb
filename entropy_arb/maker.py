@@ -120,6 +120,11 @@ async def execute_primary_maker(engine, buy, sell, plan, *, hedge_enabled=True):
 
     def cancel_decision():
         nonlocal away_since
+        protection = getattr(engine, 'liquidation', None)
+        if protection:
+            protection.refresh()
+            if protection.blocked:
+                return 'liquidation-risk'
         if cancel_reason:
             return cancel_reason
         if hedge_failed:

@@ -692,6 +692,42 @@ class ArcusVenue:
             raise ValueError("[ARCUS] non-finite account balance")
         return equity, free
 
+    async def fetch_liquidation_risk(self):
+        from .liquidation import margin_snapshot, number
+        from .rest_reads import RestReads, NORMAL
+        if not hasattr(self, '_risk_reads'):
+            self._risk_reads = RestReads(self.api_url)
+        async def read(path, params):
+            return await self._risk_reads.get(path, params, lambda: self._get(path, **params),
+                                              5, priority=NORMAL)
+        params = dict(address=self.address, accountIndex=self.account_index)
+        account = await read('/v1/account', params)
+        positions = await read('/v1/positions', params)
+        markets = await read('/v1/markets', {})
+        if account.get('error') or positions.get('error') or markets.get('error'):
+            raise ValueError('Arcus risk query failed')
+        if (('address' in account and str(account['address']).lower() != self.address)
+                or ('accountIndex' in account and int(account['accountIndex']) != self.account_index)):
+            raise ValueError('Arcus risk account identity mismatch')
+        rows = positions['positions']
+        if not isinstance(rows, dict):
+            raise ValueError('Arcus risk positions unavailable')
+        definitions = {str(m['marketId']): m for m in markets['markets']}
+        maintenance, exposed = 0., False
+        # Sum every market in the collateral account, not only this task's symbol.
+        for market_id, position in rows.items():
+            size = abs(number(position['size']))
+            if not size:
+                continue
+            exposed = True
+            market = definitions[str(market_id)]
+            mark, fraction = number(market['markPrice']), number(market['maintenanceMarginFraction'])
+            if mark <= 0 or not 0 < fraction <= 1:
+                raise ValueError('Arcus margin definition unavailable')
+            maintenance += size * mark * fraction
+        return margin_snapshot(account['equity'], maintenance, exposed=exposed,
+                               source='Arcus account equity + per-market maintenance')
+
     async def warm_http(self) -> None:
         data = await self._get("/v1/markets", market=self.market_name)
         for market in data.get("markets") or []:

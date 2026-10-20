@@ -409,6 +409,26 @@ class HLVenue:
             fr += float(st.get("withdrawable") or 0.0)
         return eq, fr
 
+    async def fetch_liquidation_risk(self):
+        from .liquidation import margin_snapshot, number
+        from .rest_reads import RestReads, NORMAL
+        addr = self._query_address()
+        if not addr:
+            raise ValueError('risk account unavailable')
+        if not hasattr(self, '_risk_reads'):
+            self._risk_reads = RestReads(self.api_url)
+        params = {'type': 'clearinghouseState', 'user': addr, 'dex': self.conf.hl_dex}
+        state = await self._risk_reads.get('/info', params, lambda: self._info(params), 5, priority=NORMAL)
+        positions = state['assetPositions']
+        if not isinstance(positions, list):
+            raise ValueError('risk positions unavailable')
+        if any(number(p['position']['szi']) != 0 and p['position']['leverage']['type'] != 'cross'
+               for p in positions):
+            raise ValueError('isolated margin risk not supported')
+        return margin_snapshot(state['crossMarginSummary']['accountValue'], state['crossMaintenanceMarginUsed'],
+                               exposed=any(number(p['position']['szi']) != 0 for p in positions),
+                               source='Hyperliquid cross collateral bucket')
+
     async def has_open_orders(self) -> bool:
         addr = self._query_address()
         if not addr:

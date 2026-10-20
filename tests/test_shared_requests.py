@@ -378,3 +378,101 @@ def test_account_query_failure_blocks_new_orders_in_every_strategy(tmp_path, mod
         for v in eng.venues.values():
             v.send_taker.assert_not_awaited()
     asyncio.run(run())
+
+
+def test_local_budget_is_not_an_exchange_http_response(tmp_path):
+    async def run():
+        reads = RestReads('https://rh.example', tmp_path, limit=1, reserve=0)
+        await reads.acquire()
+        with pytest.raises(RestReadCooldown) as result:
+            await reads.acquire()
+        assert result.value.source == 'budget'
+        assert result.value.status is None
+        assert reads.stats['server_limits'] == 0
+        assert RestReadCooldown(time.time() + 60).status == 429
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("worker_count", [12, 14])
+def test_workers_share_background_metadata_and_pings_for_two_minutes(monkeypatch, worker_count):
+    async def run():
+        clock = [time.time()]
+        initial = clock[0]
+        monkeypatch.setattr('entropy_arb.rest_reads.time.time', lambda: clock[0])
+        calls = []
+        markets = [{'market_id': i, 'mark_price': str(100 + i)} for i in range(worker_count)]
+        positions = [{'market_id': i, 'position': str(i + 1), 'sign': 1} for i in range(worker_count)]
+        class RoutingSession:
+            def get(self, url, **kwargs):
+                path = url.rsplit('/', 1)[-1]
+                calls.append(path)
+                data = {'orderBookDetails': {'order_book_details': markets},
+                        'status': {'code':200},
+                        'account': {'code':200, 'accounts':[{'positions':positions,
+                            'total_asset_value':'1000', 'available_balance':'900'}]}}[path]
+                return Session(data=data).get(url, **kwargs)
+        workers = []
+        for i in range(worker_count):
+            v = account_venue(monkeypatch)
+            v.market_id = i
+            v.conf.lighter_creds.api_key_index = i + 3
+            v.session = RoutingSession()
+            v.signer.api_client = SimpleNamespace(rest_client=SimpleNamespace(pool_manager=RoutingSession()))
+            workers.append(v)
+        for elapsed in range(0, 121, 5):
+            clock[0] = initial + elapsed
+            if elapsed % 10 == 0:
+                await asyncio.gather(*(v.warm_http() for v in workers))
+            if elapsed % 15 == 0:
+                assert await asyncio.gather(*(v.fetch_position_background() for v in workers)) == list(range(1, worker_count + 1))
+            if elapsed % 30 == 0:
+                await asyncio.gather(*(v.fetch_equity() for v in workers))
+            if elapsed == 45:
+                # A real verification still bypasses the background TTL.
+                before = calls.count('account')
+                await workers[0].fetch_position()
+                assert calls.count('account') == before + 1
+        assert all(v.mark_price == 100 + i for i,v in enumerate(workers))
+        assert calls.count('status') <= 5
+        assert calls.count('orderBookDetails') <= 5
+        assert calls.count('account') <= 10
+        assert all(v._requests().stats['budget_waits'] == 0 for v in workers)
+    asyncio.run(run())
+
+
+def test_budget_wait_logs_keep_uncertainty_without_false_exchange_429(tmp_path, caplog):
+    import logging
+    async def run():
+        e = engine_at(tmp_path)
+        e.entropy.fetch_position = AsyncMock(side_effect=RestReadCooldown(time.time() + 10, 'budget'))
+        with caplog.at_level(logging.INFO):
+            await e._reconcile_venue(e.entropy, strict=False)
+        assert e.entropy.key in e._position_uncertain
+        assert 'LOCAL REQUEST BUDGET WAIT' in caplog.text
+        assert 'query not sent' in caplog.text
+        assert 'REST QUERY 429' not in caplog.text
+        assert not e._venue_down
+    asyncio.run(run())
+
+
+def test_equity_budget_wait_is_waiting_state_not_failed_http_429(tmp_path, caplog):
+    import logging
+    async def run():
+        e = engine_at(tmp_path)
+        e.ensure_async_state()
+        for v in e.venues.values():
+            v.equity, v.free, v.start_equity = 100., 80., 100.
+            e.balance_status[v.key] = dict(state='ready', updated_at=time.time() - 10)
+        async def skipped():
+            e.stop.set()
+            raise RestReadCooldown(time.time() + 10, 'budget')
+        e.entropy.fetch_equity = AsyncMock(side_effect=skipped)
+        e.hedge.fetch_equity = AsyncMock(return_value=(100,80))
+        with caplog.at_level(logging.INFO):
+            await e._balance_loop()
+        status = e.balance_status[e.entropy.key]
+        assert status['state'] == 'waiting' and status['waiting_reason'] == 'shared_budget'
+        assert e.entropy.equity == 100 and status['updated_at'] < status['checked_at']
+        assert 'equity poll failed' not in caplog.text and 'HTTP 429' not in caplog.text
+        assert 'query not sent' in caplog.text
+    asyncio.run(run())
