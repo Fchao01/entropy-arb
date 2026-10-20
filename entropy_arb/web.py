@@ -33,6 +33,7 @@ from .market_monitor import MonitorRules, MultiVenueMonitor, discover_candidates
 from .account_monitor import AccountMonitor, VENUES as ACCOUNT_VENUES, account_id, wallet_address
 from .privacy import PrivateLogCapture
 from .run_logs import reset_run_log
+from .rest_reads import RestReadCooldown
 from .thresholds import (ThresholdDataError, ThresholdSuggestion, daily_window,
                          analysis_report, load_window_rows, prune_csv, suggest)
 from .telegram import TelegramNotifier, test_message
@@ -1543,7 +1544,7 @@ def create_app(manager: TaskManager, password: str, secure_cookie=False):
             raise ConsoleError("先启动账户监控，再查询最新公开仓位和跨平台关联")
         try:
             await manager.account_monitor.fetch_account(venue, aid)
-        except (aiohttp.ClientError, ValueError, asyncio.TimeoutError) as error:
+        except (aiohttp.ClientError, ValueError, asyncio.TimeoutError, RestReadCooldown) as error:
             raise ConsoleError("公开账户查询未完成：" + str(error))
         return await account_detail(request)
 

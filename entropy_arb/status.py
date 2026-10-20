@@ -50,6 +50,8 @@ def snapshot(engine) -> dict:
             "volume_usd": venue.volume_usd,
             "limited": engine._venue_limited(venue),
             "down": venue.key in engine._venue_down,
+            "request_budget": (venue._rest_reads.snapshot()
+                               if getattr(venue, '_rest_reads', None) is not None else None),
         })
     ready = engine.markets_ready
     live = ready and not engine.record_only

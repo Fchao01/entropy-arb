@@ -62,7 +62,7 @@ hedge:
   # Arcus 必须填写已确认的账户吃单费率；这里的 0.0 不代表 Arcus 免费。
   # Your quoted Arcus fee 0.0225% = 2.25 bps / 你提供的 Arcus 费率填写 2.25。
   max_position_usd: 1000
-  max_orders_per_min: 30     # Lighter's ceiling is ~40/min / Lighter 上限约 40/分钟
+  max_orders_per_min: 30     # Per-task order budget; shared request limits also apply / 单任务下单预算，另受共享请求限流约束
 
 # Arcus only; credentials must belong to this network and subaccount.
 # 仅 Arcus 使用；API 密钥必须与网络、子账户一致，详见 docs/arcus.md。

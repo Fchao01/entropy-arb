@@ -14,7 +14,8 @@ def venue_fixture(monkeypatch):
     eng, *_ = setup_engine()
     venue = LighterVenue(eng.cfg.primary, None, .001)
     venue.market_id = 0
-    venue.signer = SimpleNamespace(create_order=AsyncMock(return_value=(None, SimpleNamespace(code=200), None)))
+    venue.signer = SimpleNamespace(create_order=AsyncMock(return_value=(None, SimpleNamespace(code=200), None)),
+                                   create_auth_token_with_expiry=lambda: ('test-only-auth', None))
     venue.orders_feed = AccountOrdersFeed('RH', '', 0, 1, None)
     monkeypatch.setitem(sys.modules, 'lighter', SimpleNamespace(SignerClient=SimpleNamespace(
         ORDER_TYPE_MARKET=1, ORDER_TIME_IN_FORCE_IMMEDIATE_OR_CANCEL=0, DEFAULT_IOC_EXPIRY=0,

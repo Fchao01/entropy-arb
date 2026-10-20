@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from typing import Callable, Optional
 
 try:
@@ -25,6 +26,7 @@ except ImportError:
     from websockets import connect as ws_connect  # type: ignore
 
 from .book import OrderBook
+from .rest_reads import RestReadCooldown, CRITICAL, http_status, response_headers
 
 log = logging.getLogger("feeds")
 
@@ -44,7 +46,8 @@ class LighterBookFeed:
     """zkLighter order book for one market over one connection."""
 
     def __init__(self, name: str, ws_url: str, market_id: int, book: OrderBook,
-                 notify: Callable[[], None]) -> None:
+                 notify: Callable[[], None], requests=None) -> None:
+        self.requests = requests
         self.name = name
         self.ws_url = ws_url
         self.market_id = market_id
@@ -94,6 +97,8 @@ class LighterBookFeed:
         backoff = 1.0
         while not stop.is_set():
             try:
+                if self.requests:
+                    await self.requests.acquire(CRITICAL, bucket='ws')
                 async with ws_connect(self.ws_url, max_size=2**23, open_timeout=10,
                                       ping_interval=15, ping_timeout=15) as ws:
                     log.info("[%s] connected (%s)", self.name, self.ws_url)
@@ -118,8 +123,13 @@ class LighterBookFeed:
             except asyncio.CancelledError:
                 raise
             except Exception as e:
+                if self.requests and http_status(e) in (429, 405) and not isinstance(e, RestReadCooldown):
+                    until = await self.requests.cooldown(response_headers(e))
+                    backoff = max(backoff, until - time.time())
+                elif isinstance(e, RestReadCooldown):
+                    backoff = max(backoff, e.until - time.time())
                 log.warning("[%s] ws error: %s — reconnect in %.0fs",
-                            self.name, e, backoff)
+                            self.name, type(e).__name__, backoff)
             self.book.ready = False
             self.notify()
             if stop.is_set():

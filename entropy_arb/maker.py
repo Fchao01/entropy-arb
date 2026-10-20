@@ -252,6 +252,7 @@ async def execute_primary_maker(engine, buy, sell, plan, *, hedge_enabled=True):
                     try:
                         result, elapsed = await asyncio.wait_for(engine._timed_send(
                             hedge, is_buy=is_buy, qty=remainder, limit_px=bound,
+                            risk=True,
                             **({"reduce_only": True} if reducing else {})),
                             timeout=2 * cfg.settle_timeout_sec + 10)
                     except asyncio.TimeoutError:

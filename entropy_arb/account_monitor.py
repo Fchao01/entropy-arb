@@ -23,6 +23,7 @@ from pathlib import Path
 import aiohttp
 
 from .config import LIGHTER_PROFILES
+from .rest_reads import RestReads, RestReadCooldown, BACKGROUND, CRITICAL, http_status, response_headers
 from .account_analysis import analyse_strategy, pair_phase, reconstruct_cycles
 
 VENUES = ("lighter-rh", "lighter")
@@ -498,6 +499,10 @@ class AccountMonitor:
     def queue(self):
         return asyncio.Queue(maxsize=20000)
 
+    @cached_property
+    def requests(self):
+        return {v: RestReads(LIGHTER_PROFILES[v].api_url) for v in VENUES}
+
     async def request(self, venue, path, *, _session=None, **params):
         if path not in ("orderBooks", "account", "accountsByL1Address", "recentTrades"):
             raise ValueError("不是允许的公开查询接口")
@@ -505,24 +510,26 @@ class AccountMonitor:
             await asyncio.sleep(max(0, self.http_next[venue] - time.monotonic()))
             self.http_next[venue] = time.monotonic() + 4
             url = LIGHTER_PROFILES[venue].api_url + "/api/v1/" + path
-            async with (_session or self.session).get(url, params=params, timeout=aiohttp.ClientTimeout(total=12)) as response:
-                if response.status in (429, 405):
-                    self.http_next[venue] = time.monotonic() + 60
-                try:
-                    data = await response.json()
-                except (aiohttp.ContentTypeError, ValueError):
-                    response.raise_for_status()
-                    raise
-                # Both deployments use HTTP 400/code 21100 for an absent address.
-                # Treat only this exact directory response as a confirmed empty lookup.
-                if path == "accountsByL1Address" and response.status == 400 and data.get("code") == 21100:
-                    return {"code": 200, "sub_accounts": []}
-                response.raise_for_status()
-                if data.get("code", 200) != 200:
-                    if data.get("code") == 23000:
+            async def fetch():
+                async with (_session or self.session).get(url, params=params, timeout=aiohttp.ClientTimeout(total=12)) as response:
+                    if response.status in (429, 405):
                         self.http_next[venue] = time.monotonic() + 60
-                    raise ValueError(f"公开接口返回 {data.get('code')}：{str(data.get('message', ''))[:160]}")
-                return data
+                    try:
+                        data = await response.json()
+                    except (aiohttp.ContentTypeError, ValueError):
+                        response.raise_for_status()
+                        raise
+                    # A missing public address is a confirmed empty directory result.
+                    if path == 'accountsByL1Address' and response.status == 400 and data.get('code') == 21100:
+                        return {'code': 200, 'sub_accounts': []}
+                    response.raise_for_status()
+                    if data.get('code', 200) != 200:
+                        if data.get('code') == 23000:
+                            raise RestReadCooldown(await self.requests[venue].cooldown(response.headers))
+                        raise ValueError(f"公开接口返回 {data.get('code')}")
+                    return data
+            ttl = {'account': 15, 'orderBooks': 30, 'accountsByL1Address': 15}.get(path, 0)
+            return await self.requests[venue].get('/api/v1/' + path, params, fetch, ttl, priority=BACKGROUND)
 
     async def start(self, config):
         wanted = symbols_config(config.get("symbols", "BTC,ETH"))
@@ -648,6 +655,7 @@ class AccountMonitor:
         while self.running:
             self.connections[key] = "连接中"
             try:
+                await self.requests[venue].acquire(CRITICAL, bucket='ws')
                 async with self.session.ws_connect(LIGHTER_PROFILES[venue].ws_url + "?readonly=true",
                                                    heartbeat=25, receive_timeout=75) as ws:
                     async def subscribe():
@@ -684,6 +692,11 @@ class AccountMonitor:
             except asyncio.CancelledError:
                 raise
             except Exception as error:
+                if http_status(error) in (429, 405) and not isinstance(error, RestReadCooldown):
+                    until = await self.requests[venue].cooldown(response_headers(error))
+                    delay = max(delay, until - time.time())
+                elif isinstance(error, RestReadCooldown):
+                    delay = max(delay, error.until - time.time())
                 self.errors[key] = str(error)[:300]
                 self.connections[key] = "重连等待"
                 await asyncio.to_thread(self.store.event, venue, "gap", f"{key}: {error}")

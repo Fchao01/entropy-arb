@@ -32,7 +32,7 @@ from .book import OrderBook
 from .config import VenueConf
 from .feeds import LighterBookFeed
 from .maker import MakerOrder
-from .rest_reads import RestReads
+from .rest_reads import RestReads, RestReadCooldown, BACKGROUND, NORMAL, CRITICAL, http_status, response_headers
 
 log = logging.getLogger("lighter")
 
@@ -50,12 +50,13 @@ class AccountOrdersFeed:
     """Authenticated stream of our own order updates (settlement channel)."""
 
     def __init__(self, name: str, ws_url: str, market_id: int,
-                 account_index: int, signer) -> None:
+                 account_index: int, signer, requests=None) -> None:
         self.name = name
         self.ws_url = ws_url
         self.market_id = market_id
         self.account_index = account_index
         self.signer = signer
+        self.requests = requests
         self.ready = asyncio.Event()
         self._pending: dict[int, asyncio.Future] = {}
         self._terminal: OrderedDict[int, dict] = OrderedDict()
@@ -110,6 +111,8 @@ class AccountOrdersFeed:
         backoff = 1.0
         while not stop.is_set():
             try:
+                if self.requests:
+                    await self.requests.acquire(CRITICAL, bucket='ws')
                 auth, err = self.signer.create_auth_token_with_expiry()
                 if err is not None:
                     raise RuntimeError(f"auth token: {err}")
@@ -142,8 +145,13 @@ class AccountOrdersFeed:
             except asyncio.CancelledError:
                 raise
             except Exception as e:
+                if self.requests and http_status(e) in (429, 405) and not isinstance(e, RestReadCooldown):
+                    until = await self.requests.cooldown(response_headers(e))
+                    backoff = max(backoff, until - time.time())
+                elif isinstance(e, RestReadCooldown):
+                    backoff = max(backoff, e.until - time.time())
                 log.warning("[%s] account ws error: %s — retry in %.0fs",
-                            self.name, e, backoff)
+                            self.name, type(e).__name__, backoff)
                 self.ready.clear()
                 if stop.is_set():
                     break
@@ -205,25 +213,117 @@ class LighterVenue:
         self.rate_limit_until = 0.0
         self._nonce_refresh_required = False
         self._rest_reads = None
+        self._read_auth = None
+        self._read_auth_until = 0
+        self._budget_view = {}
 
     # ------------------------------------------------------------------ REST
 
-    async def _get(self, path: str, params: Optional[dict] = None, *, cache_ttl=None, query_session=None):
+    def _requests(self):
         if self._rest_reads is None:
             self._rest_reads = RestReads(self.profile.api_url)
+        return self._rest_reads
+
+    def shared_request_ready(self, *, critical=False):
+        # File reads stay off the high-frequency book-update path. The actual
+        # submission still acquires an atomic slot, so this is advisory only.
+        now = time.monotonic()
+        until, ready = self._budget_view.get(critical, (0, False))
+        if now >= until:
+            ready = self._requests().available(CRITICAL if critical else NORMAL)
+            self._budget_view[critical] = (now + .5, ready)
+        return ready
+
+    def _query_headers(self):
+        if self.signer is None:
+            return {}  # Credential-less collection, subject to public IP budget.
+        if time.time() >= self._read_auth_until:
+            try:
+                token, err = self.signer.create_auth_token_with_expiry()
+            except Exception:
+                raise RuntimeError(f'[{self.name}] 查询认证令牌生成失败；未回退为公共查询') from None
+            if err or not isinstance(token, str) or not token:
+                raise RuntimeError(f'[{self.name}] 查询认证不可用；未回退为公共查询')
+            self._read_auth, self._read_auth_until = token, time.time() + AUTH_REFRESH_SEC
+        return {'Authorization': self._read_auth}
+
+    async def _get(self, path: str, params: Optional[dict] = None, *, cache_ttl=None,
+                   query_session=None, priority=BACKGROUND, not_before=0):
+        reads = self._requests()
+        headers = self._query_headers()  # Authentication errors must not use a cached success.
         ttl = {'/api/v1/account': .2, '/api/v1/status': 10,
                '/api/v1/orderBooks': 30, '/api/v1/orderBookDetails': 30}.get(path, 0)
         async def fetch():
             async with (query_session or self.session).get(
-                    self.profile.api_url + path, params=params,
+                    self.profile.api_url + path, params=params, headers=headers,
                     timeout=aiohttp.ClientTimeout(total=REST_TIMEOUT)) as r:
+                if getattr(r, 'status', 200) in (429, 405):
+                    # Log response classification, never RequestInfo/Auth headers.
+                    try:
+                        body = await r.json()
+                    except Exception:
+                        body = {}
+                    text = str(body.get('message', '')).lower() if isinstance(body, dict) else ''
+                    hint = ('ip' if ' ip' in ' ' + text else
+                            'account' if any(x in text for x in ('account', 'address', 'wallet')) else 'unknown')
+                    code = body.get('code') if isinstance(body, dict) else None
+                    log.warning('[REQUEST 429] host=%s path=%s authenticated=%s code=%s scope_hint=%s',
+                                reads.label, path, bool(headers), code if isinstance(code, (int, float)) else None, hint)
+                    raise RestReadCooldown(await reads.cooldown(r.headers))
                 r.raise_for_status()
                 data = await r.json()
                 if isinstance(data, dict) and data.get('code') == 23000:
                     raise aiohttp.ClientResponseError(r.request_info, r.history, status=429,
                                                      message='REST query rate limited', headers=r.headers)
                 return data
-        return await self._rest_reads.get(path, params, fetch, ttl if cache_ttl is None else cache_ttl)
+        try:
+            return await reads.get(path, params, fetch, ttl if cache_ttl is None else cache_ttl,
+                                   priority=priority, not_before=not_before)
+        except RestReadCooldown:
+            raise
+        except aiohttp.ClientError as error:
+            # ClientResponseError.__repr__ contains RequestInfo.headers/auth.
+            status = http_status(error)
+            if status in (401, 403):
+                self._read_auth_until = 0
+            raise RuntimeError(f'[{self.name}] REST {path} failed HTTP {status or "transport"}; '
+                               'request credentials redacted') from None
+
+    async def _sdk_request(self, path, fetch, *, priority=CRITICAL, params=None, submission=False):
+        """SDK endpoints share admission/cooldown; accepted orders are never retried here."""
+        reads = self._requests()
+        async def send():
+            try:
+                result = await fetch()
+            except RestReadCooldown:
+                raise
+            except Exception as error:
+                if http_status(error) in (429, 405):
+                    raise RestReadCooldown(await reads.cooldown(response_headers(error))) from None
+                # Transport/SDK exceptions can embed authenticated request data.
+                raise RuntimeError(f'SDK {path} {type(error).__name__}; request credentials redacted') from None
+            response = result[1] if isinstance(result, tuple) and len(result) == 3 else result
+            error = result[2] if isinstance(result, tuple) and len(result) == 3 else None
+            if self._is_rate_limit_rejection(response, error):
+                await reads.cooldown()
+            return result
+        if not submission:
+            return await reads.get(path, params, send, 0, priority=priority)
+        await reads.acquire(priority)  # Fail before signing; never queue a stale order.
+        try:
+            reads.stats['sent'] += 1
+            return await send()
+        finally:
+            await reads.invalidate('/api/v1/account', self._account_params())
+
+    async def prepare_signer(self):
+        # SDK construction initializes nonce and check_client verifies the key.
+        # These native calls cannot use the aiohttp cache: reserve both slots.
+        await self._requests().acquire(CRITICAL, cost=2)
+        self.init_signer()
+        log.info('[REQUEST POLICY] host=%s shared_total=60/min reserve=12/24; '
+                 'authenticated queries; account background cache=15s; fresh verification=0.2s',
+                 self._requests().label)
 
     # ------------------------------------------------------------- lifecycle
 
@@ -264,6 +364,7 @@ class LighterVenue:
             api_private_keys={c.api_key_index: c.api_private_key},
             chain_id=self.profile.chain_id,
         )
+        self.signer = signer  # Ensure failed startup can close the SDK HTTP session.
         err = signer.check_client()
         if err is not None:
             raise RuntimeError(
@@ -271,18 +372,29 @@ class LighterVenue:
                 f"(account={c.account_index}, api_key_index={c.api_key_index}, "
                 f"credentials={c.env_prefix}LIGHTER_*, url={self.profile.api_url}): {err}")
         self.signer = signer
+        manager = getattr(signer, 'nonce_manager', None)
+        fetch_nonce = getattr(manager, '_fetch_nonce', None)
+        if fetch_nonce is not None and asyncio.iscoroutinefunction(fetch_nonce):
+            # SDK lazily initializes a nonce inside create_order, and can
+            # refresh it internally after rejection. Count those HTTP reads,
+            # too, rather than assuming one SDK call is always one request.
+            async def guarded_nonce(index):
+                return await self._sdk_request('/api/v1/nextNonce', lambda: fetch_nonce(index),
+                                               params={'account': c.account_index, 'key': index})
+            manager._fetch_nonce = guarded_nonce
+            manager._entropy_nonce_guarded = True
         log.info("[%s] signer ready (account %d, api_key_index %d, credentials %sLIGHTER_*)",
                  self.name, c.account_index, c.api_key_index, c.env_prefix)
 
     def start_tasks(self, stop: asyncio.Event, notify, live: bool) -> list:
         tasks = [asyncio.create_task(
             LighterBookFeed(self.name, self.profile.ws_url, self.market_id,
-                            self.book, notify).run(stop),
+                            self.book, notify, requests=self._requests()).run(stop),
             name=f"book-{self.key}")]
         if live:
             self.orders_feed = AccountOrdersFeed(
                 self.name, self.profile.ws_url, self.market_id,
-                self.conf.lighter_creds.account_index, self.signer)
+                self.conf.lighter_creds.account_index, self.signer, requests=self._requests())
             tasks.append(asyncio.create_task(self.orders_feed.run(stop),
                                              name=f"acct-{self.key}"))
         return tasks
@@ -348,20 +460,24 @@ class LighterVenue:
                 return order
             self._nonce_refresh_required = False
         try:
-            _tx, resp, err = await asyncio.wait_for(self.signer.create_order(
+            _tx, resp, err = await asyncio.wait_for(self._sdk_request('/api/v1/sendTx', lambda: self.signer.create_order(
                 market_index=self.market_id, client_order_index=order.client_id,
                 base_amount=int(round(qty * 10 ** self.size_decimals)),
                 price=int(round(limit_px * 10 ** self.price_decimals)), is_ask=not is_buy,
                 order_type=SignerClient.ORDER_TYPE_LIMIT,
                 time_in_force=SignerClient.ORDER_TIME_IN_FORCE_POST_ONLY,
                 reduce_only=False, order_expiry=SignerClient.DEFAULT_28_DAY_ORDER_EXPIRY),
+                priority=NORMAL, submission=True),
                 timeout=self.settle_timeout)
             if err is not None or (getattr(resp, "code", 200) or 200) != 200:
                 order.rejected = True
                 order.err = (self._rate_limit_rejected()['err'] if self._is_rate_limit_rejection(resp, err)
                              else 'Lighter maker transaction rejected')
         except Exception as error:
-            if getattr(error, 'status', None) == 429:
+            if isinstance(error, RestReadCooldown) and error.source == 'budget':
+                order.rejected, order.err = True, 'RATE_LIMITED: shared request budget, no order sent'
+                self.rate_limit_until = max(self.rate_limit_until, error.until)
+            elif getattr(error, 'status', None) == 429:
                 order.rejected, order.err = True, self._rate_limit_rejected(getattr(error, 'headers', None))['err']
             # Other exceptions are ambiguous: resolve by client index, never resend.
         return order
@@ -379,7 +495,10 @@ class LighterVenue:
                       "authorization" if "authorization" in params else "auth": auth}
             if method == api.account_inactive_orders:
                 kwargs["limit"] = 100
-            response = await method(**kwargs)
+            response = await self._sdk_request('/api/v1/' + getattr(method, '__name__', 'accountOrders'),
+                                              lambda: method(**kwargs), params={
+                                                  'account': self.conf.lighter_creds.account_index,
+                                                  'market': self.market_id})
             for row in response.orders or []:
                 row = row.to_dict() if hasattr(row, "to_dict") else row
                 if int(row.get("client_order_index", -1)) == order.client_id:
@@ -437,13 +556,13 @@ class LighterVenue:
             await self.maker_state(order)
         if order.order_id is None:
             raise RuntimeError("Lighter server order index unknown")
-        _tx, resp, err = await self.signer.cancel_order(
-            market_index=self.market_id, order_index=int(order.order_id))
+        _tx, resp, err = await self._sdk_request('/api/v1/sendTx', lambda: self.signer.cancel_order(
+            market_index=self.market_id, order_index=int(order.order_id)), submission=True)
         if err or (getattr(resp, "code", 200) or 200) != 200:
             raise RuntimeError("Lighter cancellation rejected")
 
     async def send_taker(self, *, is_buy: bool, qty: float, limit_px: float,
-                         reduce_only: bool = False, _retry_nonce: bool = True) -> dict:
+                         reduce_only: bool = False, risk: bool = False, _retry_nonce: bool = True) -> dict:
         """Market order with avg-price protection; settle via account ws."""
         assert self.signer is not None
         if time.time() < self.rate_limit_until:
@@ -459,7 +578,7 @@ class LighterVenue:
         base_amount = int(round(qty * 10 ** self.size_decimals))
         price = int(round(limit_px * 10 ** self.price_decimals))
         try:
-            _tx, resp, err = await self.signer.create_order(
+            _tx, resp, err = await self._sdk_request('/api/v1/sendTx', lambda: self.signer.create_order(
                 market_index=self.market_id,
                 client_order_index=coi,
                 base_amount=base_amount,
@@ -469,10 +588,14 @@ class LighterVenue:
                 time_in_force=SignerClient.ORDER_TIME_IN_FORCE_IMMEDIATE_OR_CANCEL,
                 reduce_only=reduce_only,
                 order_expiry=SignerClient.DEFAULT_IOC_EXPIRY,
-            )
+            ), submission=True, priority=CRITICAL if reduce_only or risk else NORMAL)
         except Exception as e:
             if fut is not None:
                 self.orders_feed.unwatch(coi)
+            if isinstance(e, RestReadCooldown) and e.source == 'budget':
+                self.rate_limit_until = max(self.rate_limit_until, e.until)
+                return dict(status='local-budget-wait', filled_base=0., avg_px=None,
+                            err='RATE_LIMITED: shared request budget, no order sent', unresolved=False)
             if getattr(e, 'status', None) == 429:
                 # The HTTP request was explicitly rejected, not accepted with
                 # an unknown fill. Do not poll for an order that never existed.
@@ -498,7 +621,7 @@ class LighterVenue:
                 if await self._refresh_nonce():
                     log.warning('[%s] API rejected nonce before acceptance; refreshed nonce, retry once', self.name)
                     return await self.send_taker(is_buy=is_buy, qty=qty, limit_px=limit_px,
-                                                 reduce_only=reduce_only, _retry_nonce=False)
+                                                 reduce_only=reduce_only, risk=risk, _retry_nonce=False)
             if "rate limit" in msg.lower():
                 msg = "RATE_LIMITED: " + msg
             return {"status": "send-failed", "filled_base": 0.0, "avg_px": None,
@@ -555,9 +678,13 @@ class LighterVenue:
         try:
             index = self.conf.lighter_creds.api_key_index
             if refresh is not None:
-                await asyncio.wait_for(refresh(index), REST_TIMEOUT)
+                if getattr(manager, '_entropy_nonce_guarded', False):
+                    await asyncio.wait_for(refresh(index), REST_TIMEOUT)
+                else:
+                    await asyncio.wait_for(self._sdk_request('/api/v1/nextNonce', lambda: refresh(index)), REST_TIMEOUT)
             elif synchronous is not None:
-                await asyncio.wait_for(asyncio.to_thread(synchronous, index), REST_TIMEOUT)
+                await asyncio.wait_for(self._sdk_request('/api/v1/nextNonce',
+                                       lambda: asyncio.to_thread(synchronous, index)), REST_TIMEOUT)
             else:
                 log.warning('[%s] SDK nonce refresh unavailable', self.name)
                 return False
@@ -589,14 +716,18 @@ class LighterVenue:
 
     # -------------------------------------------------------------- accounts
 
-    async def _account(self, *, equity_only=False) -> Optional[dict]:
+    def _account_params(self):
+        return {'by': 'index', 'value': str(self.conf.lighter_creds.account_index)}
+
+    async def _account(self, *, equity_only=False, background=False) -> Optional[dict]:
         c = self.conf.lighter_creds
         if c is None or c.account_index is None:
             return None
         data = await self._get("/api/v1/account",
-                               params={"by": "index",
-                                       "value": str(c.account_index)},
-                               cache_ttl=15 if equity_only else .2)
+                               params=self._account_params(),
+                               cache_ttl=15 if equity_only or background else .2,
+                               priority=BACKGROUND if equity_only or background else CRITICAL,
+                               not_before=self.last_traded_ts if not equity_only else 0)
         for acct in data.get("accounts") or []:
             return acct
         return None
@@ -615,19 +746,22 @@ class LighterVenue:
             raise RuntimeError(f"[{self.name}] open orders authentication unavailable")
         method = OrderApi(self.signer.api_client).account_active_orders
         params = inspect.signature(method).parameters
-        response = await method(**{
+        kwargs = {
             "account_index": self.conf.lighter_creds.account_index,
             "market_id": self.market_id,
             "authorization" if "authorization" in params else "auth": auth,
-        })
+        }
+        response = await self._sdk_request('/api/v1/accountActiveOrders', lambda: method(**kwargs),
+                                          params={'account': self.conf.lighter_creds.account_index,
+                                                  'market': self.market_id})
         data = response.to_dict() if hasattr(response, "to_dict") else response
         if (not isinstance(data, dict) or data.get("code") != 200
                 or not isinstance(data.get("orders"), list)):
             raise RuntimeError(f"[{self.name}] invalid open orders response")
         return bool(data["orders"])
 
-    async def fetch_position(self) -> float:
-        acct = await self._account()
+    async def fetch_position(self, *, background=False) -> float:
+        acct = await self._account(background=background)
         if acct is None:
             raise RuntimeError(f"[{self.name}] account not found")
         if not isinstance(acct.get("positions"), list):
@@ -640,6 +774,9 @@ class LighterVenue:
                     raise RuntimeError(f"[{self.name}] invalid position size/sign")
                 return sign * size
         return 0.0
+
+    async def fetch_position_background(self):
+        return await self.fetch_position(background=True)
 
     async def close(self) -> None:
         if self.signer is not None:

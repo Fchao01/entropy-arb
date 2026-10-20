@@ -22,6 +22,7 @@ from .venue_arcus import ArcusVenue
 from .venue_hl import HLVenue
 from .venue_lighter import LighterVenue
 from .telegram import TelegramNotifier
+from .rest_reads import RestReads, RestReadCooldown, BACKGROUND
 
 
 HL_INFO = "https://api.hyperliquid.xyz/info"
@@ -53,9 +54,17 @@ def _decimal_step(value: Any) -> Optional[float]:
 async def _json(session: aiohttp.ClientSession, method: str, url: str,
                 **kwargs) -> Any:
     timeout = aiohttp.ClientTimeout(total=12)
-    async with session.request(method, url, timeout=timeout, **kwargs) as response:
-        response.raise_for_status()
-        return await response.json()
+    async def fetch():
+        async with session.request(method, url, timeout=timeout, **kwargs) as response:
+            response.raise_for_status()
+            data = await response.json()
+            if isinstance(data, dict) and data.get('code') == 23000:
+                raise RestReadCooldown(await RestReads(RH_API).cooldown(response.headers))
+            return data
+    if method == 'GET' and url.startswith(RH_API + '/api/v1/'):
+        return await RestReads(RH_API).get(url[len(RH_API):], kwargs.get('params'), fetch, 30,
+                                         priority=BACKGROUND)
+    return await fetch()
 
 
 async def discover_candidates(session: aiohttp.ClientSession) -> dict:

@@ -248,7 +248,8 @@ class Engine:
         self.venues = {"entropy": self.entropy}
         self.hedge = self._make_venue(cfg.hedge)
         self.venues["hedge"] = self.hedge
-        loads = [asyncio.create_task(v.load_market(), name="load-market")
+        loads = [asyncio.create_task(self._startup_query(v.load_market) if isinstance(v, LighterVenue)
+                                     else v.load_market(), name="load-market")
                  for v in self.venues.values()]
         tasks.extend(loads)
         await asyncio.gather(*loads)
@@ -262,8 +263,11 @@ class Engine:
                     "(see .env.example); use --record-only to run without "
                     "them / 实盘需要在 .env 中配置两个交易所的密钥，仅采集数据"
                     "请用 --record-only")
-            self.entropy.init_signer()
-            self.hedge.init_signer()
+            for v in self.venues.values():
+                if isinstance(v, LighterVenue):
+                    await self._startup_query(v.prepare_signer)
+                else:
+                    v.init_signer()
             for v in self.venues.values():
                 if v.kind == "arcus":
                     await v.verify_live_credentials()
@@ -323,7 +327,7 @@ class Engine:
         else:
             log.warning("LIVE — real orders will be sent (use --record-only "
                         "for credential-less data collection)")
-            await self._reconcile_positions(hedge=False, strict=True)
+            await self._reconcile_startup()
             log.info("starting positions: %s (net %+.6g)",
                      " ".join(f"{v.name}={v.position:+.6g}"
                               for v in self.venues.values()),
@@ -608,10 +612,19 @@ class Engine:
         self._update_evt.set()  # freed venues may have a queued opportunity
 
     def _scan(self, now: float):
+        if self._position_uncertain:
+            return None  # Applies to threshold/spread strategies, too.
         candidate = self._scan_candidate(now)
         if candidate is None:
             return None
         buy, sell, plan = candidate
+        for venue in (buy, sell):
+            ready = getattr(venue, 'shared_request_ready', None)
+            if ready and not ready(critical=plan.action == 'bps_close'):
+                self._schedule_poke(1)
+                if self.bps_strategy:
+                    self.bps_strategy.reason = '共享请求预算等待，暂不开新订单'
+                return None
         blocked = [v for v, sign in ((buy, 1), (sell, -1))
                    if v.key in self._margin_blocks
                    and plan.qty > max(0, -v.position * sign) + 1e-12]
@@ -697,7 +710,7 @@ class Engine:
     # ------------------------------------------------------------- execution
 
     async def _timed_send(self, venue, *, is_buy: bool, qty: float,
-                          limit_px: float, reduce_only: bool = False) -> tuple:
+                          limit_px: float, reduce_only: bool = False, risk: bool = False) -> tuple:
         """Send one leg and return (result, elapsed_ms).
 
         The elapsed value is local event-loop time, so it is suitable for
@@ -711,7 +724,8 @@ class Engine:
         try:
             result = await venue.send_taker(is_buy=is_buy, qty=qty,
                                             limit_px=limit_px,
-                                            **({"reduce_only": True} if reduce_only else {}))
+                                            **({"reduce_only": True} if reduce_only else {}),
+                                            **({'risk': True} if risk and isinstance(venue, LighterVenue) else {}))
         except Exception as e:
             result = {"status": "send-failed", "filled_base": 0.0,
                       "avg_px": None, "err": repr(e), "unresolved": True}
@@ -1335,7 +1349,7 @@ class Engine:
                 else:
                     self._record_send(v)
                     info, _ = await self._timed_send(v, is_buy=not is_sell, qty=qty,
-                                                    limit_px=limit, reduce_only=not topup)
+                                                    limit_px=limit, reduce_only=not topup, risk=True)
                 fill = info.get('filled_base')
                 price = info.get('avg_px')
                 if (isinstance(fill, bool) or not isinstance(fill, (int, float)) or not math.isfinite(fill)
@@ -1432,6 +1446,32 @@ class Engine:
     # phantom hedge oscillations. Grace-guard + venue lock prevent that.
     RECONCILE_GRACE_SEC = 5.0
 
+    async def _reconcile_startup(self):
+        """Bounded startup-only query retries; never send orders while waiting."""
+        await self._startup_query(lambda: self._reconcile_positions(hedge=False, strict=True))
+
+    async def _startup_query(self, query):
+        deadline = time.monotonic() + 180
+        for attempt in range(3):
+            if self.stop.is_set():
+                raise RuntimeError('启动核验已停止，未发送订单')
+            try:
+                await query()
+                return
+            except (RuntimeError, RestReadCooldown) as error:
+                cause = error if isinstance(error, RestReadCooldown) else error.__cause__
+                if not isinstance(cause, RestReadCooldown):
+                    raise
+                delay = max(.1, cause.until - time.time())
+                if attempt == 2 or time.monotonic() + delay >= deadline:
+                    raise RuntimeError('启动仓位查询持续限流，重试已达上限；未发送订单，请检查共享请求总量') from None
+                log.warning('[STARTUP QUERY WAIT] attempt=%d/3 wait=%.1fs; no orders sent', attempt + 1, delay)
+                try:
+                    await asyncio.wait_for(self.stop.wait(), delay)
+                except asyncio.TimeoutError:
+                    continue
+                raise RuntimeError('启动核验等待已停止，未发送订单') from None
+
     async def _reconcile_positions(self, hedge: bool,
                                    strict: bool = False) -> None:
         now = time.time()
@@ -1462,7 +1502,9 @@ class Engine:
             if now - v.last_traded_ts <= self.RECONCILE_GRACE_SEC:
                 return  # traded while waiting for the lock
             try:
-                r = await v.fetch_position()
+                background = getattr(v, 'fetch_position_background', None)
+                r = (await background() if background and not strict and v.key not in self._position_uncertain
+                     else await v.fetch_position())
                 if not math.isfinite(r):
                     raise ValueError('non-finite position')
                 if self.bps_strategy and not strict and abs(r - v.position) > self.bps_strategy.tolerance:
@@ -1505,8 +1547,8 @@ class Engine:
                 if strict:
                     raise RuntimeError(
                         f"[{v.name}] cannot fetch starting position: {e!r}")
+                self._position_uncertain.add(v.key)
                 if self.bps_strategy:
-                    self._position_uncertain.add(v.key)
                     if not self.halted:
                         self.bps_strategy.reason = '等待两边实时仓位复核'
                 # exchange unreachable (e.g. scheduled maintenance): pause
