@@ -17,6 +17,18 @@ def executable_premium(engine, buy, sell, *, maker):
 def execution_signals(engine):
     if not engine.markets_ready:
         return None
+    stale = [venue.name for venue in engine.venues.values()
+             if not venue.book.is_fresh(engine.cfg.staleness_sec)]
+    if stale:
+        # Do not publish executable values from an old book.  The monitor can
+        # still show the stale venue age, but must not make an old edge look
+        # actionable while the execution loop is waiting for fresh books.
+        return {
+            'mode': engine.cfg.strategy_mode,
+            'rows': [],
+            'fresh': False,
+            'stale_venues': stale,
+        }
     primary, hedge = engine.entropy, engine.hedge
     maker = engine.cfg.primary_order_type == 'maker'
     strategy = engine.bps_strategy

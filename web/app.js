@@ -327,9 +327,13 @@ function renderMonitor() {
 function renderSignals(metrics, fresh) {
   const signal = metrics?.execution_signals;
   if (!signal?.rows?.length) {
-    element("signal-summary").textContent = "等待市场连接或新版状态快照";
+    element("signal-summary").textContent = signal?.stale_venues?.length
+      ? `行情过期 · 等待 ${signal.stale_venues.join(" / ")} 的新盘口`
+      : "等待市场连接或新版状态快照";
     element("signal-rows").innerHTML = `<tr><td colspan="6" class="table-empty">暂无信号数据</td></tr>`;
-    element("signal-note").textContent = "展示信号，不改变交易规则。";
+    element("signal-note").textContent = signal?.stale_venues?.length
+      ? "盘口最后更新时间已超过执行配置的行情有效期，旧价差不会用于下单。"
+      : "展示信号，不改变交易规则。";
     return;
   }
   const bps = signal.mode === "bps", spread = signal.mode === "spread";

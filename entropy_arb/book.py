@@ -79,10 +79,18 @@ class OrderBook:
         return self.alive_ts > 0 and time.time() - self.alive_ts <= max_age_sec
 
     def is_fresh(self, max_age_sec: float) -> bool:
-        """Whether the venue feed is alive and the book has been initialized."""
+        """Whether the actual order book was updated recently.
+
+        ``alive_ts`` is transport liveness only: exchange pings and protocol
+        frames can refresh it without changing a bid or ask.  Trading must
+        use the age of the last applied book update instead, otherwise a live
+        websocket can make an old quote look tradable.
+        """
         return (self.ready and bool(self.bids) and bool(self.asks)
+                and self.last_update_ts > 0
                 and self.alive_ts > 0
-                and time.time() - self.alive_ts <= max_age_sec)
+                and time.time() - self.alive_ts <= max_age_sec
+                and time.time() - self.last_update_ts <= max_age_sec)
 
 
 def floor_step(x: float, step: float) -> float:
