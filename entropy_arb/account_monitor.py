@@ -466,8 +466,8 @@ class AccountMonitor:
     # Public discovery/enrichment shares budget with live strategies. Keep this
     # delay outside RestReads.get(): never hold a shared account-cache lock
     # while waiting for the monitor's next polling slot.
-    HTTP_INTERVAL_SEC = 10.0
-    CACHE_TTL = {"account": 15, "orderBooks": 300,
+    HTTP_INTERVAL_SEC = 30.0
+    CACHE_TTL = {"account": 30, "orderBooks": 300,
                  "accountsByL1Address": 300, "recentTrades": 30}
 
     def __init__(self, path: Path):

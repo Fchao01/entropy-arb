@@ -98,9 +98,9 @@ execution:
   max_consecutive_errors: 3    # halt after N straight failures / 连续失败 N 次后停机
   rate_limit_pause_sec: 10.0   # pause a 429'd venue this long / 被限频后的暂停时长
   staleness_sec: 10.0          # a feed older than this is stale / 行情超时判定
-  reconcile_sec: 15.0          # on-chain position sync cadence / 链上持仓核对周期
+  reconcile_sec: 30.0          # on-chain position sync cadence / 链上持仓核对周期
   venue_probe_sec: 30.0        # probe cadence for a down venue / 故障交易所探测周期
-  http_keepalive_sec: 10.0     # keep order-path TLS warm; 0 = off / 订单链路保活
+  http_keepalive_sec: 60.0     # keep order-path TLS warm; 0 = off / 订单链路保活
 
 # ================== DATA RECORDER / 数据采集 ===============================
 # Always-on while the bot runs: samples both real order books 1/sec and

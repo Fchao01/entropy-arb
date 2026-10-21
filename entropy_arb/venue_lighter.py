@@ -251,7 +251,7 @@ class LighterVenue:
                    query_session=None, priority=BACKGROUND, not_before=0):
         reads = self._requests()
         headers = self._query_headers()  # Authentication errors must not use a cached success.
-        ttl = {'/api/v1/account': .2, '/api/v1/status': 10,
+        ttl = {'/api/v1/account': .2, '/api/v1/status': 30,
                '/api/v1/orderBooks': 300, '/api/v1/orderBookDetails': 30}.get(path, 0)
         async def fetch():
             async with (query_session or self.session).get(
@@ -329,7 +329,7 @@ class LighterVenue:
         await self._requests().acquire(CRITICAL, cost=2)
         self.init_signer()
         log.info('[REQUEST POLICY] host=%s shared_total=60/min reserve=12/24; '
-                 'authenticated queries; account background cache=15s; equity cache=60s; fresh verification=0.2s; '
+                 'authenticated queries; account background cache=30s; equity cache=60s; fresh verification=0.2s; '
                  'bulk market metadata + shared keepalive cache=30s',
                  self._requests().label)
 
@@ -744,7 +744,7 @@ class LighterVenue:
             return None
         data = await self._get("/api/v1/account",
                                params=self._account_params(),
-                               cache_ttl=60 if equity_only else (15 if background else .2),
+                               cache_ttl=60 if equity_only else (30 if background else .2),
                                priority=priority if priority is not None else (BACKGROUND if equity_only or background else CRITICAL),
                                not_before=self.last_traded_ts if not equity_only else 0)
         for acct in data.get("accounts") or []:

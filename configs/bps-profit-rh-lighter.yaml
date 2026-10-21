@@ -46,9 +46,9 @@ execution:
   max_consecutive_errors: 3
   rate_limit_pause_sec: 10.0
   staleness_sec: 10.0
-  reconcile_sec: 15.0
+  reconcile_sec: 30.0
   venue_probe_sec: 30.0
-  http_keepalive_sec: 10.0
+  http_keepalive_sec: 60.0
 recorder:
   enabled: true
   csv: logs/{symbol}/minutes.csv

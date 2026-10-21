@@ -423,15 +423,17 @@ def test_workers_share_background_metadata_and_pings_for_two_minutes(monkeypatch
             clock[0] = initial + elapsed
             if elapsed % 10 == 0:
                 await asyncio.gather(*(v.warm_http() for v in workers))
+            if elapsed == 45:
+                # Verify before the scheduled background read at the same
+                # timestamp, proving that an old background snapshot is not
+                # reused for a critical check.
+                before = calls.count('account')
+                await workers[0].fetch_position()
+                assert calls.count('account') == before + 1
             if elapsed % 15 == 0:
                 assert await asyncio.gather(*(v.fetch_position_background() for v in workers)) == list(range(1, worker_count + 1))
             if elapsed % 30 == 0:
                 await asyncio.gather(*(v.fetch_equity() for v in workers))
-            if elapsed == 45:
-                # A real verification still bypasses the background TTL.
-                before = calls.count('account')
-                await workers[0].fetch_position()
-                assert calls.count('account') == before + 1
         assert all(v.mark_price == 100 + i for i,v in enumerate(workers))
         assert calls.count('status') <= 5
         assert calls.count('orderBookDetails') <= 5

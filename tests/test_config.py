@@ -62,6 +62,8 @@ def test_minimal_defaults():
     assert cfg.take_fraction == 0.5          # defaults kick in
     assert cfg.recorder_enabled is True
     assert cfg.entropy.symbol == cfg.hedge.symbol == "SNDK"
+    assert cfg.reconcile_sec == 30.0
+    assert cfg.http_keepalive_sec == 60.0
 
 
 def test_independent_market_symbols_keep_pair_log_paths():
